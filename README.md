@@ -18,13 +18,15 @@ OREF is a Python framework for building reliable, auditable robotic process auto
 - Status enum — `Status(StrEnum)` for execution lifecycle: pending, in_progress, successful, failed, skipped
 - Skill model — base `Skill` class users subclass to define automation steps
 - Transaction model — groups skills into an executable unit with ordering and failure tracking
+- Execution engine — sequential execution with business/system exception semantics
+- Retry logic — immediate retry of retryable system failures in the same run
+- SQLite persistence — save/load transactions with crash recovery for interrupted runs
+- Logging — structured stdlib logging with text or JSON output
 
 **Planned:**
-- Execution engine — sequential skill execution with status tracking
-- Retry logic — automatic retry of failed skills
-- SQLite persistence — save/load/resume transactions
 - Configuration — TOML-based settings
-- Logging — structured per-skill event logging
+- Integration wiring in `main.py`
+- Example skills and expanded documentation
 
 ## Quick Start
 
@@ -39,7 +41,7 @@ pytest
 
 ## Project Structure
 
-```
+```text
 oref/          # Framework core
 skills/        # Your automation skills go here
 tests/         # Test suite
@@ -48,11 +50,11 @@ main.py        # Entry point
 
 ## How It Works
 
-1. Define your automation as a **Transaction** containing a list of **Skills**
-2. Each Skill is a unit of work with clear input/output
-3. The Engine will execute skills in order, tracking status *(planned)*
-4. On failure, only failed skills will be retried *(planned)*
-5. Progress will be persisted so you can resume from where you left off *(planned)*
+1. Define your automation as a **Transaction** containing a list of **Skills**.
+2. Each Skill is a unit of work with clear input/output.
+3. The **Engine** executes skills in order, tracking status.
+4. On failure, retryable technical failures can be retried immediately.
+5. Progress can be persisted so you can resume from where you left off.
 
 ## License
 

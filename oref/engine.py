@@ -1,6 +1,12 @@
 """Engine — sequential skill execution with status tracking."""
 
+from __future__ import annotations
+
+import logging
+from typing import Literal
+
 from oref.exceptions import BusinessException, SystemException
+from oref.logger import get_logger
 from oref.skill import Skill
 from oref.status import Status
 from oref.transaction import Transaction
@@ -26,15 +32,22 @@ class Engine:
         Retry is immediate, within the same Engine.run() call.
     """
 
-    def __init__(self, max_retries: int = 0) -> None:
+    def __init__(
+        self,
+        max_retries: int = 0,
+        *,
+        logger: logging.Logger | None = None,
+    ) -> None:
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
         self.max_retries: int = max_retries
+        self.logger: logging.Logger = logger if logger is not None else get_logger()
 
     def run(self, transaction: Transaction, context: dict[str, object] | None = None) -> None:
         """Execute all skills in the transaction, retrying retryable failed skills up to max_retries times."""
         ctx: dict[str, object] = context if context is not None else {}
         transaction.status = Status.IN_PROGRESS
+        self._log_transaction_started(transaction)
 
         self._execute_pass(transaction, ctx, blocked=None)
 
@@ -56,6 +69,7 @@ class Engine:
             transaction.status = Status.SUCCESSFUL
         else:
             transaction.status = Status.FAILED
+        self._log_transaction_completed(transaction)
 
     def _retryable_failed_skills(self, transaction: Transaction) -> list[Skill]:
         """Return failed skills eligible for retry (last exception is SystemException)."""
@@ -84,17 +98,21 @@ class Engine:
                 continue
 
             skill.status = Status.IN_PROGRESS
+            self._log_skill_started(transaction, skill)
             try:
                 skill.execute(ctx)
                 skill.status = Status.SUCCESSFUL
+                self._log_skill_completed(transaction, skill)
             except BusinessException as exc:
                 exc.retry_number = transaction.retry_count
                 skill.status = Status.FAILED
                 skill.exceptions.append(exc)
+                self._log_skill_failed(transaction, skill, exc, level="warning")
             except SystemException as exc:
                 exc.retry_number = transaction.retry_count
                 skill.status = Status.FAILED
                 skill.exceptions.append(exc)
+                self._log_skill_failed(transaction, skill, exc, level="error")
                 break
             except Exception as exc:
                 wrapped = SystemException(
@@ -104,5 +122,78 @@ class Engine:
                 )
                 skill.status = Status.FAILED
                 skill.exceptions.append(wrapped)
+                self._log_skill_failed(transaction, skill, wrapped, level="error")
                 break
+
+    def _log_transaction_started(self, transaction: Transaction) -> None:
+        self.logger.info(
+            "Transaction started",
+            extra={
+                "event": "transaction_started",
+                "transaction_id": transaction.id,
+                "transaction_reference": transaction.reference,
+                "transaction_status": transaction.status,
+                "retry_count": transaction.retry_count,
+            },
+        )
+
+    def _log_transaction_completed(self, transaction: Transaction) -> None:
+        self.logger.info(
+            "Transaction completed",
+            extra={
+                "event": "transaction_completed",
+                "transaction_id": transaction.id,
+                "transaction_reference": transaction.reference,
+                "transaction_status": transaction.status,
+                "retry_count": transaction.retry_count,
+            },
+        )
+
+    def _log_skill_started(self, transaction: Transaction, skill: Skill) -> None:
+        self.logger.info(
+            "Skill started",
+            extra={
+                "event": "skill_started",
+                "transaction_id": transaction.id,
+                "skill_name": skill.name,
+                "skill_execution_order": skill.execution_order,
+                "skill_status": skill.status,
+                "retry_count": transaction.retry_count,
+            },
+        )
+
+    def _log_skill_completed(self, transaction: Transaction, skill: Skill) -> None:
+        self.logger.info(
+            "Skill completed",
+            extra={
+                "event": "skill_completed",
+                "transaction_id": transaction.id,
+                "skill_name": skill.name,
+                "skill_execution_order": skill.execution_order,
+                "skill_status": skill.status,
+                "retry_count": transaction.retry_count,
+            },
+        )
+
+    def _log_skill_failed(
+        self,
+        transaction: Transaction,
+        skill: Skill,
+        exc: BusinessException | SystemException,
+        *,
+        level: Literal["warning", "error"],
+    ) -> None:
+        getattr(self.logger, level)(
+            f"Skill failed: {exc}",
+            extra={
+                "event": "skill_failed",
+                "transaction_id": transaction.id,
+                "skill_name": skill.name,
+                "skill_execution_order": skill.execution_order,
+                "skill_status": skill.status,
+                "retry_count": transaction.retry_count,
+                "retry_number": exc.retry_number,
+                "exception_type": type(exc).__name__,
+            },
+        )
 
