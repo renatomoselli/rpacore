@@ -1,11 +1,61 @@
-"""OREF entry point."""
+"""OREF entry point — the developer's wiring layer.
 
-from oref import __version__
+This file is the first thing to edit when adapting OREF to a real automation.
+Replace the example skills and transaction below with your own.
+"""
+
+from __future__ import annotations
+
+from oref import (
+    Engine,
+    Transaction,
+    configure_logger,
+    load_config,
+    save_transaction,
+)
+
+# --- Replace these with your own Skill subclasses ---
+from skills.greet_user import ConfirmOutput, ValidateInput, WriteGreeting
 
 
-def main() -> None:
-    print(f"OREF v{__version__}")
+def main(
+    *,
+    config_path: str = "config.toml",
+    db_path: str | None = None,
+    output_path: str | None = None,
+) -> None:
+    # 1. Load configuration from config.toml (falls back to defaults if absent).
+    #    Pass config_path to point at a different file (useful for testing).
+    config = load_config(config_path)
+
+    # 2. Configure the logger once for the entire run.
+    configure_logger(level=str(config["log_level"]))
+
+    # 3. Build the transaction.
+    #    Explicitly instantiate skills so the wiring is readable and greppable.
+    #    Replace these with your own skills.
+    _output_path = output_path if output_path is not None else "greeting.txt"
+    arguments = {"name": "Alice", "output_path": _output_path}
+
+    transaction = Transaction(reference="greet-alice")
+    transaction.skills = [
+        ValidateInput(name="validate_input", execution_order=1, arguments=arguments),
+        WriteGreeting(name="write_greeting", execution_order=2, arguments=arguments),
+        ConfirmOutput(name="confirm_output", execution_order=3, arguments=arguments),
+    ]
+
+    # 4. Run the engine.
+    engine = Engine(max_retries=int(config["max_retries"]))
+    engine.run(transaction)
+
+    # 5. Persist the result so failed runs can be inspected (and resumed).
+    #    db_path defaults to config value; pass an override for testing.
+    _db_path = db_path if db_path is not None else str(config["db_path"])
+    save_transaction(transaction, db_path=_db_path)
+
+    print(f"Transaction {transaction.id}: {transaction.status}")
 
 
 if __name__ == "__main__":
     main()
+
