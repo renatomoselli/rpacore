@@ -7,6 +7,7 @@ from typing import Literal
 
 from oref.exceptions import BusinessException, SystemException
 from oref.logger import get_logger
+from oref.screenshot import capture_screenshot
 from oref.skill import Skill
 from oref.status import Status
 from oref.transaction import Transaction
@@ -37,11 +38,13 @@ class Engine:
         max_retries: int = 0,
         *,
         logger: logging.Logger | None = None,
+        screenshot_dir: str = "",
     ) -> None:
         if max_retries < 0:
             raise ValueError(f"max_retries must be >= 0, got {max_retries}")
         self.max_retries: int = max_retries
         self.logger: logging.Logger = logger if logger is not None else get_logger()
+        self.screenshot_dir: str = screenshot_dir
 
     def run(self, transaction: Transaction, context: dict[str, object] | None = None) -> None:
         """Execute all skills in the transaction, retrying retryable failed skills up to max_retries times."""
@@ -105,11 +108,15 @@ class Engine:
                 self._log_skill_completed(transaction, skill)
             except BusinessException as exc:
                 exc.retry_number = transaction.retry_count
+                if self.screenshot_dir:
+                    exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 skill.status = Status.FAILED
                 skill.exceptions.append(exc)
                 self._log_skill_failed(transaction, skill, exc, level="warning")
             except SystemException as exc:
                 exc.retry_number = transaction.retry_count
+                if self.screenshot_dir:
+                    exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 skill.status = Status.FAILED
                 skill.exceptions.append(exc)
                 self._log_skill_failed(transaction, skill, exc, level="error")
@@ -120,6 +127,8 @@ class Engine:
                     action=skill.name,
                     retry_number=transaction.retry_count,
                 )
+                if self.screenshot_dir:
+                    wrapped.screenshot_path = capture_screenshot(self.screenshot_dir)
                 skill.status = Status.FAILED
                 skill.exceptions.append(wrapped)
                 self._log_skill_failed(transaction, skill, wrapped, level="error")

@@ -1,3 +1,4 @@
 max_retries = 0
 log_level = "INFO"
 db_path = "oref.db"
+screenshot_dir = ""

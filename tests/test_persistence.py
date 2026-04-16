@@ -108,6 +108,28 @@ class TestSaveAndLoad:
         assert loaded.skills[0].exceptions[0].retry_number == 0
         assert loaded.skills[0].exceptions[1].retry_number == 1
 
+    def test_roundtrip_preserves_screenshot_path(self, db_path) -> None:
+        skill = Skill("capture", 1)
+        skill.status = Status.FAILED
+        exc = SystemException("crash", action="capture", screenshot_path="/tmp/shot.png")
+        skill.exceptions.append(exc)
+        tx = make_transaction(skills=[skill])
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+        loaded_exc = loaded.skills[0].exceptions[0]
+        assert loaded_exc.screenshot_path == "/tmp/shot.png"
+
+    def test_roundtrip_preserves_empty_screenshot_path(self, db_path) -> None:
+        skill = Skill("noscreenshot", 1)
+        skill.status = Status.FAILED
+        exc = BusinessException("bad data", action="noscreenshot")
+        skill.exceptions.append(exc)
+        tx = make_transaction(skills=[skill])
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+        loaded_exc = loaded.skills[0].exceptions[0]
+        assert loaded_exc.screenshot_path == ""
+
     def test_not_found_raises_key_error(self, db_path) -> None:
         with pytest.raises(KeyError, match="not-a-real-id"):
             load_transaction("not-a-real-id", db_path)

@@ -9,6 +9,7 @@ _DEFAULTS: dict[str, object] = {
     "max_retries": 0,
     "log_level": "INFO",
     "db_path": "oref.db",
+    "screenshot_dir": "",
 }
 
 
@@ -27,6 +28,10 @@ def _validate(config: dict[str, object]) -> None:
     db_path = config["db_path"]
     if not isinstance(db_path, str):
         raise TypeError(f"db_path must be a str, got {type(db_path).__name__!r}")
+
+    screenshot_dir = config["screenshot_dir"]
+    if not isinstance(screenshot_dir, str):
+        raise TypeError(f"screenshot_dir must be a str, got {type(screenshot_dir).__name__!r}")
 
 
 def load_config(path: str | Path = "config.toml") -> dict[str, object]:

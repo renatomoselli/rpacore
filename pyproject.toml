@@ -9,6 +9,9 @@ license = "Apache-2.0"
 dev = [
     "pytest>=7.0",
 ]
+screenshots = [
+    "mss>=9.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["oref*"]

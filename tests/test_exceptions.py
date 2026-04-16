@@ -20,6 +20,7 @@ class TestBusinessException:
         exc = BusinessException("test")
         assert exc.action == ""
         assert exc.retry_number == 0
+        assert exc.screenshot_path == ""
         assert isinstance(exc.datetime_occurred, datetime)
 
     def test_custom_fields(self) -> None:
@@ -29,10 +30,12 @@ class TestBusinessException:
             action="validate_invoice",
             retry_number=2,
             datetime_occurred=dt,
+            screenshot_path="/tmp/shot.png",
         )
         assert exc.action == "validate_invoice"
         assert exc.retry_number == 2
         assert exc.datetime_occurred == dt
+        assert exc.screenshot_path == "/tmp/shot.png"
 
     def test_stops_execution_is_false(self) -> None:
         exc = BusinessException("test")
@@ -56,6 +59,7 @@ class TestSystemException:
         exc = SystemException("test")
         assert exc.action == ""
         assert exc.retry_number == 0
+        assert exc.screenshot_path == ""
         assert isinstance(exc.datetime_occurred, datetime)
 
     def test_custom_fields(self) -> None:
@@ -65,10 +69,12 @@ class TestSystemException:
             action="save_record",
             retry_number=1,
             datetime_occurred=dt,
+            screenshot_path="/tmp/crash.png",
         )
         assert exc.action == "save_record"
         assert exc.retry_number == 1
         assert exc.datetime_occurred == dt
+        assert exc.screenshot_path == "/tmp/crash.png"
 
     def test_stops_execution_is_true(self) -> None:
         exc = SystemException("test")

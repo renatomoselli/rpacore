@@ -47,6 +47,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             action            TEXT NOT NULL,
             retry_number      INTEGER NOT NULL,
             datetime_occurred TEXT NOT NULL,
+            screenshot_path   TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
         )
     """)
@@ -91,8 +92,9 @@ def save_transaction(transaction: Transaction, db_path: str = "oref.db") -> None
                 for exc in skill.exceptions:
                     conn.execute(
                         "INSERT INTO exceptions "
-                        "(skill_id, exception_type, message, action, retry_number, datetime_occurred) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        "(skill_id, exception_type, message, action, retry_number, "
+                        "datetime_occurred, screenshot_path) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             sid,
                             "business" if isinstance(exc, BusinessException) else "system",
@@ -100,6 +102,7 @@ def save_transaction(transaction: Transaction, db_path: str = "oref.db") -> None
                             exc.action,
                             exc.retry_number,
                             exc.datetime_occurred.isoformat(),
+                            exc.screenshot_path,
                         ),
                     )
     finally:
@@ -136,18 +139,20 @@ def load_transaction(transaction_id: str, db_path: str = "oref.db") -> Transacti
             skill.status = Status.FAILED if raw_status == Status.IN_PROGRESS else Status(raw_status)
 
             exc_rows = conn.execute(
-                "SELECT exception_type, message, action, retry_number, datetime_occurred "
-                "FROM exceptions WHERE skill_id = ? ORDER BY id",
+                "SELECT exception_type, message, action, retry_number, datetime_occurred, "
+                "screenshot_path FROM exceptions WHERE skill_id = ? ORDER BY id",
                 (sr["id"],),
             ).fetchall()
             for er in exc_rows:
                 dt = datetime.fromisoformat(er["datetime_occurred"])
+                screenshot = er["screenshot_path"]
                 if er["exception_type"] == "business":
                     exc: BusinessException | SystemException = BusinessException(
                         er["message"],
                         action=er["action"],
                         retry_number=er["retry_number"],
                         datetime_occurred=dt,
+                        screenshot_path=screenshot,
                     )
                 else:
                     exc = SystemException(
@@ -155,6 +160,7 @@ def load_transaction(transaction_id: str, db_path: str = "oref.db") -> Transacti
                         action=er["action"],
                         retry_number=er["retry_number"],
                         datetime_occurred=dt,
+                        screenshot_path=screenshot,
                     )
                 skill.exceptions.append(exc)
             skills.append(skill)

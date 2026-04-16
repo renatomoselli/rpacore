@@ -45,7 +45,10 @@ def main(
     ]
 
     # 4. Run the engine.
-    engine = Engine(max_retries=int(config["max_retries"]))
+    engine = Engine(
+        max_retries=int(config["max_retries"]),
+        screenshot_dir=str(config["screenshot_dir"]),
+    )
     engine.run(transaction)
 
     # 5. Persist the result so failed runs can be inspected (and resumed).
