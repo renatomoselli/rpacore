@@ -67,12 +67,13 @@ class TestEngineScreenshotIntegration:
 
     def test_engine_captures_screenshot_on_business_exception(self, tmp_path: object) -> None:
         from oref import Engine, Transaction
+        from oref.context import ProcessContext
         from oref.exceptions import BusinessException
         from oref.skill import Skill
         from oref.status import Status
 
         class FailSkill(Skill):
-            def execute(self, context: dict[str, object]) -> None:
+            def execute(self, ctx: ProcessContext) -> None:
                 raise BusinessException("bad data", action="fail")
 
         tx = Transaction(reference="test")
@@ -80,7 +81,7 @@ class TestEngineScreenshotIntegration:
 
         with patch("oref.engine.capture_screenshot", return_value="/tmp/shot.png") as mock_cap:
             engine = Engine(screenshot_dir="screenshots")
-            engine.run(tx)
+            engine.run(ProcessContext(transaction=tx))
 
         assert tx.skills[0].status == Status.FAILED
         assert tx.skills[0].exceptions[0].screenshot_path == "/tmp/shot.png"
@@ -88,12 +89,13 @@ class TestEngineScreenshotIntegration:
 
     def test_engine_captures_screenshot_on_system_exception(self, tmp_path: object) -> None:
         from oref import Engine, Transaction
+        from oref.context import ProcessContext
         from oref.exceptions import SystemException
         from oref.skill import Skill
         from oref.status import Status
 
         class FailSkill(Skill):
-            def execute(self, context: dict[str, object]) -> None:
+            def execute(self, ctx: ProcessContext) -> None:
                 raise SystemException("crash", action="fail")
 
         tx = Transaction(reference="test")
@@ -101,18 +103,19 @@ class TestEngineScreenshotIntegration:
 
         with patch("oref.engine.capture_screenshot", return_value="/tmp/crash.png") as mock_cap:
             engine = Engine(screenshot_dir="screenshots")
-            engine.run(tx)
+            engine.run(ProcessContext(transaction=tx))
 
         assert tx.skills[0].exceptions[0].screenshot_path == "/tmp/crash.png"
         mock_cap.assert_called_once_with("screenshots")
 
     def test_engine_captures_screenshot_on_unhandled_exception(self) -> None:
         from oref import Engine, Transaction
+        from oref.context import ProcessContext
         from oref.skill import Skill
         from oref.status import Status
 
         class FailSkill(Skill):
-            def execute(self, context: dict[str, object]) -> None:
+            def execute(self, ctx: ProcessContext) -> None:
                 raise RuntimeError("unexpected")
 
         tx = Transaction(reference="test")
@@ -120,17 +123,18 @@ class TestEngineScreenshotIntegration:
 
         with patch("oref.engine.capture_screenshot", return_value="/tmp/unhandled.png"):
             engine = Engine(screenshot_dir="screenshots")
-            engine.run(tx)
+            engine.run(ProcessContext(transaction=tx))
 
         assert tx.skills[0].exceptions[0].screenshot_path == "/tmp/unhandled.png"
 
     def test_engine_skips_screenshot_when_dir_empty(self) -> None:
         from oref import Engine, Transaction
+        from oref.context import ProcessContext
         from oref.exceptions import BusinessException
         from oref.skill import Skill
 
         class FailSkill(Skill):
-            def execute(self, context: dict[str, object]) -> None:
+            def execute(self, ctx: ProcessContext) -> None:
                 raise BusinessException("bad data", action="fail")
 
         tx = Transaction(reference="test")
@@ -138,7 +142,7 @@ class TestEngineScreenshotIntegration:
 
         with patch("oref.engine.capture_screenshot") as mock_cap:
             engine = Engine(screenshot_dir="")
-            engine.run(tx)
+            engine.run(ProcessContext(transaction=tx))
 
         mock_cap.assert_not_called()
         assert tx.skills[0].exceptions[0].screenshot_path == ""

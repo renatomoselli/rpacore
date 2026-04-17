@@ -4,6 +4,7 @@ import sqlite3
 
 import pytest
 
+from oref.context import ProcessContext
 from oref.exceptions import BusinessException, SystemException
 from oref.persistence import load_transaction, save_transaction
 from oref.skill import Skill
@@ -221,7 +222,7 @@ class TestResumeScenario:
         counts: dict[str, int] = {"a": 0, "b": 0}
 
         class TrackSkill(Skill):
-            def execute(self, context: dict[str, object]) -> None:
+            def execute(self, ctx: ProcessContext) -> None:
                 counts[self.name] += 1
 
         loaded = load_transaction(tx.id, db_path)
@@ -232,7 +233,8 @@ class TestResumeScenario:
             track.exceptions = skill.exceptions
             loaded.skills[i] = track
 
-        Engine().run(loaded)
+        from oref.engine import Engine
+        Engine().run(ProcessContext(transaction=loaded))
 
         assert counts["a"] == 0  # already successful, engine skips it
         assert counts["b"] == 1

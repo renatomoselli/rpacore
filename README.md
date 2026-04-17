@@ -90,28 +90,28 @@ PENDING ──▶ IN_PROGRESS ──▶ SUCCESSFUL
 
 ## Writing a Skill
 
-Subclass `Skill` and implement `execute(context)`:
+Subclass `Skill` and implement `execute(ctx: ProcessContext)`:
 
 ```python
-from oref import Skill, BusinessException, SystemException
+from oref import Skill, ProcessContext, BusinessException, SystemException
 
 class FetchRecord(Skill):
-    def execute(self, context: dict) -> None:
+    def execute(self, ctx: ProcessContext) -> None:
         record_id = self.arguments.get("record_id")
         if not record_id:
             raise BusinessException(
                 message="record_id is required",
                 action="FetchRecord",
             )
-        # do the work; write results into context for downstream skills
-        context["record"] = fetch_from_source(record_id)
+        # do the work; write results into ctx.data for downstream skills
+        ctx.data["record"] = fetch_from_source(record_id)
 ```
 
 Wire it in `main.py`:
 
 ```python
 from skills.my_skills import FetchRecord, ProcessRecord, WriteOutput
-from oref import Transaction, Engine, load_config, configure_logger, save_transaction
+from oref import Transaction, Engine, ProcessContext, load_config, configure_logger, save_transaction
 
 config = load_config("config.toml")
 configure_logger(level=config["log_level"])
@@ -123,7 +123,8 @@ tx.skills = [
     WriteOutput(name="write_output", execution_order=3),
 ]
 
-Engine(max_retries=config["max_retries"]).run(tx)
+ctx = ProcessContext(transaction=tx, config=config)
+Engine(max_retries=config["max_retries"]).run(ctx)
 save_transaction(tx, db_path=config["db_path"])
 ```
 

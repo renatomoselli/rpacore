@@ -57,19 +57,25 @@ class TestSkillCustomArguments:
 
 class TestSkillExecute:
     def test_base_skill_raises_not_implemented(self) -> None:
+        from oref.context import ProcessContext
+        from oref.transaction import Transaction
         skill = Skill("login", 1)
+        ctx = ProcessContext(transaction=Transaction(reference="test"))
         with pytest.raises(NotImplementedError, match="login"):
-            skill.execute({})
+            skill.execute(ctx)
 
     def test_subclass_can_implement_execute(self) -> None:
+        from oref.context import ProcessContext
+        from oref.transaction import Transaction
+
         class LoginSkill(Skill):
-            def execute(self, context: dict[str, object]) -> None:
-                context["logged_in"] = True
+            def execute(self, ctx: ProcessContext) -> None:
+                ctx.data["logged_in"] = True
 
         skill = LoginSkill("login", 1)
-        ctx: dict[str, object] = {}
+        ctx = ProcessContext(transaction=Transaction(reference="test"))
         skill.execute(ctx)
-        assert ctx["logged_in"] is True
+        assert ctx.data["logged_in"] is True
 
 
 class TestSkillStatusTransitions:

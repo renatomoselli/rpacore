@@ -126,7 +126,7 @@ Each skill must:
 * handle its own exceptions
 * report status
 
-Users create skills by subclassing `Skill` and implementing `execute(context)`.
+Users create skills by subclassing `Skill` and implementing `execute(ctx: ProcessContext)`.
 
 ---
 

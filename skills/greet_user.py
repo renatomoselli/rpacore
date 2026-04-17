@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from oref.context import ProcessContext
 from oref.exceptions import BusinessException, SystemException
 from oref.skill import Skill
 
@@ -28,7 +29,7 @@ class ValidateInput(Skill):
     next skill because BusinessException does not stop the engine.
     """
 
-    def execute(self, context: dict[str, object]) -> None:
+    def execute(self, ctx: ProcessContext) -> None:
         name = self.arguments.get("name")
         if not name or not str(name).strip():
             raise BusinessException(
@@ -46,7 +47,7 @@ class WriteGreeting(Skill):
     existence."
     """
 
-    def execute(self, context: dict[str, object]) -> None:
+    def execute(self, ctx: ProcessContext) -> None:
         name = self.arguments.get("name")
         if not name or not str(name).strip():
             raise BusinessException(
@@ -70,7 +71,7 @@ class ConfirmOutput(Skill):
     SystemException stops execution immediately and is retryable by the engine.
     """
 
-    def execute(self, context: dict[str, object]) -> None:
+    def execute(self, ctx: ProcessContext) -> None:
         name = str(self.arguments.get("name", ""))
         output_path = Path(str(self.arguments.get("output_path", "greeting.txt")))
         desired_content = f"Hello, {name}\n"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
+from oref.context import ProcessContext
 from oref.exceptions import BusinessException, SystemException
 from oref.logger import get_logger
 from oref.screenshot import capture_screenshot
@@ -46,13 +47,13 @@ class Engine:
         self.logger: logging.Logger = logger if logger is not None else get_logger()
         self.screenshot_dir: str = screenshot_dir
 
-    def run(self, transaction: Transaction, context: dict[str, object] | None = None) -> None:
+    def run(self, ctx: ProcessContext) -> None:
         """Execute all skills in the transaction, retrying retryable failed skills up to max_retries times."""
-        ctx: dict[str, object] = context if context is not None else {}
+        transaction = ctx.transaction
         transaction.status = Status.IN_PROGRESS
         self._log_transaction_started(transaction)
 
-        self._execute_pass(transaction, ctx, blocked=None)
+        self._execute_pass(ctx, blocked=None)
 
         while transaction.retry_count < self.max_retries:
             retryable = self._retryable_failed_skills(transaction)
@@ -66,7 +67,7 @@ class Engine:
                 id(s) for s in transaction.failed_skills()
                 if s.exceptions and isinstance(s.exceptions[-1], BusinessException)
             }
-            self._execute_pass(transaction, ctx, blocked=business_failed)
+            self._execute_pass(ctx, blocked=business_failed)
 
         if all(s.status in (Status.SUCCESSFUL, Status.SKIPPED) for s in transaction.skills):
             transaction.status = Status.SUCCESSFUL
@@ -83,8 +84,7 @@ class Engine:
 
     def _execute_pass(
         self,
-        transaction: Transaction,
-        ctx: dict[str, object],
+        ctx: ProcessContext,
         blocked: set[int] | None,
     ) -> None:
         """Run one execution pass.
@@ -94,6 +94,7 @@ class Engine:
         not re-executed, while still-PENDING skills that were stopped by a prior
         SystemException are allowed to run.
         """
+        transaction = ctx.transaction
         for skill in transaction.ordered_skills():
             if skill.status in (Status.SUCCESSFUL, Status.SKIPPED):
                 continue

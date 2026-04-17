@@ -5,8 +5,17 @@ from __future__ import annotations
 import pytest
 
 from oref import Engine, Status, Transaction
+from oref.context import ProcessContext
 from oref.exceptions import BusinessException, SystemException
 from skills.greet_user import ConfirmOutput, ValidateInput, WriteGreeting
+
+
+def _ctx(tx: Transaction) -> ProcessContext:
+    return ProcessContext(transaction=tx)
+
+
+def _bare_ctx() -> ProcessContext:
+    return ProcessContext(transaction=Transaction(reference="test"))
 
 
 def _transaction(tmp_path, *, name: str | None = "Alice") -> Transaction:
@@ -28,7 +37,7 @@ def _transaction(tmp_path, *, name: str | None = "Alice") -> Transaction:
 class TestHappyPath:
     def test_all_skills_succeed(self, tmp_path):
         tx = _transaction(tmp_path)
-        Engine().run(tx)
+        Engine().run(_ctx(tx))
 
         assert tx.status == Status.SUCCESSFUL
         for skill in tx.skills:
@@ -36,7 +45,7 @@ class TestHappyPath:
 
     def test_greeting_file_contains_name(self, tmp_path):
         tx = _transaction(tmp_path)
-        Engine().run(tx)
+        Engine().run(_ctx(tx))
 
         output_path = tmp_path / "greeting.txt"
         assert output_path.read_text(encoding="utf-8") == "Hello, Alice\n"
@@ -45,7 +54,7 @@ class TestHappyPath:
 class TestBusinessExceptionPath:
     def test_missing_name_fails_validate_input(self, tmp_path):
         tx = _transaction(tmp_path, name=None)
-        Engine().run(tx)
+        Engine().run(_ctx(tx))
 
         validate = tx.skills[0]
         assert validate.status == Status.FAILED
@@ -54,7 +63,7 @@ class TestBusinessExceptionPath:
     def test_execution_continues_after_business_exception(self, tmp_path):
         """Engine keeps running after BusinessException — downstream skills execute."""
         tx = _transaction(tmp_path, name=None)
-        Engine().run(tx)
+        Engine().run(_ctx(tx))
 
         # WriteGreeting ran (engine continued past ValidateInput's BusinessException)
         # but raised its own BusinessException because name is still missing.
@@ -64,7 +73,7 @@ class TestBusinessExceptionPath:
 
     def test_transaction_fails_when_any_skill_fails(self, tmp_path):
         tx = _transaction(tmp_path, name=None)
-        Engine().run(tx)
+        Engine().run(_ctx(tx))
 
         assert tx.status == Status.FAILED
 
@@ -78,8 +87,8 @@ class TestIdempotency:
             execution_order=1,
             arguments={"name": "Alice", "output_path": str(output_path)},
         )
-        skill.execute({})
-        skill.execute({})
+        skill.execute(_bare_ctx())
+        skill.execute(_bare_ctx())
 
         assert output_path.read_text(encoding="utf-8") == "Hello, Alice\n"
 
@@ -93,7 +102,7 @@ class TestIdempotency:
             execution_order=1,
             arguments={"name": "Alice", "output_path": str(output_path)},
         )
-        skill.execute({})
+        skill.execute(_bare_ctx())
 
         assert output_path.read_text(encoding="utf-8") == "Hello, Alice\n"
 
@@ -107,7 +116,7 @@ class TestIdempotency:
             execution_order=1,
             arguments={"name": "Alice", "output_path": str(output_path)},
         )
-        skill.execute({})
+        skill.execute(_bare_ctx())
 
         assert output_path.read_text(encoding="utf-8") == "Hello, Alice\n"
 
@@ -121,7 +130,7 @@ class TestSystemExceptionPath:
             arguments={"output_path": str(output_path)},
         )
         with pytest.raises(SystemException):
-            skill.execute({})
+            skill.execute(_bare_ctx())
 
     def test_confirm_output_raises_system_exception_when_content_wrong(self, tmp_path):
         output_path = tmp_path / "greeting.txt"
@@ -133,7 +142,7 @@ class TestSystemExceptionPath:
             arguments={"name": "Alice", "output_path": str(output_path)},
         )
         with pytest.raises(SystemException):
-            skill.execute({})
+            skill.execute(_bare_ctx())
 
     def test_transaction_fails_when_confirm_output_fails(self, tmp_path):
         """Transaction where WriteGreeting is replaced by a skill that does NOT
@@ -147,7 +156,7 @@ class TestSystemExceptionPath:
             # WriteGreeting deliberately omitted — file will not exist
             ConfirmOutput(name="confirm_output", execution_order=2, arguments=arguments),
         ]
-        Engine().run(tx)
+        Engine().run(_ctx(tx))
 
         confirm = tx.skills[1]
         assert confirm.status == Status.FAILED

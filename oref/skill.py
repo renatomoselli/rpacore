@@ -1,13 +1,20 @@
 """Skill — the unit of work in OREF."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from oref.exceptions import BusinessException, SystemException
 from oref.status import Status
+
+if TYPE_CHECKING:
+    from oref.context import ProcessContext
 
 
 class Skill:
     """A single unit of work within a transaction.
 
-    Users subclass Skill and implement execute(context).
+    Users subclass Skill and implement execute(ctx: ProcessContext).
     """
 
     def __init__(
@@ -23,7 +30,7 @@ class Skill:
         self.arguments: dict[str, object] = dict(arguments) if arguments is not None else {}
         self.exceptions: list[BusinessException | SystemException] = []
 
-    def execute(self, context: dict[str, object]) -> None:
+    def execute(self, ctx: ProcessContext) -> None:
         """Execute this skill's logic.
 
         Subclasses must override this method.

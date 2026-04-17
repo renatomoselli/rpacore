@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from oref import (
     Engine,
+    ProcessContext,
     Transaction,
     configure_logger,
     load_config,
@@ -49,7 +50,8 @@ def main(
         max_retries=int(config["max_retries"]),
         screenshot_dir=str(config["screenshot_dir"]),
     )
-    engine.run(transaction)
+    ctx = ProcessContext(transaction=transaction, config=config)
+    engine.run(ctx)
 
     # 5. Persist the result so failed runs can be inspected (and resumed).
     #    db_path defaults to config value; pass an override for testing.

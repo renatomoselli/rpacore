@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from oref.context import ProcessContext
 from oref.engine import Engine
 from oref.exceptions import BusinessException
 from oref.logger import configure_logger
@@ -14,12 +15,12 @@ from oref.transaction import Transaction
 
 
 class SuccessSkill(Skill):
-    def execute(self, context: dict[str, object]) -> None:
-        context[self.name] = "done"
+    def execute(self, ctx: ProcessContext) -> None:
+        ctx.data[self.name] = "done"
 
 
 class BusinessFailSkill(Skill):
-    def execute(self, context: dict[str, object]) -> None:
+    def execute(self, ctx: ProcessContext) -> None:
         raise BusinessException("rule violated", action=self.name)
 
 
@@ -74,7 +75,7 @@ class TestEngineLogging:
             skills=[SuccessSkill("a", 1), SuccessSkill("b", 2)],
         )
 
-        Engine(logger=logger).run(tx)
+        Engine(logger=logger).run(ProcessContext(transaction=tx))
 
         events = [json.loads(line)["event"] for line in stream.getvalue().splitlines()]
         assert events == [
@@ -91,7 +92,7 @@ class TestEngineLogging:
         logger = configure_logger(name="oref.test.engine.fail", fmt="json", stream=stream)
         tx = Transaction(reference="T1", skills=[BusinessFailSkill("validate", 1)])
 
-        Engine(logger=logger).run(tx)
+        Engine(logger=logger).run(ProcessContext(transaction=tx))
 
         records = [json.loads(line) for line in stream.getvalue().splitlines()]
         failed = next(record for record in records if record["event"] == "skill_failed")
@@ -106,7 +107,7 @@ class TestEngineLogging:
         logger = configure_logger(name="oref.test.engine.complete", fmt="json", stream=stream)
         tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
 
-        Engine(logger=logger).run(tx)
+        Engine(logger=logger).run(ProcessContext(transaction=tx))
 
         records = [json.loads(line) for line in stream.getvalue().splitlines()]
         completed = records[-1]
