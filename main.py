@@ -10,6 +10,7 @@ from oref import (
     Engine,
     ProcessContext,
     Transaction,
+    build_credential_provider,
     configure_logger,
     load_config,
     save_transaction,
@@ -50,7 +51,8 @@ def main(
         max_retries=int(config["max_retries"]),
         screenshot_dir=str(config["screenshot_dir"]),
     )
-    ctx = ProcessContext(transaction=transaction, config=config)
+    credentials = build_credential_provider(str(config["credential_provider"]))
+    ctx = ProcessContext(transaction=transaction, config=config, credentials=credentials)
     engine.run(ctx)
 
     # 5. Persist the result so failed runs can be inspected (and resumed).

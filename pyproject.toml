@@ -12,6 +12,9 @@ dev = [
 screenshots = [
     "mss>=9.0",
 ]
+keyring = [
+    "keyring",
+]
 
 [tool.setuptools.packages.find]
 include = ["oref*"]

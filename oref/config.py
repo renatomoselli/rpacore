@@ -10,6 +10,7 @@ _DEFAULTS: dict[str, object] = {
     "log_level": "INFO",
     "db_path": "oref.db",
     "screenshot_dir": "",
+    "credential_provider": "env",
 }
 
 
@@ -32,6 +33,10 @@ def _validate(config: dict[str, object]) -> None:
     screenshot_dir = config["screenshot_dir"]
     if not isinstance(screenshot_dir, str):
         raise TypeError(f"screenshot_dir must be a str, got {type(screenshot_dir).__name__!r}")
+
+    credential_provider = config["credential_provider"]
+    if not isinstance(credential_provider, str):
+        raise TypeError(f"credential_provider must be a str, got {type(credential_provider).__name__!r}")
 
 
 def load_config(path: str | Path = "config.toml") -> dict[str, object]:
