@@ -3,3 +3,8 @@ log_level = "INFO"
 db_path = "oref.db"
 screenshot_dir = ""
 credential_provider = "env"
+
+[queue]
+db_path = "queue.db"
+claim_timeout = 30
+max_retries = 3
