@@ -8,8 +8,9 @@ from oref.credentials import CredentialNotFoundError, CredentialProvider, EnvCre
 from oref.engine import Engine
 from oref.exceptions import BusinessException, SystemException
 from oref.logger import configure_logger, get_logger
-from oref.persistence import load_transaction, save_transaction
+from oref.persistence import list_transactions, load_transaction, save_transaction
 from oref.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
+from oref.report import SkillReport, TransactionReport, generate_report, render_html, render_text
 from oref.runner import run_queue_loop
 from oref.skill import Skill
 from oref.status import Status
@@ -23,19 +24,25 @@ __all__ = [
     "CredentialProvider",
     "Engine",
     "EnvCredentialProvider",
+    "generate_report",
     "get_logger",
     "KeyringCredentialProvider",
+    "list_transactions",
     "load_config",
     "load_transaction",
     "ProcessContext",
     "QueueItem",
     "QueueProvider",
     "QueueStatus",
+    "render_html",
+    "render_text",
     "run_queue_loop",
     "save_transaction",
+    "SkillReport",
     "SqliteQueue",
     "SystemException",
     "Skill",
     "Status",
     "Transaction",
+    "TransactionReport",
 ]

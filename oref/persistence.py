@@ -2,7 +2,7 @@
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 from oref.exceptions import BusinessException, SystemException
 from oref.skill import Skill
@@ -23,9 +23,15 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             id          TEXT PRIMARY KEY,
             reference   TEXT NOT NULL,
             status      TEXT NOT NULL,
-            retry_count INTEGER NOT NULL
+            retry_count INTEGER NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT ''
         )
     """)
+    # Migration: add created_at for databases created before this column existed.
+    try:
+        conn.execute("ALTER TABLE transactions ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # Column already present.
     conn.execute("""
         CREATE TABLE IF NOT EXISTS skills (
             id              TEXT PRIMARY KEY,
@@ -66,11 +72,19 @@ def save_transaction(transaction: Transaction, db_path: str = "oref.db") -> None
     conn = _connect(db_path)
     try:
         _ensure_schema(conn)
+        now_iso = datetime.now(timezone.utc).isoformat()
         with conn:
+            # INSERT OR IGNORE preserves the original created_at on subsequent saves.
             conn.execute(
-                "INSERT OR REPLACE INTO transactions (id, reference, status, retry_count) "
-                "VALUES (?, ?, ?, ?)",
-                (transaction.id, transaction.reference, transaction.status, transaction.retry_count),
+                "INSERT OR IGNORE INTO transactions "
+                "(id, reference, status, retry_count, created_at) VALUES (?, ?, ?, ?, ?)",
+                (transaction.id, transaction.reference, transaction.status, transaction.retry_count, now_iso),
+            )
+            conn.execute(
+                "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
+                "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END "
+                "WHERE id = ?",
+                (transaction.reference, transaction.status, transaction.retry_count, now_iso, transaction.id),
             )
             # Delete all existing skills (cascades to exceptions via ON DELETE CASCADE).
             conn.execute("DELETE FROM skills WHERE transaction_id = ?", (transaction.id,))
@@ -178,3 +192,39 @@ def load_transaction(transaction_id: str, db_path: str = "oref.db") -> Transacti
         )
     finally:
         conn.close()
+
+
+def list_transactions(
+    db_path: str = "oref.db",
+    *,
+    status: Status | None = None,
+    since: datetime | None = None,
+    limit: int = 100,
+) -> list[Transaction]:
+    """Return transactions matching optional filters, newest first.
+
+    Args:
+        db_path: Path to the SQLite database.
+        status:  Only return transactions with this status. Returns all if None.
+        since:   Only return transactions created at or after this datetime.
+        limit:   Maximum number of results. Defaults to 100.
+    """
+    conn = _connect(db_path)
+    try:
+        _ensure_schema(conn)
+        query = "SELECT id FROM transactions WHERE 1=1"
+        params: list[object] = []
+        if status is not None:
+            query += " AND status = ?"
+            params.append(str(status))
+        if since is not None:
+            query += " AND created_at >= ?"
+            params.append(since.isoformat())
+        query += " ORDER BY created_at DESC, id ASC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(query, params).fetchall()
+        transaction_ids = [row["id"] for row in rows]
+    finally:
+        conn.close()
+
+    return [load_transaction(tx_id, db_path) for tx_id in transaction_ids]
