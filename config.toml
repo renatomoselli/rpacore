@@ -8,3 +8,12 @@ credential_provider = "env"
 db_path = "queue.db"
 claim_timeout = 30
 max_retries = 3
+
+# [notification.email]
+# host = "smtp.example.com"
+# port = 587
+# from_addr = "oref@example.com"
+# to_addrs = ["admin@example.com"]
+
+# [notification.webhook]
+# url = "https://hooks.example.com/oref"

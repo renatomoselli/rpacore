@@ -11,7 +11,10 @@ from oref import (
     ProcessContext,
     Transaction,
     build_credential_provider,
+    build_notifiers,
     configure_logger,
+    dispatch,
+    generate_report,
     load_config,
     save_transaction,
 )
@@ -59,6 +62,12 @@ def main(
     #    db_path defaults to config value; pass an override for testing.
     _db_path = db_path if db_path is not None else str(config["db_path"])
     save_transaction(transaction, db_path=_db_path)
+
+    # 6. Dispatch notifications (email / webhook) if configured.
+    notifiers = build_notifiers(config, credentials)
+    if notifiers:
+        report = generate_report(transaction)
+        dispatch(notifiers, report)
 
     print(f"Transaction {transaction.id}: {transaction.status}")
 

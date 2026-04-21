@@ -152,9 +152,13 @@ class TestSqliteQueueCRUD:
 
 class TestSqliteQueueFIFO:
     def test_fifo_order(self, tmp_path):
+        from datetime import timedelta
         q = make_queue(tmp_path)
-        for ref in ["first", "second", "third"]:
-            q.add(make_item(ref))
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for i, ref in enumerate(["first", "second", "third"]):
+            item = make_item(ref)
+            item.created_at = base + timedelta(seconds=i)
+            q.add(item)
         for expected in ["first", "second", "third"]:
             item = q.next_item()
             assert item.reference == expected
@@ -352,3 +356,41 @@ class TestRunQueueLoop:
         stored = q.get_item(item.id)
         assert stored.status == QueueStatus.SUCCESSFUL
         assert stored.claimed_by == socket.gethostname()
+
+    def test_notifier_called_after_item(self, tmp_path):
+        """Notifiers receive a TransactionReport after each engine run."""
+        from oref.notify import Notifier
+        from oref.report import TransactionReport
+
+        sent: list[TransactionReport] = []
+
+        class _RecordingNotifier:
+            def send(self, report: TransactionReport) -> None:
+                sent.append(report)
+
+        q = make_queue(tmp_path, max_retries=0)
+        q.add(make_item("ref-notify"))
+        engine, credentials, config = self._make_ctx_parts()
+
+        def build_transaction(qi: QueueItem) -> Transaction:
+            t = Transaction(reference=qi.reference)
+            t.skills = [_SuccessSkill()]
+            return t
+
+        run_queue_loop(q, engine, build_transaction, config, credentials, notifiers=[_RecordingNotifier()])
+        assert len(sent) == 1
+        assert sent[0].reference == "ref-notify"
+
+    def test_notifiers_default_is_empty(self, tmp_path):
+        """run_queue_loop works without a notifiers argument (backward compat)."""
+        q = make_queue(tmp_path, max_retries=0)
+        q.add(make_item("ref-no-notify"))
+        engine, credentials, config = self._make_ctx_parts()
+
+        def build_transaction(qi: QueueItem) -> Transaction:
+            t = Transaction(reference=qi.reference)
+            t.skills = [_SuccessSkill()]
+            return t
+
+        # Should not raise even though no notifiers are wired.
+        run_queue_loop(q, engine, build_transaction, config, credentials)

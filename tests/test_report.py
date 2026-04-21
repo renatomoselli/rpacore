@@ -331,10 +331,16 @@ class TestListTransactions:
         assert len(result) == 3
 
     def test_multiple_filters_combined(self, tmp_path):
+        import sqlite3 as _sqlite3
         db = str(tmp_path / "oref.db")
         tx1 = Transaction(reference="before-fail")
         tx1.status = Status.FAILED
         save_transaction(tx1, db)
+        # Force tx1 into the past so the cutoff is reliably after it.
+        conn = _sqlite3.connect(db)
+        conn.execute("UPDATE transactions SET created_at = '2000-01-01T00:00:00+00:00' WHERE id = ?", (tx1.id,))
+        conn.commit()
+        conn.close()
 
         cutoff = datetime.now(timezone.utc)
 

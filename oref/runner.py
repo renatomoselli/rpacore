@@ -10,7 +10,9 @@ from oref.context import ProcessContext
 from oref.credentials import CredentialProvider
 from oref.engine import Engine
 from oref.logger import get_logger
+from oref.notify import Notifier, dispatch
 from oref.queue import QueueItem, QueueProvider
+from oref.report import generate_report
 from oref.status import Status
 from oref.transaction import Transaction
 
@@ -23,6 +25,7 @@ def run_queue_loop(
     credentials: CredentialProvider,
     *,
     worker_id: str = "",
+    notifiers: list[Notifier] | None = None,
     logger: logging.Logger | None = None,
 ) -> None:
     """Drain a queue by running each item through the engine.
@@ -41,11 +44,13 @@ def run_queue_loop(
         config:            Framework config dict (passed to ProcessContext).
         credentials:       Credential provider (passed to ProcessContext).
         worker_id:         Worker identifier passed to queue.next_item(). Defaults to hostname.
+        notifiers:         Optional list of notifiers to call after each transaction. Defaults to [].
         logger:            Optional logger. Defaults to the OREF logger.
     """
     log = logger if logger is not None else get_logger()
     if not worker_id:
         worker_id = socket.gethostname()
+    _notifiers: list[Notifier] = notifiers if notifiers is not None else []
 
     while True:
         item = queue.next_item(worker_id)
@@ -65,6 +70,9 @@ def run_queue_loop(
                 credentials=credentials,
             )
             engine.run(ctx)
+
+            report = generate_report(ctx.transaction)
+            dispatch(_notifiers, report, logger=log)
 
             if ctx.transaction.status == Status.SUCCESSFUL:
                 queue.complete(item.id)
