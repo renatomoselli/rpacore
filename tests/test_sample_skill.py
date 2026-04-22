@@ -7,7 +7,7 @@ import pytest
 from oref import Engine, Status, Transaction
 from oref.context import ProcessContext
 from oref.exceptions import BusinessException, SystemException
-from skills.greet_user import ConfirmOutput, ValidateInput, WriteGreeting
+from examples.sample_skill import ConfirmOutput, ValidateInput, WriteGreeting
 
 
 def _ctx(tx: Transaction) -> ProcessContext:

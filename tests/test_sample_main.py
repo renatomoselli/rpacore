@@ -10,7 +10,7 @@ from __future__ import annotations
 import textwrap
 from pathlib import Path
 
-import main as main_module
+import examples.sample_main as main_module
 
 
 def _write_config(tmp_path: Path) -> tuple[str, str, str]:

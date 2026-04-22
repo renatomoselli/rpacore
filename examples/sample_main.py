@@ -20,7 +20,7 @@ from oref import (
 )
 
 # --- Replace these with your own Skill subclasses ---
-from skills.greet_user import ConfirmOutput, ValidateInput, WriteGreeting
+from examples.sample_skill import ConfirmOutput, ValidateInput, WriteGreeting
 
 
 def main(

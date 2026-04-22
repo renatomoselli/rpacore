@@ -2,8 +2,26 @@
 name = "oref"
 version = "0.1.0"
 description = "Open Robotic Enterprise Framework — deterministic, stateful RPA in Python"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+authors = [
+    { name = "Renato Moselli" },
+]
+keywords = ["rpa", "automation", "workflow", "enterprise"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+
+[project.urls]
+Homepage = "https://github.com/renatomoselli/oref"
+Repository = "https://github.com/renatomoselli/oref"
+Issues = "https://github.com/renatomoselli/oref/issues"
 
 [project.optional-dependencies]
 dev = [
