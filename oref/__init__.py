@@ -12,7 +12,7 @@ from oref.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifier
 from oref.persistence import list_transactions, load_transaction, save_transaction
 from oref.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
 from oref.report import SkillReport, TransactionReport, generate_report, render_html, render_text
-from oref.runner import run_queue_loop
+from oref.runner import QueueRunSummary, run_queue_loop
 from oref.skill import Skill
 from oref.status import Status
 from oref.transaction import Transaction
@@ -38,6 +38,7 @@ __all__ = [
     "ProcessContext",
     "QueueItem",
     "QueueProvider",
+    "QueueRunSummary",
     "QueueStatus",
     "WebhookNotifier",
     "render_html",

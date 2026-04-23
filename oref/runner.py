@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import socket
+from dataclasses import dataclass, field
 from typing import Callable
 
 from oref.context import ProcessContext
@@ -17,6 +18,16 @@ from oref.status import Status
 from oref.transaction import Transaction
 
 
+@dataclass
+class QueueRunSummary:
+    """Counts from a completed run_queue_loop() call."""
+
+    processed: int = field(default=0)
+    completed: int = field(default=0)
+    failed: int = field(default=0)
+    callback_errors: int = field(default=0)
+
+
 def run_queue_loop(
     queue: QueueProvider,
     engine: Engine,
@@ -27,15 +38,25 @@ def run_queue_loop(
     worker_id: str = "",
     notifiers: list[Notifier] | None = None,
     logger: logging.Logger | None = None,
-) -> None:
+    after_item: Callable[[QueueItem, Transaction | None, Exception | None], None] | None = None,
+) -> QueueRunSummary:
     """Drain a queue by running each item through the engine.
 
     Claims items one at a time until the queue is empty. For each item:
     - Calls build_transaction(item) to construct a Transaction (user responsibility).
     - Builds a ProcessContext with the item's payload in ctx.data.
     - Runs engine.run(ctx).
+        - Generates a report and dispatches notifiers after engine.run(ctx).
     - Calls queue.complete() if transaction.status is SUCCESSFUL, queue.fail() otherwise.
     - Also calls queue.fail() if build_transaction() or any unexpected error raises.
+    - Calls after_item(item, transaction, error) once per item regardless of outcome.
+            transaction is None if build_transaction() raised; error is None on normal paths
+            and set for unexpected processing or post-processing failures.
+      Fires before the final queue state transition (complete/fail). If the callback
+      raises on a success-path item, the item is still marked complete (the automation
+      ran) but the error is counted in QueueRunSummary.callback_errors. If the callback
+      raises on a failure-path item, queue.fail() is called as normal. The loop always
+      continues regardless.
 
     Args:
         queue:             The queue to drain.
@@ -46,16 +67,28 @@ def run_queue_loop(
         worker_id:         Worker identifier passed to queue.next_item(). Defaults to hostname.
         notifiers:         Optional list of notifiers to call after each transaction. Defaults to [].
         logger:            Optional logger. Defaults to the OREF logger.
+        after_item:        Optional callback fired after each item. Receives (item, transaction, error).
+
+    Returns:
+        QueueRunSummary with counts of processed, completed, and failed items.
     """
     log = logger if logger is not None else get_logger()
     if not worker_id:
         worker_id = socket.gethostname()
     _notifiers: list[Notifier] = notifiers if notifiers is not None else []
+    summary = QueueRunSummary()
 
     while True:
         item = queue.next_item(worker_id)
         if item is None:
             break
+
+        summary.processed += 1
+        transaction: Transaction | None = None
+        ctx: ProcessContext | None = None
+        error: Exception | None = None
+        originally_intended_complete = False
+        callback_failed = False
 
         log.info(
             "Processing queue item",
@@ -70,26 +103,53 @@ def run_queue_loop(
                 credentials=credentials,
             )
             engine.run(ctx)
+            originally_intended_complete = ctx.transaction.status == Status.SUCCESSFUL
+        except Exception as exc:
+            error = exc
+            log.exception(
+                "Unexpected error processing queue item",
+                extra={"event": "queue_item_error", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
+            )
 
-            report = generate_report(ctx.transaction)
-            dispatch(_notifiers, report, logger=log)
-
-            if ctx.transaction.status == Status.SUCCESSFUL:
-                queue.complete(item.id)
-                log.info(
-                    "Completed queue item",
-                    extra={"event": "queue_item_complete", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
+        if ctx is not None:
+            try:
+                report = generate_report(ctx.transaction)
+                dispatch(_notifiers, report, logger=log)
+            except Exception as exc:
+                if error is None:
+                    error = exc
+                log.exception(
+                    "Post-run reporting failed; preserving queue outcome",
+                    extra={"event": "queue_item_postprocess_error", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
                 )
-            else:
-                queue.fail(item.id)
+
+        if after_item is not None:
+            try:
+                after_item(item, transaction, error)
+            except Exception:
+                callback_failed = True
+                log.exception(
+                    "after_item callback raised during post-processing",
+                    extra={"event": "after_item_error", "queue_item_id": item.id, "worker_id": worker_id},
+                )
+
+        if originally_intended_complete:
+            queue.complete(item.id)
+            summary.completed += 1
+            if callback_failed:
+                summary.callback_errors += 1
+            log.info(
+                "Completed queue item",
+                extra={"event": "queue_item_complete", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
+            )
+        else:
+            queue.fail(item.id)
+            summary.failed += 1
+            if not error and not callback_failed and ctx is not None:
                 log.warning(
                     "Queue item failed (transaction status: %s)",
                     ctx.transaction.status,
                     extra={"event": "queue_item_fail", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
                 )
-        except Exception:
-            queue.fail(item.id)
-            log.exception(
-                "Unexpected error processing queue item",
-                extra={"event": "queue_item_error", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
-            )
+
+    return summary
