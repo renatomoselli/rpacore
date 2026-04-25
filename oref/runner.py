@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import socket
+import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -39,6 +40,7 @@ def run_queue_loop(
     notifiers: list[Notifier] | None = None,
     logger: logging.Logger | None = None,
     after_item: Callable[[QueueItem, Transaction | None, Exception | None], None] | None = None,
+    stop_event: threading.Event | None = None,
 ) -> QueueRunSummary:
     """Drain a queue by running each item through the engine.
 
@@ -68,6 +70,10 @@ def run_queue_loop(
         notifiers:         Optional list of notifiers to call after each transaction. Defaults to [].
         logger:            Optional logger. Defaults to the OREF logger.
         after_item:        Optional callback fired after each item. Receives (item, transaction, error).
+        stop_event:        Optional threading.Event. When set, the loop stops before claiming
+                           the next item. The item currently in-flight completes normally.
+                           The caller is responsible for setting the event (e.g. from a
+                           signal handler). The library never calls signal.signal().
 
     Returns:
         QueueRunSummary with counts of processed, completed, and failed items.
@@ -79,6 +85,8 @@ def run_queue_loop(
     summary = QueueRunSummary()
 
     while True:
+        if stop_event is not None and stop_event.is_set():
+            break
         item = queue.next_item(worker_id)
         if item is None:
             break

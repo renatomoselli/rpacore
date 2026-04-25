@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Iterator
 
 import pytest
@@ -69,6 +70,7 @@ def _run(
     *,
     build_raises: Exception | None = None,
     after_item=None,
+    stop_event: threading.Event | None = None,
 ) -> tuple[QueueRunSummary, _FakeQueue]:
     queue = _FakeQueue(items)
 
@@ -85,6 +87,7 @@ def _run(
         credentials=_CREDS,
         worker_id="test-worker",
         after_item=after_item,
+        stop_event=stop_event,
     )
     return summary, queue
 
@@ -290,3 +293,42 @@ class TestAfterItem:
             after_item=lambda item, tx, err: None,
         )
         assert summary.callback_errors == 0
+
+
+# ---------------------------------------------------------------------------
+# stop_event
+# ---------------------------------------------------------------------------
+
+class TestStopEvent:
+    def test_stop_event_set_before_loop_processes_nothing(self) -> None:
+        event = threading.Event()
+        event.set()
+        summary, queue = _run([_item("a"), _item("b"), _item("c")], stop_event=event)
+        assert summary.processed == 0
+        assert queue.completed == []
+        assert queue.failed == []
+
+    def test_stop_event_set_after_n_items_exits_early(self) -> None:
+        event = threading.Event()
+        calls: list[str] = []
+
+        def _after(item, tx, err):
+            calls.append(item.id)
+            if len(calls) >= 2:
+                event.set()
+
+        summary, queue = _run(
+            [_item("a"), _item("b"), _item("c")],
+            after_item=_after,
+            stop_event=event,
+        )
+        assert summary.processed == 2
+        assert summary.completed == 2
+        assert summary.failed == 0
+        assert queue.completed == ["a", "b"]
+        assert queue.failed == []
+
+    def test_no_stop_event_loop_drains_normally(self) -> None:
+        summary, queue = _run([_item("a"), _item("b"), _item("c")])
+        assert summary.processed == 3
+        assert queue.completed == ["a", "b", "c"]

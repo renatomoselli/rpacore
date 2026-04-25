@@ -394,3 +394,43 @@ class TestRunQueueLoop:
 
         # Should not raise even though no notifiers are wired.
         run_queue_loop(q, engine, build_transaction, config, credentials)
+
+    def test_stop_event_prevents_claiming_next_sqlite_item(self, tmp_path):
+        q = make_queue(tmp_path, max_retries=0)
+        first = make_item("ref-stop-1")
+        second = make_item("ref-stop-2")
+        q.add(first)
+        q.add(second)
+
+        engine, credentials, config = self._make_ctx_parts()
+        stop_event = threading.Event()
+        seen: list[str] = []
+
+        def build_transaction(qi: QueueItem) -> Transaction:
+            t = Transaction(reference=qi.reference)
+            t.skills = [_SuccessSkill()]
+            return t
+
+        def after_item(item: QueueItem, tx: Transaction | None, err: Exception | None) -> None:
+            seen.append(item.id)
+            stop_event.set()
+
+        run_queue_loop(
+            q,
+            engine,
+            build_transaction,
+            config,
+            credentials,
+            after_item=after_item,
+            stop_event=stop_event,
+        )
+
+        first_stored = q.get_item(first.id)
+        second_stored = q.get_item(second.id)
+        assert seen == [first.id]
+        assert first_stored is not None
+        assert first_stored.status == QueueStatus.SUCCESSFUL
+        assert second_stored is not None
+        assert second_stored.status == QueueStatus.PENDING
+        assert second_stored.claimed_by == ""
+        assert second_stored.claimed_at is None
