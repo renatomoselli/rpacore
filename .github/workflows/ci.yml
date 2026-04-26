@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -26,3 +26,59 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  package:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Check dist metadata
+        run: twine check dist/*
+
+      - name: Install wheel into clean environment
+        run: |
+          python -m venv .venv-check
+          .venv-check/bin/pip install --no-index --find-links=dist oref
+
+      - name: Smoke import public API
+        run: |
+          .venv-check/bin/python - <<'EOF'
+          import oref
+          assert hasattr(oref, 'Engine')
+          assert hasattr(oref, 'Transaction')
+          assert hasattr(oref, 'Skill')
+          assert hasattr(oref, 'BusinessException')
+          assert hasattr(oref, 'SystemException')
+          assert hasattr(oref, 'Status')
+          assert hasattr(oref, 'QueueRunSummary')
+          assert hasattr(oref, 'run_queue_loop')
+          print('smoke import OK')
+          EOF
+
+      - name: Verify examples/ absent from wheel
+        run: |
+          python - <<'EOF'
+          import zipfile, sys, glob
+          wheels = glob.glob('dist/*.whl')
+          assert wheels, 'No wheel found in dist/'
+          with zipfile.ZipFile(wheels[0]) as zf:
+              names = zf.namelist()
+          leaked = [n for n in names if n.startswith('examples/')]
+          if leaked:
+              print('ERROR: examples/ leaked into wheel:', leaked)
+              sys.exit(1)
+          print('wheel contents OK — examples/ absent')
+          EOF
