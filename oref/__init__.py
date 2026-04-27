@@ -11,6 +11,7 @@ from oref.logger import configure_logger, get_logger
 from oref.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifiers, dispatch
 from oref.persistence import list_transactions, load_transaction, save_transaction
 from oref.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
+from oref.recovery import resume_transaction
 from oref.report import SkillReport, TransactionReport, generate_report, render_html, render_text
 from oref.runner import QueueRunSummary, run_queue_loop
 from oref.skill import Skill
@@ -40,6 +41,7 @@ __all__ = [
     "QueueProvider",
     "QueueRunSummary",
     "QueueStatus",
+    "resume_transaction",
     "WebhookNotifier",
     "render_html",
     "render_text",

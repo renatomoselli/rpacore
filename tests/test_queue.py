@@ -396,9 +396,13 @@ class TestRunQueueLoop:
         run_queue_loop(q, engine, build_transaction, config, credentials)
 
     def test_stop_event_prevents_claiming_next_sqlite_item(self, tmp_path):
+        from datetime import timedelta
         q = make_queue(tmp_path, max_retries=0)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         first = make_item("ref-stop-1")
+        first.created_at = base
         second = make_item("ref-stop-2")
+        second.created_at = base + timedelta(seconds=1)
         q.add(first)
         q.add(second)
 
