@@ -89,15 +89,19 @@ class TestLoadConfig:
         toml = tmp_path / "config.toml"
         toml.write_text('max_retries = "3"\n', encoding="utf-8")
 
-        with pytest.raises(TypeError, match="max_retries"):
+        with pytest.raises(TypeError) as exc_info:
             load_config(toml)
+
+        assert str(exc_info.value) == "max_retries expected int; got str value='3'"
 
     def test_negative_max_retries_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
         toml.write_text("max_retries = -1\n", encoding="utf-8")
 
-        with pytest.raises(ValueError, match="max_retries"):
+        with pytest.raises(ValueError) as exc_info:
             load_config(toml)
+
+        assert str(exc_info.value) == "max_retries expected int >= 0; got int value=-1"
 
     def test_bool_max_retries_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
@@ -110,12 +114,16 @@ class TestLoadConfig:
         toml = tmp_path / "config.toml"
         toml.write_text("log_level = 1\n", encoding="utf-8")
 
-        with pytest.raises(TypeError, match="log_level"):
+        with pytest.raises(TypeError) as exc_info:
             load_config(toml)
+
+        assert str(exc_info.value) == "log_level expected str; got int value=1"
 
     def test_invalid_db_path_type_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
         toml.write_text("db_path = 123\n", encoding="utf-8")
 
-        with pytest.raises(TypeError, match="db_path"):
+        with pytest.raises(TypeError) as exc_info:
             load_config(toml)
+
+        assert str(exc_info.value) == "db_path expected str; got int value=123"

@@ -97,8 +97,12 @@ class TestEmailNotifierConfig:
 
     def test_missing_host_raises(self):
         cfg = {"notification": {"email": {"from_addr": "a@b.com", "to_addrs": ["x@b.com"]}}}
-        with pytest.raises(ValueError, match="host"):
+        with pytest.raises(ValueError) as exc_info:
             EmailNotifier(cfg, _creds())
+
+        assert str(exc_info.value) == (
+            "notification.email.host expected non-empty str; got str value=''"
+        )
 
     def test_bad_host_type_raises(self):
         cfg = {"notification": {"email": {"host": 123, "from_addr": "a@b.com", "to_addrs": ["x@b.com"]}}}
@@ -137,12 +141,18 @@ class TestEmailNotifierConfig:
         cfg = {"notification": {"email": {
             "host": "h", "from_addr": "a@b.com", "to_addrs": ["x@b.com"], "port": True,
         }}}
-        with pytest.raises(TypeError, match="port"):
+        with pytest.raises(TypeError) as exc_info:
             EmailNotifier(cfg, _creds())
 
+        assert str(exc_info.value) == (
+            "notification.email.port expected int; got bool value=True"
+        )
+
     def test_bad_notification_section_type(self):
-        with pytest.raises(TypeError, match="notification"):
+        with pytest.raises(TypeError) as exc_info:
             EmailNotifier({"notification": "bad"}, _creds())
+
+        assert str(exc_info.value) == "notification expected dict; got str value='bad'"
 
     def test_bad_email_section_type(self):
         with pytest.raises(TypeError, match="email"):
@@ -311,8 +321,12 @@ class TestWebhookNotifierConfig:
         assert n.url == "https://hooks.example.com/notify"
 
     def test_missing_url_raises(self):
-        with pytest.raises(ValueError, match="url"):
+        with pytest.raises(ValueError) as exc_info:
             WebhookNotifier({"notification": {"webhook": {}}})
+
+        assert str(exc_info.value) == (
+            "notification.webhook.url expected non-empty str; got str value=''"
+        )
 
     def test_bad_url_type_raises(self):
         with pytest.raises(TypeError, match="url"):
@@ -339,8 +353,12 @@ class TestWebhookNotifierConfig:
     def test_timeout_bool_rejected(self):
         cfg = _webhook_config()
         cfg["notification"]["webhook"]["timeout"] = True
-        with pytest.raises(TypeError, match="timeout"):
+        with pytest.raises(TypeError) as exc_info:
             WebhookNotifier(cfg)
+
+        assert str(exc_info.value) == (
+            "notification.webhook.timeout expected int; got bool value=True"
+        )
 
     def test_timeout_zero_rejected(self):
         cfg = _webhook_config()

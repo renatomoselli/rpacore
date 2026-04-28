@@ -29,8 +29,13 @@ class TestEnvCredentialProvider:
     def test_raises_when_env_var_missing(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             provider = EnvCredentialProvider()
-            with pytest.raises(CredentialNotFoundError, match="sap_password"):
+            with pytest.raises(CredentialNotFoundError) as exc_info:
                 provider.get("sap_password")
+
+        message = str(exc_info.value)
+        assert "sap_password" in message
+        assert "EnvCredentialProvider" in message
+        assert "OREF_CRED_SAP_PASSWORD" in message
 
     def test_error_message_includes_env_key_name(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
@@ -69,8 +74,13 @@ class TestKeyringCredentialProvider:
 
         with patch.dict("sys.modules", {"keyring": mock_keyring}):
             provider = KeyringCredentialProvider()
-            with pytest.raises(CredentialNotFoundError, match="api_key"):
+            with pytest.raises(CredentialNotFoundError) as exc_info:
                 provider.get("api_key")
+
+        message = str(exc_info.value)
+        assert "api_key" in message
+        assert "KeyringCredentialProvider" in message
+        assert "oref" in message
 
     def test_raises_import_error_when_keyring_not_installed(self) -> None:
         with patch.dict("sys.modules", {"keyring": None}):

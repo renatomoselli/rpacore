@@ -46,13 +46,19 @@ class TestSqliteQueueConfig:
         assert q.max_retries == 5
 
     def test_bad_db_path_type(self):
-        with pytest.raises(TypeError, match="db_path"):
+        with pytest.raises(TypeError) as exc_info:
             SqliteQueue({"db_path": 123})
+
+        assert str(exc_info.value) == "queue.db_path expected str; got int value=123"
 
     def test_bad_claim_timeout_type(self, tmp_path):
         db = str(tmp_path / "q.db")
-        with pytest.raises(TypeError, match="claim_timeout"):
+        with pytest.raises(TypeError) as exc_info:
             SqliteQueue({"db_path": db, "claim_timeout": "30"})
+
+        assert str(exc_info.value) == (
+            "queue.claim_timeout expected int; got str value='30'"
+        )
 
     def test_claim_timeout_bool_rejected(self, tmp_path):
         db = str(tmp_path / "q.db")
@@ -61,8 +67,12 @@ class TestSqliteQueueConfig:
 
     def test_bad_max_retries_type(self, tmp_path):
         db = str(tmp_path / "q.db")
-        with pytest.raises(TypeError, match="max_retries"):
+        with pytest.raises(TypeError) as exc_info:
             SqliteQueue({"db_path": db, "max_retries": 3.0})
+
+        assert str(exc_info.value) == (
+            "queue.max_retries expected int; got float value=3.0"
+        )
 
     def test_max_retries_bool_rejected(self, tmp_path):
         db = str(tmp_path / "q.db")
@@ -71,8 +81,12 @@ class TestSqliteQueueConfig:
 
     def test_claim_timeout_zero(self, tmp_path):
         db = str(tmp_path / "q.db")
-        with pytest.raises(ValueError, match="claim_timeout"):
+        with pytest.raises(ValueError) as exc_info:
             SqliteQueue({"db_path": db, "claim_timeout": 0})
+
+        assert str(exc_info.value) == (
+            "queue.claim_timeout expected int > 0; got int value=0"
+        )
 
     def test_max_retries_negative(self, tmp_path):
         db = str(tmp_path / "q.db")

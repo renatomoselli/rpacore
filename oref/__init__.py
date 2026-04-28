@@ -1,6 +1,16 @@
 """OREF — Open Robotic Enterprise Framework."""
 
-__version__ = "0.1.0"
+from importlib import metadata
+
+
+def _resolve_version() -> str:
+    try:
+        return metadata.version("oref")
+    except metadata.PackageNotFoundError:
+        return "0.0.0+local"
+
+
+__version__ = _resolve_version()
 
 from oref.config import load_config
 from oref.context import ProcessContext

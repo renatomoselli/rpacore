@@ -43,8 +43,8 @@ class EnvCredentialProvider:
         value = os.environ.get(env_key)
         if value is None:
             raise CredentialNotFoundError(
-                f"Credential {name!r} not found. "
-                f"Set environment variable {env_key!r}."
+                f"Credential {name!r} not found via {self.__class__.__name__}. "
+                f"Expected environment variable {env_key!r}."
             )
         return value
 
@@ -71,7 +71,8 @@ class KeyringCredentialProvider:
         value = keyring.get_password(self.service, name)
         if value is None:
             raise CredentialNotFoundError(
-                f"Credential {name!r} not found in keyring service {self.service!r}."
+                f"Credential {name!r} not found via {self.__class__.__name__}. "
+                f"Searched keyring service {self.service!r}."
             )
         return value
 

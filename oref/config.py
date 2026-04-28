@@ -5,6 +5,8 @@ from __future__ import annotations
 import tomllib
 from pathlib import Path
 
+from oref._validation import type_error, value_error
+
 _DEFAULTS: dict[str, object] = {
     "max_retries": 0,
     "log_level": "INFO",
@@ -18,25 +20,25 @@ def _validate(config: dict[str, object]) -> None:
     """Validate known configuration keys, raising TypeError or ValueError on bad values."""
     max_retries = config["max_retries"]
     if isinstance(max_retries, bool) or not isinstance(max_retries, int):
-        raise TypeError(f"max_retries must be an int, got {type(max_retries).__name__!r}")
+        raise type_error("max_retries", "int", max_retries)
     if max_retries < 0:
-        raise ValueError(f"max_retries must be >= 0, got {max_retries}")
+        raise value_error("max_retries", "int >= 0", max_retries)
 
     log_level = config["log_level"]
     if not isinstance(log_level, str):
-        raise TypeError(f"log_level must be a str, got {type(log_level).__name__!r}")
+        raise type_error("log_level", "str", log_level)
 
     db_path = config["db_path"]
     if not isinstance(db_path, str):
-        raise TypeError(f"db_path must be a str, got {type(db_path).__name__!r}")
+        raise type_error("db_path", "str", db_path)
 
     screenshot_dir = config["screenshot_dir"]
     if not isinstance(screenshot_dir, str):
-        raise TypeError(f"screenshot_dir must be a str, got {type(screenshot_dir).__name__!r}")
+        raise type_error("screenshot_dir", "str", screenshot_dir)
 
     credential_provider = config["credential_provider"]
     if not isinstance(credential_provider, str):
-        raise TypeError(f"credential_provider must be a str, got {type(credential_provider).__name__!r}")
+        raise type_error("credential_provider", "str", credential_provider)
 
 
 def load_config(path: str | Path = "config.toml") -> dict[str, object]:

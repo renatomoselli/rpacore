@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from oref._validation import type_error, value_error
+
 
 class QueueStatus(StrEnum):
     PENDING = "pending"
@@ -112,15 +114,15 @@ class SqliteQueue:
         max_retries = cfg.get("max_retries", _DEFAULT_MAX_RETRIES)
 
         if not isinstance(db_path, str):
-            raise TypeError(f"queue.db_path must be a str, got {type(db_path).__name__}")
+            raise type_error("queue.db_path", "str", db_path)
         if isinstance(claim_timeout, bool) or not isinstance(claim_timeout, int):
-            raise TypeError(f"queue.claim_timeout must be an int, got {type(claim_timeout).__name__}")
+            raise type_error("queue.claim_timeout", "int", claim_timeout)
         if isinstance(max_retries, bool) or not isinstance(max_retries, int):
-            raise TypeError(f"queue.max_retries must be an int, got {type(max_retries).__name__}")
+            raise type_error("queue.max_retries", "int", max_retries)
         if claim_timeout <= 0:
-            raise ValueError(f"queue.claim_timeout must be > 0, got {claim_timeout}")
+            raise value_error("queue.claim_timeout", "int > 0", claim_timeout)
         if max_retries < 0:
-            raise ValueError(f"queue.max_retries must be >= 0, got {max_retries}")
+            raise value_error("queue.max_retries", "int >= 0", max_retries)
 
         self.db_path: str = db_path
         self.claim_timeout: int = claim_timeout

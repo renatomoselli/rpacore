@@ -12,6 +12,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Protocol, runtime_checkable
 
+from oref._validation import type_error, value_error
 from oref.credentials import CredentialProvider
 from oref.exceptions import BusinessException
 from oref.logger import get_logger
@@ -50,47 +51,52 @@ class EmailNotifier:
     ) -> None:
         raw = config.get("notification", {})
         if not isinstance(raw, dict):
-            raise TypeError("config['notification'] must be a dict")
+            raise type_error("notification", "dict", raw)
         cfg = raw.get("email", {})
         if not isinstance(cfg, dict):
-            raise TypeError("config['notification']['email'] must be a dict")
+            raise type_error("notification.email", "dict", cfg)
 
         host = cfg.get("host", "")
         if not isinstance(host, str):
-            raise TypeError("notification.email.host must be a str")
+            raise type_error("notification.email.host", "str", host)
         if not host:
-            raise ValueError("notification.email.host is required")
+            raise value_error("notification.email.host", "non-empty str", host)
 
         port = cfg.get("port", 587)
         if isinstance(port, bool) or not isinstance(port, int):
-            raise TypeError("notification.email.port must be an int")
+            raise type_error("notification.email.port", "int", port)
 
         from_addr = cfg.get("from_addr", "")
         if not isinstance(from_addr, str):
-            raise TypeError("notification.email.from_addr must be a str")
+            raise type_error("notification.email.from_addr", "str", from_addr)
         if not from_addr:
-            raise ValueError("notification.email.from_addr is required")
+            raise value_error(
+                "notification.email.from_addr", "non-empty str", from_addr
+            )
 
         to_addrs_raw = cfg.get("to_addrs", "")
         if isinstance(to_addrs_raw, list):
-            bad = [a for a in to_addrs_raw if not isinstance(a, str)]
-            if bad:
-                raise TypeError(
-                    f"notification.email.to_addrs entries must all be str, got: {bad!r}"
-                )
+            if any(not isinstance(a, str) for a in to_addrs_raw):
+                raise type_error("notification.email.to_addrs", "list[str]", to_addrs_raw)
             to_addrs = [a for a in to_addrs_raw]
         elif isinstance(to_addrs_raw, str):
             to_addrs = [a.strip() for a in to_addrs_raw.split(",") if a.strip()]
         else:
-            raise TypeError("notification.email.to_addrs must be a list or comma-separated str")
+            raise type_error(
+                "notification.email.to_addrs",
+                "list[str] or comma-separated str",
+                to_addrs_raw,
+            )
         if not to_addrs:
-            raise ValueError("notification.email.to_addrs is required")
+            raise value_error(
+                "notification.email.to_addrs", "non-empty list[str]", to_addrs_raw
+            )
 
         timeout = cfg.get("timeout", 30)
         if isinstance(timeout, bool) or not isinstance(timeout, int):
-            raise TypeError("notification.email.timeout must be an int")
+            raise type_error("notification.email.timeout", "int", timeout)
         if timeout <= 0:
-            raise ValueError("notification.email.timeout must be a positive int")
+            raise value_error("notification.email.timeout", "int > 0", timeout)
 
         self.host: str = host
         self.port: int = port
@@ -151,22 +157,22 @@ class WebhookNotifier:
     def __init__(self, config: dict[str, object]) -> None:
         raw = config.get("notification", {})
         if not isinstance(raw, dict):
-            raise TypeError("config['notification'] must be a dict")
+            raise type_error("notification", "dict", raw)
         cfg = raw.get("webhook", {})
         if not isinstance(cfg, dict):
-            raise TypeError("config['notification']['webhook'] must be a dict")
+            raise type_error("notification.webhook", "dict", cfg)
 
         url = cfg.get("url", "")
         if not isinstance(url, str):
-            raise TypeError("notification.webhook.url must be a str")
+            raise type_error("notification.webhook.url", "str", url)
         if not url:
-            raise ValueError("notification.webhook.url is required")
+            raise value_error("notification.webhook.url", "non-empty str", url)
 
         timeout = cfg.get("timeout", 30)
         if isinstance(timeout, bool) or not isinstance(timeout, int):
-            raise TypeError("notification.webhook.timeout must be an int")
+            raise type_error("notification.webhook.timeout", "int", timeout)
         if timeout <= 0:
-            raise ValueError("notification.webhook.timeout must be a positive int")
+            raise value_error("notification.webhook.timeout", "int > 0", timeout)
 
         self.url: str = url
         self.timeout: int = timeout
