@@ -29,6 +29,11 @@ class _SuccessSkill(Skill):
         pass
 
 
+class _SkipSkill(Skill):
+    def execute(self, ctx: ProcessContext) -> None:
+        self.status = Status.SKIPPED
+
+
 class _BusinessFailSkill(Skill):
     def execute(self, ctx: ProcessContext) -> None:
         raise BusinessException("invoice validation failed", action=self.name)
@@ -43,6 +48,8 @@ def _build_transaction(item: QueueItem) -> Transaction:
     mode = item.payload["mode"]
     if mode == "success":
         skill: Skill = _SuccessSkill("process_invoice", 1)
+    elif mode == "skip":
+        skill = _SkipSkill("process_invoice", 1)
     elif mode == "business":
         skill = _BusinessFailSkill("validate_invoice", 1)
     elif mode == "unexpected":
@@ -122,6 +129,31 @@ class TestEndToEndQueueWorkflow:
         assert report.reference == "invoice-100"
         assert report.status == Status.SUCCESSFUL
         assert report.skills[0].status == Status.SUCCESSFUL
+        assert report.skills[0].exceptions == []
+
+    def test_explicit_skip_path_is_persisted_and_reported(self, tmp_path) -> None:
+        summary, queue, item, transactions, reports, callback_errors = _run_scenario(
+            tmp_path,
+            reference="invoice-150",
+            mode="skip",
+        )
+
+        assert summary == QueueRunSummary(processed=1, completed=1, failed=0, callback_errors=0)
+
+        stored_item = queue.get_item(item.id)
+        assert stored_item is not None
+        assert stored_item.status == QueueStatus.SUCCESSFUL
+
+        assert len(transactions) == 1
+        transaction = transactions[0]
+        assert transaction.status == Status.SUCCESSFUL
+        assert transaction.skills[0].status == Status.SKIPPED
+
+        assert callback_errors == [None]
+        assert len(reports) == 1
+        report = reports[0]
+        assert report.status == Status.SUCCESSFUL
+        assert report.skills[0].status == Status.SKIPPED
         assert report.skills[0].exceptions == []
 
     def test_business_exception_path(self, tmp_path) -> None:

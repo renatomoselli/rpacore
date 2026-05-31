@@ -1,6 +1,7 @@
 # Private - not part of the framework
 book/
 Classes/
+.rpiv/
 
 # Python
 __pycache__/

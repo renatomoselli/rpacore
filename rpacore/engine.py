@@ -105,7 +105,8 @@ class Engine:
             self._log_skill_started(transaction, skill)
             try:
                 skill.execute(ctx)
-                skill.status = Status.SUCCESSFUL
+                if skill.status is not Status.SKIPPED:
+                    skill.status = Status.SUCCESSFUL
                 self._log_skill_completed(transaction, skill)
             except BusinessException as exc:
                 exc.retry_number = transaction.retry_count
@@ -206,4 +207,3 @@ class Engine:
                 "exception_type": type(exc).__name__,
             },
         )
-

@@ -29,6 +29,11 @@ class SystemFailSkill(Skill):
         raise SystemException("crash", action=self.name)
 
 
+class SkipSkill(Skill):
+    def execute(self, ctx: ProcessContext) -> None:
+        self.status = Status.SKIPPED
+
+
 class TestEngineHappyPath:
     def test_all_skills_succeed(self) -> None:
         tx = Transaction(
@@ -73,6 +78,12 @@ class TestEngineHappyPath:
         Engine().run(ctx)
         assert tx.status is Status.SUCCESSFUL
         assert "a" in ctx.data
+
+    def test_ordinary_return_marks_skill_successful(self) -> None:
+        skill = SuccessSkill("a", 1)
+        tx = Transaction(reference="T1", skills=[skill])
+        Engine().run(_ctx(tx))
+        assert skill.status is Status.SUCCESSFUL
 
 
 class TestEngineBusinessException:
@@ -232,6 +243,17 @@ class TestEngineStateTransitions:
         tx = Transaction(reference="T1", skills=[s1])
         Engine().run(_ctx(tx))
         assert tx.status is Status.SUCCESSFUL
+
+    def test_skill_can_mark_itself_skipped_during_execute(self) -> None:
+        s1 = SkipSkill("optional", 1)
+        s2 = SuccessSkill("followup", 2)
+
+        tx = Transaction(reference="T1", skills=[s1, s2])
+        Engine().run(_ctx(tx))
+
+        assert tx.status is Status.SUCCESSFUL
+        assert s1.status is Status.SKIPPED
+        assert s2.status is Status.SUCCESSFUL
 
 
 class TestEngineRetry:
