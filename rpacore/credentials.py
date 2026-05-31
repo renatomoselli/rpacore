@@ -1,16 +1,23 @@
-"""Credential management for rpacore."""
+"""Credential management for rpacore.
+
+Direct provider classes are available for known-good wiring. Use
+build_credential_provider() when converting configuration strings into provider
+instances because it validates supported provider names.
+"""
 
 from __future__ import annotations
 
-import logging
 import os
 from typing import Protocol, runtime_checkable
 
-from rpacore.logger import get_logger
+from rpacore._validation import type_error, value_error
 
 
 class CredentialNotFoundError(Exception):
     """Raised when a requested credential cannot be found."""
+
+
+SUPPORTED_CREDENTIAL_PROVIDERS = frozenset({"env", "keyring"})
 
 
 @runtime_checkable
@@ -77,23 +84,18 @@ class KeyringCredentialProvider:
         return value
 
 
-def build_credential_provider(
-    provider: str,
-    *,
-    logger: logging.Logger | None = None,
-) -> CredentialProvider:
+def build_credential_provider(provider: str) -> CredentialProvider:
     """Instantiate a CredentialProvider from a config string.
 
     Supported values: "env", "keyring".
-    Unknown values log a warning and fall back to EnvCredentialProvider.
+    Unknown values raise ValueError instead of falling back silently.
     """
-    log = logger if logger is not None else get_logger()
-    if provider == "env":
-        return EnvCredentialProvider()
-    if provider == "keyring":
-        return KeyringCredentialProvider()
-    log.warning(
-        "Unknown credential_provider %r — falling back to EnvCredentialProvider",
-        provider,
-    )
-    return EnvCredentialProvider()
+    if not isinstance(provider, str):
+        raise type_error("credential_provider", "str", provider)
+    providers: dict[str, type[CredentialProvider]] = {
+        "env": EnvCredentialProvider,
+        "keyring": KeyringCredentialProvider,
+    }
+    if provider in SUPPORTED_CREDENTIAL_PROVIDERS:
+        return providers[provider]()
+    raise value_error("credential_provider", "one of env, keyring", provider)

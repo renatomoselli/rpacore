@@ -17,6 +17,12 @@ class TestLoadConfig:
         assert config["log_level"] == "INFO"
         assert config["db_path"] == "rpacore.db"
 
+    def test_require_file_missing_file_raises(self, tmp_path: Path) -> None:
+        missing = tmp_path / "nonexistent.toml"
+
+        with pytest.raises(FileNotFoundError, match="Config file not found"):
+            load_config(missing, require_file=True)
+
     def test_loads_values_from_file(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
         toml.write_text('max_retries = 3\nlog_level = "DEBUG"\ndb_path = "custom.db"\n', encoding="utf-8")
@@ -119,6 +125,26 @@ class TestLoadConfig:
 
         assert str(exc_info.value) == "log_level expected str; got int value=1"
 
+    def test_invalid_log_level_value_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('log_level = "LOUD"\n', encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == (
+            "log_level expected one of CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET; "
+            "got str value='LOUD'"
+        )
+
+    def test_lowercase_log_level_is_normalized(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('log_level = "debug"\n', encoding="utf-8")
+
+        config = load_config(toml)
+
+        assert config["log_level"] == "DEBUG"
+
     def test_invalid_db_path_type_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
         toml.write_text("db_path = 123\n", encoding="utf-8")
@@ -127,3 +153,23 @@ class TestLoadConfig:
             load_config(toml)
 
         assert str(exc_info.value) == "db_path expected str; got int value=123"
+
+    def test_invalid_credential_provider_type_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text("credential_provider = 123\n", encoding="utf-8")
+
+        with pytest.raises(TypeError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == "credential_provider expected str; got int value=123"
+
+    def test_invalid_credential_provider_value_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('credential_provider = "vault"\n', encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == (
+            "credential_provider expected one of env, keyring; got str value='vault'"
+        )

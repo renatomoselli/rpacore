@@ -11,6 +11,7 @@ from rpacore.credentials import (
     CredentialProvider,
     EnvCredentialProvider,
     KeyringCredentialProvider,
+    SUPPORTED_CREDENTIAL_PROVIDERS,
     build_credential_provider,
 )
 
@@ -101,14 +102,24 @@ class TestBuildCredentialProvider:
         provider = build_credential_provider("keyring")
         assert isinstance(provider, KeyringCredentialProvider)
 
-    def test_unknown_value_falls_back_to_env(self) -> None:
-        provider = build_credential_provider("unknown_provider")
-        assert isinstance(provider, EnvCredentialProvider)
+    def test_unknown_value_raises(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            build_credential_provider("unknown_provider")
 
-    def test_unknown_value_logs_warning(self) -> None:
-        mock_logger = MagicMock()
-        build_credential_provider("unknown_provider", logger=mock_logger)
-        mock_logger.warning.assert_called_once()
+        assert str(exc_info.value) == (
+            "credential_provider expected one of env, keyring; got str value='unknown_provider'"
+        )
+
+    def test_supported_values_match_factory(self) -> None:
+        assert SUPPORTED_CREDENTIAL_PROVIDERS == {"env", "keyring"}
+        assert isinstance(build_credential_provider("env"), EnvCredentialProvider)
+        assert isinstance(build_credential_provider("keyring"), KeyringCredentialProvider)
+
+    def test_non_string_value_raises_type_error(self) -> None:
+        with pytest.raises(TypeError) as exc_info:
+            build_credential_provider(123)  # type: ignore[arg-type]
+
+        assert str(exc_info.value) == "credential_provider expected str; got int value=123"
 
 
 class TestProcessContextCredentials:
