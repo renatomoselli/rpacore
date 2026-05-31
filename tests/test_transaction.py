@@ -1,12 +1,12 @@
-"""Tests for oref.transaction."""
+"""Tests for rpacore.transaction."""
 
 import uuid
 
 import pytest
 
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 class TestTransactionFreshState:

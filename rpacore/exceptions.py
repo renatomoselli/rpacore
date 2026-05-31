@@ -1,4 +1,4 @@
-"""Exception types for OREF.
+"""Exception types for rpacore.
 
 Two categories:
 - BusinessException: expected rule violation (does not stop execution by default)

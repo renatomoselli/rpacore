@@ -1,14 +1,14 @@
-"""Skill — the unit of work in OREF."""
+"""Skill — the unit of work in rpacore."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from oref.exceptions import BusinessException, SystemException
-from oref.status import Status
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.status import Status
 
 if TYPE_CHECKING:
-    from oref.context import ProcessContext
+    from rpacore.context import ProcessContext
 
 
 class Skill:

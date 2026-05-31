@@ -15,7 +15,7 @@ import examples.sample_main as main_module
 
 def _write_config(tmp_path: Path) -> tuple[str, str, str]:
     """Write a minimal config.toml into tmp_path and return (config_path, db_path, output_path)."""
-    db = tmp_path / "oref.db"
+    db = tmp_path / "rpacore.db"
     output = tmp_path / "greeting.txt"
     config = tmp_path / "config.toml"
     # Use forward slashes so TOML parses cleanly on Windows too.

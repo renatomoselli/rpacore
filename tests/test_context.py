@@ -1,9 +1,9 @@
-"""Tests for oref.context."""
+"""Tests for rpacore.context."""
 
 from __future__ import annotations
 
-from oref.context import ProcessContext
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.transaction import Transaction
 
 
 class TestProcessContextDefaults:

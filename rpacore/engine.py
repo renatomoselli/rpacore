@@ -5,13 +5,13 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from oref.context import ProcessContext
-from oref.exceptions import BusinessException, SystemException
-from oref.logger import get_logger
-from oref.screenshot import capture_screenshot
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.logger import get_logger
+from rpacore.screenshot import capture_screenshot
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 class Engine:

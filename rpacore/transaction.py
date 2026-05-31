@@ -5,8 +5,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 
-from oref.skill import Skill
-from oref.status import Status
+from rpacore.skill import Skill
+from rpacore.status import Status
 
 
 @dataclass

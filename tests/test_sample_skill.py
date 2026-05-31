@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from oref import Engine, Status, Transaction
-from oref.context import ProcessContext
-from oref.exceptions import BusinessException, SystemException
+from rpacore import Engine, Status, Transaction
+from rpacore.context import ProcessContext
+from rpacore.exceptions import BusinessException, SystemException
 from examples.sample_skill import ConfirmOutput, ValidateInput, WriteGreeting
 
 

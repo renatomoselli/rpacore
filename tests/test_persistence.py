@@ -1,15 +1,15 @@
-"""Tests for oref.persistence."""
+"""Tests for rpacore.persistence."""
 
 import sqlite3
 
 import pytest
 
-from oref.context import ProcessContext
-from oref.exceptions import BusinessException, SystemException
-from oref.persistence import load_transaction, save_transaction
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.persistence import load_transaction, save_transaction
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 @pytest.fixture
@@ -207,7 +207,7 @@ class TestCrashRecovery:
 
 class TestResumeScenario:
     def test_resume_skips_successful_skills(self, db_path) -> None:
-        from oref.engine import Engine
+        from rpacore.engine import Engine
 
         # Save a transaction where skill "a" already succeeded and "b" is pending.
         s1 = Skill("a", 1)
@@ -233,7 +233,7 @@ class TestResumeScenario:
             track.exceptions = skill.exceptions
             loaded.skills[i] = track
 
-        from oref.engine import Engine
+        from rpacore.engine import Engine
         Engine().run(ProcessContext(transaction=loaded))
 
         assert counts["a"] == 0  # already successful, engine skips it

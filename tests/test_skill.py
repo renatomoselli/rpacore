@@ -1,10 +1,10 @@
-"""Tests for oref.skill."""
+"""Tests for rpacore.skill."""
 
 import pytest
 
-from oref.exceptions import BusinessException, SystemException
-from oref.skill import Skill
-from oref.status import Status
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.skill import Skill
+from rpacore.status import Status
 
 
 class TestSkillFreshState:
@@ -57,16 +57,16 @@ class TestSkillCustomArguments:
 
 class TestSkillExecute:
     def test_base_skill_raises_not_implemented(self) -> None:
-        from oref.context import ProcessContext
-        from oref.transaction import Transaction
+        from rpacore.context import ProcessContext
+        from rpacore.transaction import Transaction
         skill = Skill("login", 1)
         ctx = ProcessContext(transaction=Transaction(reference="test"))
         with pytest.raises(NotImplementedError, match="login"):
             skill.execute(ctx)
 
     def test_subclass_can_implement_execute(self) -> None:
-        from oref.context import ProcessContext
-        from oref.transaction import Transaction
+        from rpacore.context import ProcessContext
+        from rpacore.transaction import Transaction
 
         class LoginSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:

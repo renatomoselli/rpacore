@@ -23,7 +23,7 @@ def capture_screenshot(directory: str) -> str:
     try:
         import mss  # type: ignore[import-untyped]
     except ImportError:
-        logger.warning("mss is not installed — screenshot skipped. Install with: pip install oref[screenshots]")
+        logger.warning("mss is not installed — screenshot skipped. Install with: pip install rpacore[screenshots]")
         return ""
 
     try:

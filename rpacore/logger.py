@@ -1,4 +1,4 @@
-"""Logging helpers for OREF."""
+"""Logging helpers for rpacore."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import logging
 import sys
 from typing import TextIO
 
-_LOGGER_NAME = "oref"
+_LOGGER_NAME = "rpacore"
 _RESERVED_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
 
 
@@ -21,7 +21,7 @@ def _extra_fields(record: logging.LogRecord) -> dict[str, object]:
 
 
 class TextFormatter(logging.Formatter):
-    """Human-readable formatter for OREF events."""
+    """Human-readable formatter for rpacore events."""
 
     def format(self, record: logging.LogRecord) -> str:
         extra = _extra_fields(record)
@@ -40,7 +40,7 @@ class TextFormatter(logging.Formatter):
 
 
 class JsonFormatter(logging.Formatter):
-    """JSON formatter for OREF events."""
+    """JSON formatter for rpacore events."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, object] = {
@@ -52,7 +52,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def get_logger(name: str = _LOGGER_NAME) -> logging.Logger:
-    """Return the OREF logger without forcing output."""
+    """Return the rpacore logger without forcing output."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         logger.addHandler(logging.NullHandler())
@@ -67,7 +67,7 @@ def configure_logger(
     fmt: str = "text",
     stream: TextIO | None = None,
 ) -> logging.Logger:
-    """Configure and return an OREF logger.
+    """Configure and return an rpacore logger.
 
     The logger is reset on each call so repeated configuration does not
     duplicate handlers.

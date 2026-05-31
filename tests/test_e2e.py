@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from oref.context import ProcessContext
-from oref.credentials import EnvCredentialProvider
-from oref.engine import Engine
-from oref.exceptions import BusinessException, SystemException
-from oref.notify import dispatch
-from oref.persistence import list_transactions, save_transaction
-from oref.queue import QueueItem, QueueStatus, SqliteQueue
-from oref.report import TransactionReport, generate_report
-from oref.runner import QueueRunSummary, run_queue_loop
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.credentials import EnvCredentialProvider
+from rpacore.engine import Engine
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.notify import dispatch
+from rpacore.persistence import list_transactions, save_transaction
+from rpacore.queue import QueueItem, QueueStatus, SqliteQueue
+from rpacore.report import TransactionReport, generate_report
+from rpacore.runner import QueueRunSummary, run_queue_loop
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 class _RecordingNotifier:
@@ -64,7 +64,7 @@ def _run_scenario(tmp_path, *, reference: str, mode: str) -> tuple[
     item = QueueItem(reference=reference, payload={"mode": mode})
     queue.add(item)
 
-    tx_db = str(tmp_path / "oref.db")
+    tx_db = str(tmp_path / "rpacore.db")
     notifier = _RecordingNotifier()
     callback_errors: list[Exception | None] = []
 

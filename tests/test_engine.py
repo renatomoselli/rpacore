@@ -1,13 +1,13 @@
-"""Tests for oref.engine."""
+"""Tests for rpacore.engine."""
 
 import pytest
 
-from oref.context import ProcessContext
-from oref.engine import Engine
-from oref.exceptions import BusinessException, SystemException
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.engine import Engine
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 def _ctx(tx: Transaction) -> ProcessContext:

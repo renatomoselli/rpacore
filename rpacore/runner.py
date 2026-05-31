@@ -8,15 +8,15 @@ import threading
 from dataclasses import dataclass, field
 from typing import Callable
 
-from oref.context import ProcessContext
-from oref.credentials import CredentialProvider
-from oref.engine import Engine
-from oref.logger import get_logger
-from oref.notify import Notifier, dispatch
-from oref.queue import QueueItem, QueueProvider
-from oref.report import generate_report
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.credentials import CredentialProvider
+from rpacore.engine import Engine
+from rpacore.logger import get_logger
+from rpacore.notify import Notifier, dispatch
+from rpacore.queue import QueueItem, QueueProvider
+from rpacore.report import generate_report
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 @dataclass
@@ -68,7 +68,7 @@ def run_queue_loop(
         credentials:       Credential provider (passed to ProcessContext).
         worker_id:         Worker identifier passed to queue.next_item(). Defaults to hostname.
         notifiers:         Optional list of notifiers to call after each transaction. Defaults to [].
-        logger:            Optional logger. Defaults to the OREF logger.
+        logger:            Optional logger. Defaults to the rpacore logger.
         after_item:        Optional callback fired after each item. Receives (item, transaction, error).
         stop_event:        Optional threading.Event. When set, the loop stops before claiming
                            the next item. The item currently in-flight completes normally.

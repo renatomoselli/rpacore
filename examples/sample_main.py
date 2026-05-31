@@ -1,12 +1,12 @@
-"""OREF entry point — the developer's wiring layer.
+"""rpacore entry point — the developer's wiring layer.
 
-This file is the first thing to edit when adapting OREF to a real automation.
+This file is the first thing to edit when adapting rpacore to a real automation.
 Replace the example skills and transaction below with your own.
 """
 
 from __future__ import annotations
 
-from oref import (
+from rpacore import (
     Engine,
     ProcessContext,
     Transaction,

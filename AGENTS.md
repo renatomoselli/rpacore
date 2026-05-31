@@ -1,10 +1,10 @@
-# OREF Agent Guide
+# RPA Core Agent Guide
 
 ## Non-Negotiables
 
-- OREF must stay deterministic, stateful, auditable, and resilient.
+- RPA Core must stay deterministic, stateful, auditable, and resilient.
 - Do not introduce runtime AI behavior or AI runtime dependencies.
-- Keep framework code in `oref/` separate from user automation in `skills/`.
+- Keep framework code in `rpacore/` separate from user automation in `skills/`.
 - Prefer stdlib solutions over third-party runtime dependencies.
 - Prefer flat, concrete designs. Do not add abstraction layers unless a real
   use case requires them.

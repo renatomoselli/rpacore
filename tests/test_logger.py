@@ -1,17 +1,17 @@
-"""Tests for oref.logger."""
+"""Tests for rpacore.logger."""
 
 import io
 import json
 
 import pytest
 
-from oref.context import ProcessContext
-from oref.engine import Engine
-from oref.exceptions import BusinessException
-from oref.logger import configure_logger
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.engine import Engine
+from rpacore.exceptions import BusinessException
+from rpacore.logger import configure_logger
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 class SuccessSkill(Skill):
@@ -27,7 +27,7 @@ class BusinessFailSkill(Skill):
 class TestConfigureLogger:
     def test_text_format_includes_event_and_fields(self) -> None:
         stream = io.StringIO()
-        logger = configure_logger(name="oref.test.text", fmt="text", stream=stream)
+        logger = configure_logger(name="rpacore.test.text", fmt="text", stream=stream)
         logger.info(
             "Transaction started",
             extra={"event": "transaction_started", "transaction_id": "tx-1"},
@@ -41,7 +41,7 @@ class TestConfigureLogger:
 
     def test_json_format_is_valid_json(self) -> None:
         stream = io.StringIO()
-        logger = configure_logger(name="oref.test.json", fmt="json", stream=stream)
+        logger = configure_logger(name="rpacore.test.json", fmt="json", stream=stream)
         logger.info(
             "Skill started",
             extra={"event": "skill_started", "skill_name": "login"},
@@ -55,12 +55,12 @@ class TestConfigureLogger:
 
     def test_invalid_format_raises(self) -> None:
         with pytest.raises(ValueError, match="fmt must be 'text' or 'json'"):
-            configure_logger(name="oref.test.invalid", fmt="xml")
+            configure_logger(name="rpacore.test.invalid", fmt="xml")
 
     def test_reconfigure_does_not_duplicate_handlers(self) -> None:
         stream = io.StringIO()
-        logger = configure_logger(name="oref.test.reset", fmt="text", stream=stream)
-        logger = configure_logger(name="oref.test.reset", fmt="text", stream=stream)
+        logger = configure_logger(name="rpacore.test.reset", fmt="text", stream=stream)
+        logger = configure_logger(name="rpacore.test.reset", fmt="text", stream=stream)
         logger.info("Only once", extra={"event": "transaction_completed"})
 
         assert stream.getvalue().strip().count("Only once") == 1
@@ -69,7 +69,7 @@ class TestConfigureLogger:
 class TestEngineLogging:
     def test_success_flow_emits_standardized_events(self) -> None:
         stream = io.StringIO()
-        logger = configure_logger(name="oref.test.engine.success", fmt="json", stream=stream)
+        logger = configure_logger(name="rpacore.test.engine.success", fmt="json", stream=stream)
         tx = Transaction(
             reference="T1",
             skills=[SuccessSkill("a", 1), SuccessSkill("b", 2)],
@@ -89,7 +89,7 @@ class TestEngineLogging:
 
     def test_failed_skill_event_contains_failure_details(self) -> None:
         stream = io.StringIO()
-        logger = configure_logger(name="oref.test.engine.fail", fmt="json", stream=stream)
+        logger = configure_logger(name="rpacore.test.engine.fail", fmt="json", stream=stream)
         tx = Transaction(reference="T1", skills=[BusinessFailSkill("validate", 1)])
 
         Engine(logger=logger).run(ProcessContext(transaction=tx))
@@ -104,7 +104,7 @@ class TestEngineLogging:
 
     def test_transaction_completed_event_reports_final_status(self) -> None:
         stream = io.StringIO()
-        logger = configure_logger(name="oref.test.engine.complete", fmt="json", stream=stream)
+        logger = configure_logger(name="rpacore.test.engine.complete", fmt="json", stream=stream)
         tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
 
         Engine(logger=logger).run(ProcessContext(transaction=tx))

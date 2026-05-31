@@ -1,4 +1,4 @@
-"""Credential management for OREF."""
+"""Credential management for rpacore."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import logging
 import os
 from typing import Protocol, runtime_checkable
 
-from oref.logger import get_logger
+from rpacore.logger import get_logger
 
 
 class CredentialNotFoundError(Exception):
@@ -31,15 +31,15 @@ class CredentialProvider(Protocol):
 class EnvCredentialProvider:
     """Reads credentials from environment variables.
 
-    Convention: credential name is uppercased and prefixed with OREF_CRED_.
+    Convention: credential name is uppercased and prefixed with RPACORE_CRED_.
 
     Example:
         EnvCredentialProvider().get("sap_password")
-        → reads os.environ["OREF_CRED_SAP_PASSWORD"]
+        → reads os.environ["RPACORE_CRED_SAP_PASSWORD"]
     """
 
     def get(self, name: str) -> str:
-        env_key = f"OREF_CRED_{name.upper()}"
+        env_key = f"RPACORE_CRED_{name.upper()}"
         value = os.environ.get(env_key)
         if value is None:
             raise CredentialNotFoundError(
@@ -52,12 +52,12 @@ class EnvCredentialProvider:
 class KeyringCredentialProvider:
     """Reads credentials from the system keyring via the keyring library.
 
-    Requires: pip install oref[keyring]
+    Requires: pip install rpacore[keyring]
 
     Falls back with a clear error if keyring is not installed.
     """
 
-    def __init__(self, service: str = "oref") -> None:
+    def __init__(self, service: str = "rpacore") -> None:
         self.service: str = service
 
     def get(self, name: str) -> str:
@@ -65,7 +65,7 @@ class KeyringCredentialProvider:
             import keyring  # type: ignore[import]
         except ImportError:
             raise ImportError(
-                "keyring is not installed. Run: pip install oref[keyring]"
+                "keyring is not installed. Run: pip install rpacore[keyring]"
             ) from None
 
         value = keyring.get_password(self.service, name)

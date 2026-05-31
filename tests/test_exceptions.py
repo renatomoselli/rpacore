@@ -1,10 +1,10 @@
-"""Tests for oref.exceptions."""
+"""Tests for rpacore.exceptions."""
 
 from datetime import datetime, timezone
 
 import pytest
 
-from oref.exceptions import BusinessException, SystemException
+from rpacore.exceptions import BusinessException, SystemException
 
 
 class TestBusinessException:

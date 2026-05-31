@@ -1,4 +1,4 @@
-"""Exception reporting for OREF transactions."""
+"""Exception reporting for rpacore transactions."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from oref.exceptions import BusinessException, SystemException
-from oref.status import Status
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.status import Status
 
 if TYPE_CHECKING:
-    from oref.skill import Skill
-    from oref.transaction import Transaction
+    from rpacore.skill import Skill
+    from rpacore.transaction import Transaction
 
 
 _ICONS: dict[Status, str] = {
@@ -113,7 +113,7 @@ _HTML_TEMPLATE = string.Template(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>OREF Report &mdash; $reference</title>
+<title>rpacore Report &mdash; $reference</title>
 <style>
 body{font-family:monospace;padding:1rem;max-width:900px;margin:auto}
 h2{margin-bottom:.25rem}

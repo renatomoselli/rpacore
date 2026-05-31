@@ -1,4 +1,4 @@
-# OREF Project Context
+# RPA Core Project Context
 
 This document holds the broader project context that was previously mixed into
 `AGENTS.md`. It is useful for humans and AI tools that need more than the
@@ -6,7 +6,7 @@ minimal repo rules.
 
 ## Purpose
 
-OREF is a Python-based, deterministic RPA framework inspired by enterprise RPA
+RPA Core is a Python-based, deterministic RPA framework inspired by enterprise RPA
 patterns and adapted for modern, code-first automation.
 
 The framework is not AI-driven at runtime. It is designed to be:
@@ -30,7 +30,7 @@ AI tools may assist development, but they do not control execution.
 ## Project Structure
 
 ```text
-oref/              # Framework core
+rpacore/              # Framework core
   __init__.py
   exceptions.py    # BusinessException, SystemException
   status.py        # Status enum
@@ -47,7 +47,7 @@ oref/              # Framework core
   report.py        # Transaction reporting and HTML/text rendering
   notify.py        # Email/webhook notifications
 examples/          # Minimal repo-side sample automation for integration tests
-tests/             # Test suite (mirrors oref/ structure)
+tests/             # Test suite (mirrors rpacore/ structure)
 pyproject.toml     # Packaging and dev tooling
 config.toml        # Runtime configuration
 README.md
@@ -84,7 +84,7 @@ The system must resume from failure and only re-execute failed steps.
 
 ### Separation of Concerns
 
-- Framework core in `oref/` stays independent from user automation code
+- Framework core in `rpacore/` stays independent from user automation code
 - Sample automation in `examples/` exists for repo-side integration coverage,
   not as part of the installed package
 - Skills are modular and reusable
@@ -112,7 +112,7 @@ Engine
   ->
 Status tracking + retry policy
   ->
-Persistence (oref.db)
+Persistence (rpacore.db)
   ->
 Reporting + optional notifications
 
@@ -142,7 +142,7 @@ Users create skills by subclassing `Skill` and implementing
 
 The repo includes `examples/sample_skill.py` and `examples/sample_main.py` as
 small integration fixtures for test coverage. User-facing, fuller automation
-examples belong in the separate `oref-examples` repository.
+examples belong in the separate `rpacore-examples` repository.
 
 ## Exceptions
 
@@ -165,7 +165,7 @@ All exceptions should be logged and persisted.
 ## Testing Expectations
 
 - Tests live under `tests/`
-- The test layout mirrors `oref/` where practical
+- The test layout mirrors `rpacore/` where practical
 - Run `pytest` from the project root
 - Each commit should pass the full test suite
 
@@ -187,5 +187,5 @@ For release-oriented work, validate not just tests but also packaging:
 
 ## Vision
 
-OREF aims to be a deterministic, stateful RPA framework in Python, designed for
+RPA Core aims to be a deterministic, stateful RPA framework in Python, designed for
 AI-assisted development without AI-controlled execution.

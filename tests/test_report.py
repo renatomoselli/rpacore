@@ -1,4 +1,4 @@
-"""Tests for oref/report.py and list_transactions() in oref/persistence.py."""
+"""Tests for rpacore/report.py and list_transactions() in rpacore/persistence.py."""
 
 from __future__ import annotations
 
@@ -6,18 +6,18 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from oref.exceptions import BusinessException, SystemException
-from oref.persistence import list_transactions, save_transaction
-from oref.report import (
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.persistence import list_transactions, save_transaction
+from rpacore.report import (
     SkillReport,
     TransactionReport,
     generate_report,
     render_html,
     render_text,
 )
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 # ---------------------------------------------------------------------------
@@ -279,36 +279,42 @@ class TestListTransactions:
     def _save(self, tmp_path, reference: str, status: Status = Status.SUCCESSFUL) -> Transaction:
         tx = Transaction(reference=reference)
         tx.status = status
-        save_transaction(tx, str(tmp_path / "oref.db"))
+        save_transaction(tx, str(tmp_path / "rpacore.db"))
         return tx
 
     def test_empty_returns_empty(self, tmp_path):
-        result = list_transactions(str(tmp_path / "oref.db"))
+        result = list_transactions(str(tmp_path / "rpacore.db"))
         assert result == []
 
     def test_returns_saved_transactions(self, tmp_path):
         tx = self._save(tmp_path, "ref-a")
-        result = list_transactions(str(tmp_path / "oref.db"))
+        result = list_transactions(str(tmp_path / "rpacore.db"))
         assert len(result) == 1
         assert result[0].id == tx.id
 
     def test_filter_by_status_match(self, tmp_path):
         self._save(tmp_path, "ok", Status.SUCCESSFUL)
         self._save(tmp_path, "fail", Status.FAILED)
-        result = list_transactions(str(tmp_path / "oref.db"), status=Status.FAILED)
+        result = list_transactions(str(tmp_path / "rpacore.db"), status=Status.FAILED)
         assert len(result) == 1
         assert result[0].reference == "fail"
 
     def test_filter_by_status_no_match(self, tmp_path):
         self._save(tmp_path, "ok", Status.SUCCESSFUL)
-        result = list_transactions(str(tmp_path / "oref.db"), status=Status.FAILED)
+        result = list_transactions(str(tmp_path / "rpacore.db"), status=Status.FAILED)
         assert result == []
 
     def test_filter_by_since(self, tmp_path):
-        db = str(tmp_path / "oref.db")
+        import sqlite3 as _sqlite3
+        db = str(tmp_path / "rpacore.db")
         tx_old = Transaction(reference="old")
         tx_old.status = Status.SUCCESSFUL
         save_transaction(tx_old, db)
+        with _sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE transactions SET created_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+                (tx_old.id,),
+            )
 
         cutoff = datetime.now(timezone.utc)
 
@@ -322,7 +328,7 @@ class TestListTransactions:
         assert "old" not in references
 
     def test_limit(self, tmp_path):
-        db = str(tmp_path / "oref.db")
+        db = str(tmp_path / "rpacore.db")
         for i in range(5):
             tx = Transaction(reference=f"ref-{i}")
             tx.status = Status.SUCCESSFUL
@@ -332,7 +338,7 @@ class TestListTransactions:
 
     def test_multiple_filters_combined(self, tmp_path):
         import sqlite3 as _sqlite3
-        db = str(tmp_path / "oref.db")
+        db = str(tmp_path / "rpacore.db")
         tx1 = Transaction(reference="before-fail")
         tx1.status = Status.FAILED
         save_transaction(tx1, db)
@@ -360,7 +366,7 @@ class TestListTransactions:
         timestamp on the next save_transaction() call, so since= queries find them."""
         import sqlite3
 
-        db = str(tmp_path / "oref.db")
+        db = str(tmp_path / "rpacore.db")
 
         # Simulate a legacy database: create the transactions table without created_at,
         # insert a row manually, then add the column as the migration would.

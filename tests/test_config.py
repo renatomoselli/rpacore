@@ -1,4 +1,4 @@
-"""Tests for oref.config."""
+"""Tests for rpacore.config."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from oref.config import load_config
+from rpacore.config import load_config
 
 
 class TestLoadConfig:
@@ -15,7 +15,7 @@ class TestLoadConfig:
 
         assert config["max_retries"] == 0
         assert config["log_level"] == "INFO"
-        assert config["db_path"] == "oref.db"
+        assert config["db_path"] == "rpacore.db"
 
     def test_loads_values_from_file(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
@@ -35,7 +35,7 @@ class TestLoadConfig:
 
         assert config["max_retries"] == 5
         assert config["log_level"] == "INFO"
-        assert config["db_path"] == str(tmp_path / "oref.db")
+        assert config["db_path"] == str(tmp_path / "rpacore.db")
 
     def test_returns_plain_dict(self, tmp_path: Path) -> None:
         config = load_config(tmp_path / "nonexistent.toml")

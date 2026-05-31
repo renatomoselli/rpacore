@@ -1,7 +1,7 @@
 [project]
-name = "oref"
+name = "rpacore"
 version = "0.1.0"
-description = "Open Robotic Enterprise Framework — deterministic, stateful RPA in Python"
+description = "RPA Core — deterministic, stateful RPA in Python"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -20,9 +20,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/renatomoselli/oref"
-Repository = "https://github.com/renatomoselli/oref"
-Issues = "https://github.com/renatomoselli/oref/issues"
+Homepage = "https://github.com/renatomoselli/rpacore"
+Repository = "https://github.com/renatomoselli/rpacore"
+Issues = "https://github.com/renatomoselli/rpacore/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -37,8 +37,11 @@ keyring = [
     "keyring",
 ]
 
+[project.scripts]
+rpacore = "rpacore.cli:main"
+
 [tool.setuptools.packages.find]
-include = ["oref*"]
+include = ["rpacore*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

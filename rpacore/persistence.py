@@ -4,10 +4,10 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-from oref.exceptions import BusinessException, SystemException
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -63,7 +63,7 @@ def _skill_id(transaction_id: str, skill: Skill) -> str:
     return f"{transaction_id}:{skill.name}:{skill.execution_order}"
 
 
-def save_transaction(transaction: Transaction, db_path: str = "oref.db") -> None:
+def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> None:
     """Persist a transaction and all its skills and exceptions.
 
     Safe to call multiple times. Skills are deleted and reinserted on each save,
@@ -123,7 +123,7 @@ def save_transaction(transaction: Transaction, db_path: str = "oref.db") -> None
         conn.close()
 
 
-def load_transaction(transaction_id: str, db_path: str = "oref.db") -> Transaction:
+def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transaction:
     """Load a transaction from the database.
 
     Crash recovery: any skill with status IN_PROGRESS is reset to FAILED,
@@ -195,7 +195,7 @@ def load_transaction(transaction_id: str, db_path: str = "oref.db") -> Transacti
 
 
 def list_transactions(
-    db_path: str = "oref.db",
+    db_path: str = "rpacore.db",
     *,
     status: Status | None = None,
     since: datetime | None = None,

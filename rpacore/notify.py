@@ -1,4 +1,4 @@
-"""Notification dispatch for OREF transactions."""
+"""Notification dispatch for rpacore transactions."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Protocol, runtime_checkable
 
-from oref._validation import type_error, value_error
-from oref.credentials import CredentialProvider
-from oref.exceptions import BusinessException
-from oref.logger import get_logger
-from oref.report import TransactionReport, render_html, render_text
+from rpacore._validation import type_error, value_error
+from rpacore.credentials import CredentialProvider
+from rpacore.exceptions import BusinessException
+from rpacore.logger import get_logger
+from rpacore.report import TransactionReport, render_html, render_text
 
 
 @runtime_checkable
@@ -113,7 +113,7 @@ class EmailNotifier:
         text_body = render_text(report)
 
         msg = MIMEMultipart("mixed")
-        msg["Subject"] = f"OREF [{report.status}] {report.reference}"
+        msg["Subject"] = f"rpacore [{report.status}] {report.reference}"
         msg["From"] = self.from_addr
         msg["To"] = ", ".join(self.to_addrs)
 

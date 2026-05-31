@@ -1,6 +1,6 @@
-"""Tests for oref.status."""
+"""Tests for rpacore.status."""
 
-from oref.status import Status
+from rpacore.status import Status
 
 
 class TestStatusValues:

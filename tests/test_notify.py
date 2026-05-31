@@ -1,4 +1,4 @@
-"""Tests for oref/notify.py."""
+"""Tests for rpacore/notify.py."""
 
 from __future__ import annotations
 
@@ -9,17 +9,17 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from oref.credentials import EnvCredentialProvider
-from oref.exceptions import BusinessException, SystemException
-from oref.notify import (
+from rpacore.credentials import EnvCredentialProvider
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.notify import (
     EmailNotifier,
     Notifier,
     WebhookNotifier,
     build_notifiers,
     dispatch,
 )
-from oref.report import SkillReport, TransactionReport
-from oref.status import Status
+from rpacore.report import SkillReport, TransactionReport
+from rpacore.status import Status
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,7 @@ def _email_config(host: str = "smtp.example.com", port: int = 587) -> dict:
             "email": {
                 "host": host,
                 "port": port,
-                "from_addr": "oref@example.com",
+                "from_addr": "rpacore@example.com",
                 "to_addrs": ["admin@example.com"],
             }
         }
@@ -83,7 +83,7 @@ class TestEmailNotifierConfig:
         n = EmailNotifier(_email_config(), _creds())
         assert n.host == "smtp.example.com"
         assert n.port == 587
-        assert n.from_addr == "oref@example.com"
+        assert n.from_addr == "rpacore@example.com"
         assert n.to_addrs == ["admin@example.com"]
 
     def test_to_addrs_as_comma_string(self):
@@ -197,7 +197,7 @@ class TestEmailNotifierSend:
         notifier = EmailNotifier(_email_config(), _creds(password))
         if report is None:
             report = _make_report()
-        with patch("oref.notify.smtplib.SMTP") as mock_smtp_cls:
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
             mock_smtp = MagicMock()
             mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
             mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
@@ -210,7 +210,7 @@ class TestEmailNotifierSend:
 
     def test_smtp_constructed_with_timeout(self):
         notifier = EmailNotifier(_email_config(), _creds())
-        with patch("oref.notify.smtplib.SMTP") as mock_smtp_cls:
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
             mock_smtp = MagicMock()
             mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
             mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
@@ -220,7 +220,7 @@ class TestEmailNotifierSend:
 
     def test_login_uses_credential(self):
         smtp = self._send(password="mysecret")
-        smtp.login.assert_called_once_with("oref@example.com", "mysecret")
+        smtp.login.assert_called_once_with("rpacore@example.com", "mysecret")
 
     def test_sendmail_called_with_recipients(self):
         smtp = self._send()
@@ -237,7 +237,7 @@ class TestEmailNotifierSend:
     def test_credentials_get_called_for_password(self):
         creds = _creds("pw")
         notifier = EmailNotifier(_email_config(), creds)
-        with patch("oref.notify.smtplib.SMTP") as mock_smtp_cls:
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
             mock_smtp = MagicMock()
             mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
             mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
@@ -258,7 +258,7 @@ class TestEmailNotifierSend:
             generated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
         )
         notifier = EmailNotifier(_email_config(), _creds())
-        with patch("oref.notify.smtplib.SMTP") as mock_smtp_cls:
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
             mock_smtp = MagicMock()
             mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
             mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
@@ -281,7 +281,7 @@ class TestEmailNotifierSend:
             generated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
         )
         notifier = EmailNotifier(_email_config(), _creds())
-        with patch("oref.notify.smtplib.SMTP") as mock_smtp_cls:
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
             mock_smtp = MagicMock()
             mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
             mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
@@ -303,7 +303,7 @@ class TestEmailNotifierSend:
             generated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
         )
         notifier = EmailNotifier(_email_config(), _creds())
-        with patch("oref.notify.smtplib.SMTP") as mock_smtp_cls:
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
             mock_smtp = MagicMock()
             mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
             mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
@@ -393,7 +393,7 @@ class TestWebhookNotifierSend:
             resp.read = MagicMock(return_value=b"ok")
             return resp
 
-        with patch("oref.notify.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("rpacore.notify.urllib.request.urlopen", side_effect=fake_urlopen):
             notifier.send(report)
 
         return posted[0]
@@ -427,7 +427,7 @@ class TestWebhookNotifierSend:
             resp.read = MagicMock(return_value=b"")
             return resp
 
-        with patch("oref.notify.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("rpacore.notify.urllib.request.urlopen", side_effect=fake_urlopen):
             notifier.send(_make_report())
 
         assert called_urls == ["https://custom.url/hook"]
@@ -444,7 +444,7 @@ class TestWebhookNotifierSend:
             resp.read = MagicMock(return_value=b"")
             return resp
 
-        with patch("oref.notify.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("rpacore.notify.urllib.request.urlopen", side_effect=fake_urlopen):
             notifier.send(_make_report())
 
         assert captured[0].get_header("Content-type") == "application/json"
@@ -461,7 +461,7 @@ class TestWebhookNotifierSend:
             resp.read = MagicMock(return_value=b"")
             return resp
 
-        with patch("oref.notify.urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch("rpacore.notify.urllib.request.urlopen", side_effect=fake_urlopen):
             notifier.send(_make_report())
 
         assert calls[0]["timeout"] == 30
@@ -500,7 +500,7 @@ class TestDispatch:
             def emit(self, r): self.records.append(r)
 
         cap = _Cap()
-        log = logging.getLogger("oref.test.dispatch")
+        log = logging.getLogger("rpacore.test.dispatch")
         log.addHandler(cap)
         log.setLevel(logging.ERROR)
         log.propagate = False

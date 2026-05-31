@@ -1,16 +1,16 @@
-"""Configuration loader for OREF."""
+"""Configuration loader for rpacore."""
 
 from __future__ import annotations
 
 import tomllib
 from pathlib import Path
 
-from oref._validation import type_error, value_error
+from rpacore._validation import type_error, value_error
 
 _DEFAULTS: dict[str, object] = {
     "max_retries": 0,
     "log_level": "INFO",
-    "db_path": "oref.db",
+    "db_path": "rpacore.db",
     "screenshot_dir": "",
     "credential_provider": "env",
 }

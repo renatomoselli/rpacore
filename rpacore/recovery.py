@@ -4,17 +4,17 @@ from __future__ import annotations
 
 from copy import copy
 
-from oref.persistence import load_transaction
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.persistence import load_transaction
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 def resume_transaction(
     tx_id: str,
     skills: list[Skill],
     *,
-    db_path: str = "oref.db",
+    db_path: str = "rpacore.db",
 ) -> Transaction:
     """Load a persisted transaction and reattach executable skills.
 

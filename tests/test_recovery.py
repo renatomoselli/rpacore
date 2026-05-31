@@ -1,15 +1,15 @@
-"""Tests for oref.recovery."""
+"""Tests for rpacore.recovery."""
 
 import pytest
 
-from oref.context import ProcessContext
-from oref.engine import Engine
-from oref.exceptions import SystemException
-from oref.persistence import save_transaction
-from oref.recovery import resume_transaction
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.engine import Engine
+from rpacore.exceptions import SystemException
+from rpacore.persistence import save_transaction
+from rpacore.recovery import resume_transaction
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-"""Tests for oref/queue.py and oref/runner.py."""
+"""Tests for rpacore/queue.py and rpacore/runner.py."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from oref.context import ProcessContext
-from oref.engine import Engine
-from oref.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
-from oref.runner import run_queue_loop
-from oref.skill import Skill
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.engine import Engine
+from rpacore.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
+from rpacore.runner import run_queue_loop
+from rpacore.skill import Skill
+from rpacore.transaction import Transaction
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +268,7 @@ class _FailSkill(Skill):
 class TestRunQueueLoop:
     def _make_ctx_parts(self):
         engine = Engine(max_retries=0)
-        from oref.credentials import EnvCredentialProvider
+        from rpacore.credentials import EnvCredentialProvider
         credentials = EnvCredentialProvider()
         config: dict = {}
         return engine, credentials, config
@@ -373,8 +373,8 @@ class TestRunQueueLoop:
 
     def test_notifier_called_after_item(self, tmp_path):
         """Notifiers receive a TransactionReport after each engine run."""
-        from oref.notify import Notifier
-        from oref.report import TransactionReport
+        from rpacore.notify import Notifier
+        from rpacore.report import TransactionReport
 
         sent: list[TransactionReport] = []
 

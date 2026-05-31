@@ -51,20 +51,21 @@ jobs:
       - name: Install wheel into clean environment
         run: |
           python -m venv .venv-check
-          .venv-check/bin/pip install --no-index --find-links=dist oref
+          .venv-check/bin/pip install --no-index --find-links=dist rpacore
+          .venv-check/bin/rpacore version
 
       - name: Smoke import public API
         run: |
           .venv-check/bin/python - <<'EOF'
-          import oref
-          assert hasattr(oref, 'Engine')
-          assert hasattr(oref, 'Transaction')
-          assert hasattr(oref, 'Skill')
-          assert hasattr(oref, 'BusinessException')
-          assert hasattr(oref, 'SystemException')
-          assert hasattr(oref, 'Status')
-          assert hasattr(oref, 'QueueRunSummary')
-          assert hasattr(oref, 'run_queue_loop')
+          import rpacore
+          assert hasattr(rpacore, 'Engine')
+          assert hasattr(rpacore, 'Transaction')
+          assert hasattr(rpacore, 'Skill')
+          assert hasattr(rpacore, 'BusinessException')
+          assert hasattr(rpacore, 'SystemException')
+          assert hasattr(rpacore, 'Status')
+          assert hasattr(rpacore, 'QueueRunSummary')
+          assert hasattr(rpacore, 'run_queue_loop')
           print('smoke import OK')
           EOF
 

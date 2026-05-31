@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from importlib import metadata
 
-import oref
+import rpacore
+from rpacore.cli import main
 
 
 class TestPackageVersion:
     def test_resolve_version_uses_installed_metadata(self, monkeypatch) -> None:
         monkeypatch.setattr(metadata, "version", lambda name: "1.2.3")
 
-        assert oref._resolve_version() == "1.2.3"
+        assert rpacore._resolve_version() == "1.2.3"
 
     def test_resolve_version_falls_back_when_package_missing(self, monkeypatch) -> None:
         def raise_not_found(name: str) -> str:
@@ -19,8 +20,16 @@ class TestPackageVersion:
 
         monkeypatch.setattr(metadata, "version", raise_not_found)
 
-        assert oref._resolve_version() == "0.0.0+local"
+        assert rpacore._resolve_version() == "0.0.0+local"
 
     def test_exported_version_is_non_empty(self) -> None:
-        assert isinstance(oref.__version__, str)
-        assert oref.__version__
+        assert isinstance(rpacore.__version__, str)
+        assert rpacore.__version__
+
+
+class TestCli:
+    def test_version_command_prints_version(self, capsys) -> None:
+        result = main(["version"])
+
+        assert result == 0
+        assert capsys.readouterr().out.strip() == rpacore.__version__

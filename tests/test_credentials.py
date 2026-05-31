@@ -1,4 +1,4 @@
-"""Tests for oref.credentials."""
+"""Tests for rpacore.credentials."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from oref.credentials import (
+from rpacore.credentials import (
     CredentialNotFoundError,
     CredentialProvider,
     EnvCredentialProvider,
@@ -17,12 +17,12 @@ from oref.credentials import (
 
 class TestEnvCredentialProvider:
     def test_returns_value_from_environ(self) -> None:
-        with patch.dict("os.environ", {"OREF_CRED_SAP_PASSWORD": "secret123"}):
+        with patch.dict("os.environ", {"RPACORE_CRED_SAP_PASSWORD": "secret123"}):
             provider = EnvCredentialProvider()
             assert provider.get("sap_password") == "secret123"
 
     def test_name_uppercased_for_env_key(self) -> None:
-        with patch.dict("os.environ", {"OREF_CRED_MY_TOKEN": "tok"}):
+        with patch.dict("os.environ", {"RPACORE_CRED_MY_TOKEN": "tok"}):
             provider = EnvCredentialProvider()
             assert provider.get("my_token") == "tok"
 
@@ -35,12 +35,12 @@ class TestEnvCredentialProvider:
         message = str(exc_info.value)
         assert "sap_password" in message
         assert "EnvCredentialProvider" in message
-        assert "OREF_CRED_SAP_PASSWORD" in message
+        assert "RPACORE_CRED_SAP_PASSWORD" in message
 
     def test_error_message_includes_env_key_name(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             provider = EnvCredentialProvider()
-            with pytest.raises(CredentialNotFoundError, match="OREF_CRED_DB_PASS"):
+            with pytest.raises(CredentialNotFoundError, match="RPACORE_CRED_DB_PASS"):
                 provider.get("db_pass")
 
     def test_satisfies_credential_provider_protocol(self) -> None:
@@ -58,7 +58,7 @@ class TestKeyringCredentialProvider:
 
         mock_keyring.get_password.assert_called_once_with("myapp", "db_password")
 
-    def test_default_service_is_oref(self) -> None:
+    def test_default_service_is_rpacore(self) -> None:
         mock_keyring = MagicMock()
         mock_keyring.get_password.return_value = "val"
 
@@ -66,7 +66,7 @@ class TestKeyringCredentialProvider:
             provider = KeyringCredentialProvider()
             provider.get("api_key")
 
-        mock_keyring.get_password.assert_called_once_with("oref", "api_key")
+        mock_keyring.get_password.assert_called_once_with("rpacore", "api_key")
 
     def test_raises_when_keyring_returns_none(self) -> None:
         mock_keyring = MagicMock()
@@ -80,12 +80,12 @@ class TestKeyringCredentialProvider:
         message = str(exc_info.value)
         assert "api_key" in message
         assert "KeyringCredentialProvider" in message
-        assert "oref" in message
+        assert "rpacore" in message
 
     def test_raises_import_error_when_keyring_not_installed(self) -> None:
         with patch.dict("sys.modules", {"keyring": None}):
             provider = KeyringCredentialProvider()
-            with pytest.raises(ImportError, match="pip install oref\\[keyring\\]"):
+            with pytest.raises(ImportError, match="pip install rpacore\\[keyring\\]"):
                 provider.get("api_key")
 
     def test_satisfies_credential_provider_protocol(self) -> None:
@@ -113,15 +113,15 @@ class TestBuildCredentialProvider:
 
 class TestProcessContextCredentials:
     def test_default_credentials_is_env_provider(self) -> None:
-        from oref.context import ProcessContext
-        from oref.transaction import Transaction
+        from rpacore.context import ProcessContext
+        from rpacore.transaction import Transaction
 
         ctx = ProcessContext(transaction=Transaction(reference="T1"))
         assert isinstance(ctx.credentials, EnvCredentialProvider)
 
     def test_custom_provider_accepted(self) -> None:
-        from oref.context import ProcessContext
-        from oref.transaction import Transaction
+        from rpacore.context import ProcessContext
+        from rpacore.transaction import Transaction
 
         mock_keyring = MagicMock()
         mock_keyring.get_password.return_value = "val"
@@ -136,9 +136,9 @@ class TestProcessContextCredentials:
         assert isinstance(ctx.credentials, KeyringCredentialProvider)
 
     def test_skill_can_access_credential_via_ctx(self) -> None:
-        from oref.context import ProcessContext
-        from oref.transaction import Transaction
+        from rpacore.context import ProcessContext
+        from rpacore.transaction import Transaction
 
-        with patch.dict("os.environ", {"OREF_CRED_API_KEY": "my_secret"}):
+        with patch.dict("os.environ", {"RPACORE_CRED_API_KEY": "my_secret"}):
             ctx = ProcessContext(transaction=Transaction(reference="T1"))
             assert ctx.credentials.get("api_key") == "my_secret"

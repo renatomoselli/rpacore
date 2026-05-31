@@ -1,4 +1,4 @@
-"""Tests for oref.screenshot."""
+"""Tests for rpacore.screenshot."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from oref.screenshot import capture_screenshot
+from rpacore.screenshot import capture_screenshot
 
 
 class TestCaptureScreenshot:
@@ -66,11 +66,11 @@ class TestEngineScreenshotIntegration:
     """Verify the engine sets screenshot_path on exceptions when screenshot_dir is configured."""
 
     def test_engine_captures_screenshot_on_business_exception(self, tmp_path: object) -> None:
-        from oref import Engine, Transaction
-        from oref.context import ProcessContext
-        from oref.exceptions import BusinessException
-        from oref.skill import Skill
-        from oref.status import Status
+        from rpacore import Engine, Transaction
+        from rpacore.context import ProcessContext
+        from rpacore.exceptions import BusinessException
+        from rpacore.skill import Skill
+        from rpacore.status import Status
 
         class FailSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
@@ -79,7 +79,7 @@ class TestEngineScreenshotIntegration:
         tx = Transaction(reference="test")
         tx.skills = [FailSkill(name="fail", execution_order=1)]
 
-        with patch("oref.engine.capture_screenshot", return_value="/tmp/shot.png") as mock_cap:
+        with patch("rpacore.engine.capture_screenshot", return_value="/tmp/shot.png") as mock_cap:
             engine = Engine(screenshot_dir="screenshots")
             engine.run(ProcessContext(transaction=tx))
 
@@ -88,11 +88,11 @@ class TestEngineScreenshotIntegration:
         mock_cap.assert_called_once_with("screenshots")
 
     def test_engine_captures_screenshot_on_system_exception(self, tmp_path: object) -> None:
-        from oref import Engine, Transaction
-        from oref.context import ProcessContext
-        from oref.exceptions import SystemException
-        from oref.skill import Skill
-        from oref.status import Status
+        from rpacore import Engine, Transaction
+        from rpacore.context import ProcessContext
+        from rpacore.exceptions import SystemException
+        from rpacore.skill import Skill
+        from rpacore.status import Status
 
         class FailSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
@@ -101,7 +101,7 @@ class TestEngineScreenshotIntegration:
         tx = Transaction(reference="test")
         tx.skills = [FailSkill(name="fail", execution_order=1)]
 
-        with patch("oref.engine.capture_screenshot", return_value="/tmp/crash.png") as mock_cap:
+        with patch("rpacore.engine.capture_screenshot", return_value="/tmp/crash.png") as mock_cap:
             engine = Engine(screenshot_dir="screenshots")
             engine.run(ProcessContext(transaction=tx))
 
@@ -109,10 +109,10 @@ class TestEngineScreenshotIntegration:
         mock_cap.assert_called_once_with("screenshots")
 
     def test_engine_captures_screenshot_on_unhandled_exception(self) -> None:
-        from oref import Engine, Transaction
-        from oref.context import ProcessContext
-        from oref.skill import Skill
-        from oref.status import Status
+        from rpacore import Engine, Transaction
+        from rpacore.context import ProcessContext
+        from rpacore.skill import Skill
+        from rpacore.status import Status
 
         class FailSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
@@ -121,17 +121,17 @@ class TestEngineScreenshotIntegration:
         tx = Transaction(reference="test")
         tx.skills = [FailSkill(name="fail", execution_order=1)]
 
-        with patch("oref.engine.capture_screenshot", return_value="/tmp/unhandled.png"):
+        with patch("rpacore.engine.capture_screenshot", return_value="/tmp/unhandled.png"):
             engine = Engine(screenshot_dir="screenshots")
             engine.run(ProcessContext(transaction=tx))
 
         assert tx.skills[0].exceptions[0].screenshot_path == "/tmp/unhandled.png"
 
     def test_engine_skips_screenshot_when_dir_empty(self) -> None:
-        from oref import Engine, Transaction
-        from oref.context import ProcessContext
-        from oref.exceptions import BusinessException
-        from oref.skill import Skill
+        from rpacore import Engine, Transaction
+        from rpacore.context import ProcessContext
+        from rpacore.exceptions import BusinessException
+        from rpacore.skill import Skill
 
         class FailSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
@@ -140,7 +140,7 @@ class TestEngineScreenshotIntegration:
         tx = Transaction(reference="test")
         tx.skills = [FailSkill(name="fail", execution_order=1)]
 
-        with patch("oref.engine.capture_screenshot") as mock_cap:
+        with patch("rpacore.engine.capture_screenshot") as mock_cap:
             engine = Engine(screenshot_dir="")
             engine.run(ProcessContext(transaction=tx))
 

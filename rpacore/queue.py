@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from oref._validation import type_error, value_error
+from rpacore._validation import type_error, value_error
 
 
 class QueueStatus(StrEnum):

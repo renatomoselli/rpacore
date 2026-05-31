@@ -1,6 +1,6 @@
 max_retries = 0
 log_level = "INFO"
-db_path = "oref.db"
+db_path = "rpacore.db"
 screenshot_dir = ""
 credential_provider = "env"
 
@@ -12,8 +12,8 @@ max_retries = 3
 # [notification.email]
 # host = "smtp.example.com"
 # port = 587
-# from_addr = "oref@example.com"
+# from_addr = "rpacore@example.com"
 # to_addrs = ["admin@example.com"]
 
 # [notification.webhook]
-# url = "https://hooks.example.com/oref"
+# url = "https://hooks.example.com/rpacore"

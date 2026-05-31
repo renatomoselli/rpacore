@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from oref.credentials import CredentialProvider, EnvCredentialProvider
-from oref.transaction import Transaction
+from rpacore.credentials import CredentialProvider, EnvCredentialProvider
+from rpacore.transaction import Transaction
 
 
 @dataclass

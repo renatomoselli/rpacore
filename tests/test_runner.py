@@ -1,4 +1,4 @@
-"""Tests for oref.runner — QueueRunSummary and after_item callback."""
+"""Tests for rpacore.runner — QueueRunSummary and after_item callback."""
 
 from __future__ import annotations
 
@@ -7,16 +7,16 @@ from typing import Iterator
 
 import pytest
 
-from oref.context import ProcessContext
-from oref.credentials import EnvCredentialProvider
-from oref.engine import Engine
-from oref.exceptions import BusinessException
-from oref.queue import QueueItem
-import oref.runner as runner_module
-from oref.runner import QueueRunSummary, run_queue_loop
-from oref.skill import Skill
-from oref.status import Status
-from oref.transaction import Transaction
+from rpacore.context import ProcessContext
+from rpacore.credentials import EnvCredentialProvider
+from rpacore.engine import Engine
+from rpacore.exceptions import BusinessException
+from rpacore.queue import QueueItem
+import rpacore.runner as runner_module
+from rpacore.runner import QueueRunSummary, run_queue_loop
+from rpacore.skill import Skill
+from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 # ---------------------------------------------------------------------------

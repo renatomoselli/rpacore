@@ -3,7 +3,7 @@
 This module contains three Skill subclasses that form a complete automation
 scenario. It is user-space code — not framework code — and is intended to show
 the pattern a developer would follow when building their own automation on top
-of OREF.
+of rpacore.
 
 Scenario
 --------
@@ -17,9 +17,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from oref.context import ProcessContext
-from oref.exceptions import BusinessException, SystemException
-from oref.skill import Skill
+from rpacore.context import ProcessContext
+from rpacore.exceptions import BusinessException, SystemException
+from rpacore.skill import Skill
 
 
 class ValidateInput(Skill):
