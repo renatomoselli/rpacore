@@ -10,6 +10,9 @@ from rpacore.status import Status
 from rpacore.transaction import Transaction
 
 
+_SCHEMA_VERSION = 1
+
+
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=1)
     conn.execute("PRAGMA foreign_keys = ON")
@@ -17,7 +20,22 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row["name"] for row in rows}
+
+
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    if column_name not in _table_columns(conn, table_name):
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Create or migrate persistence tables.
+
+    This is intentionally idempotent because save, load, and list operations all
+    call it before touching persisted transactions.
+    """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id          TEXT PRIMARY KEY,
@@ -27,12 +45,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             created_at  TEXT NOT NULL DEFAULT ''
         )
     """)
-    # Migration: add created_at for databases created before this column existed.
-    try:
-        conn.execute("ALTER TABLE transactions ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError as exc:
-        if "duplicate column name" not in str(exc).lower():
-            raise
+    _ensure_column(conn, "transactions", "created_at", "created_at TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        "UPDATE transactions SET created_at = ? WHERE created_at = ''",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS skills (
             id              TEXT PRIMARY KEY,
@@ -58,6 +75,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
         )
     """)
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+    conn.commit()
 
 
 def _skill_id(transaction_id: str, skill: Skill) -> str:
@@ -75,7 +94,8 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
         _ensure_schema(conn)
         now_iso = datetime.now(timezone.utc).isoformat()
         with conn:
-            # INSERT OR IGNORE preserves the original created_at on subsequent saves.
+            # INSERT OR IGNORE creates the row when needed; the UPDATE below
+            # preserves an existing created_at unless a legacy row needs backfill.
             conn.execute(
                 "INSERT OR IGNORE INTO transactions "
                 "(id, reference, status, retry_count, created_at) VALUES (?, ?, ?, ?, ?)",

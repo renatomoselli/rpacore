@@ -1,12 +1,13 @@
 """Tests for rpacore.persistence."""
 
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, SystemException
-from rpacore.persistence import load_transaction, save_transaction
+from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import Transaction
@@ -25,6 +26,63 @@ def lock_database(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=1)
     conn.execute("BEGIN EXCLUSIVE")
     return conn
+
+
+def create_legacy_db(db_path: str) -> str:
+    transaction_id = "legacy-tx-001"
+    skill_id = f"{transaction_id}:validate:1"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "CREATE TABLE transactions ("
+            "id TEXT PRIMARY KEY, reference TEXT NOT NULL, "
+            "status TEXT NOT NULL, retry_count INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE skills ("
+            "id TEXT PRIMARY KEY, transaction_id TEXT NOT NULL, "
+            "name TEXT NOT NULL, execution_order INTEGER NOT NULL, "
+            "status TEXT NOT NULL, arguments TEXT NOT NULL DEFAULT '{}', "
+            "UNIQUE (transaction_id, name, execution_order), "
+            "FOREIGN KEY (transaction_id) REFERENCES transactions(id))"
+        )
+        conn.execute(
+            "CREATE TABLE exceptions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, skill_id TEXT NOT NULL, "
+            "exception_type TEXT NOT NULL, message TEXT NOT NULL, action TEXT NOT NULL, "
+            "retry_number INTEGER NOT NULL, datetime_occurred TEXT NOT NULL, "
+            "screenshot_path TEXT NOT NULL DEFAULT '', "
+            "FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE)"
+        )
+        conn.execute(
+            "INSERT INTO transactions (id, reference, status, retry_count) VALUES (?, ?, ?, ?)",
+            (transaction_id, "legacy-ref", "failed", 2),
+        )
+        conn.execute(
+            "INSERT INTO skills "
+            "(id, transaction_id, name, execution_order, status, arguments) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (skill_id, transaction_id, "validate", 1, "failed", '{"invoice": 42}'),
+        )
+        conn.execute(
+            "INSERT INTO exceptions "
+            "(skill_id, exception_type, message, action, retry_number, datetime_occurred, screenshot_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                skill_id,
+                "business",
+                "missing field",
+                "validate",
+                2,
+                "2026-01-01T00:00:00+00:00",
+                "shot.png",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return transaction_id
 
 
 class TestSaveAndLoad:
@@ -209,8 +267,6 @@ class TestSaveAndLoad:
         lock_conn = lock_database(db_path)
         try:
             with pytest.raises(sqlite3.OperationalError, match="database is locked"):
-                from rpacore.persistence import list_transactions
-
                 list_transactions(db_path)
         finally:
             lock_conn.rollback()
@@ -278,3 +334,78 @@ class TestResumeScenario:
         assert counts["a"] == 0  # already successful, engine skips it
         assert counts["b"] == 1
         assert loaded.status is Status.SUCCESSFUL
+
+
+class TestSchemaMigration:
+    def test_legacy_schema_loads_existing_transaction_skill_and_exception(self, db_path) -> None:
+        transaction_id = create_legacy_db(db_path)
+
+        loaded = load_transaction(transaction_id, db_path)
+
+        assert loaded.id == transaction_id
+        assert loaded.reference == "legacy-ref"
+        assert loaded.status is Status.FAILED
+        assert loaded.retry_count == 2
+        assert len(loaded.skills) == 1
+        assert loaded.skills[0].name == "validate"
+        assert loaded.skills[0].status is Status.FAILED
+        assert loaded.skills[0].arguments == {"invoice": 42}
+        assert len(loaded.skills[0].exceptions) == 1
+        assert isinstance(loaded.skills[0].exceptions[0], BusinessException)
+        assert str(loaded.skills[0].exceptions[0]) == "missing field"
+        assert loaded.skills[0].exceptions[0].screenshot_path == "shot.png"
+
+    def test_legacy_schema_gets_created_at_column(self, db_path) -> None:
+        create_legacy_db(db_path)
+
+        list_transactions(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(transactions)")}
+        finally:
+            conn.close()
+        assert "created_at" in columns
+
+    def test_legacy_schema_backfills_created_at_for_since_filter(self, db_path) -> None:
+        transaction_id = create_legacy_db(db_path)
+        cutoff = datetime.now(timezone.utc)
+
+        result = list_transactions(db_path, since=cutoff)
+
+        assert [tx.id for tx in result] == [transaction_id]
+
+    def test_legacy_schema_migration_is_idempotent(self, db_path) -> None:
+        transaction_id = create_legacy_db(db_path)
+
+        first = list_transactions(db_path)
+        second = list_transactions(db_path)
+
+        assert [tx.id for tx in first] == [transaction_id]
+        assert [tx.id for tx in second] == [transaction_id]
+
+    def test_schema_version_is_recorded_after_migration(self, db_path) -> None:
+        create_legacy_db(db_path)
+
+        list_transactions(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+        assert user_version == 1
+
+    def test_unrelated_schema_errors_are_not_swallowed(self, db_path) -> None:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE VIEW transactions AS "
+                "SELECT 'tx-view' AS id, 'view-ref' AS reference, 'pending' AS status, 0 AS retry_count"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(sqlite3.OperationalError):
+            save_transaction(make_transaction(), db_path)
