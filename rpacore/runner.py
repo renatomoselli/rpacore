@@ -10,6 +10,7 @@ from typing import Callable
 
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialProvider
+from rpacore.exceptions import BusinessException
 from rpacore.engine import Engine
 from rpacore.logger import get_logger
 from rpacore.notify import Notifier, dispatch
@@ -41,6 +42,7 @@ def run_queue_loop(
     logger: logging.Logger | None = None,
     after_item: Callable[[QueueItem, Transaction | None, Exception | None], None] | None = None,
     stop_event: threading.Event | None = None,
+    retry_business_failures: bool = False,
 ) -> QueueRunSummary:
     """Drain a queue by running each item through the engine.
 
@@ -49,7 +51,10 @@ def run_queue_loop(
     - Builds a ProcessContext with the item's payload in ctx.data.
     - Runs engine.run(ctx).
         - Generates a report and dispatches notifiers after engine.run(ctx).
-    - Calls queue.complete() if transaction.status is SUCCESSFUL, queue.fail() otherwise.
+    - Calls queue.complete() if transaction.status is SUCCESSFUL.
+    - Calls queue.fail() with retry=False for business-only transaction failures
+      unless retry_business_failures=True.
+    - Calls queue.fail() with retry=True for system failures and unexpected errors.
     - Also calls queue.fail() if build_transaction() or any unexpected error raises.
     - Calls after_item(item, transaction, error) once per item regardless of outcome.
             transaction is None if build_transaction() raised; error is None on normal paths
@@ -74,6 +79,10 @@ def run_queue_loop(
                            the next item. The item currently in-flight completes normally.
                            The caller is responsible for setting the event (e.g. from a
                            signal handler). The library never calls signal.signal().
+        retry_business_failures:
+                           If True, retry failed business transactions according to the
+                           queue retry policy. Defaults to False so deterministic business
+                           failures are terminal queue outcomes.
 
     Returns:
         QueueRunSummary with counts of processed, completed, and failed items.
@@ -151,7 +160,12 @@ def run_queue_loop(
                 extra={"event": "queue_item_complete", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
             )
         else:
-            queue.fail(item.id)
+            retry = (
+                retry_business_failures
+                or error is not None
+                or not _transaction_has_only_business_failures(transaction)
+            )
+            queue.fail(item.id, retry=retry)
             summary.failed += 1
             if not error and not callback_failed and ctx is not None:
                 log.warning(
@@ -161,3 +175,14 @@ def run_queue_loop(
                 )
 
     return summary
+
+
+def _transaction_has_only_business_failures(transaction: Transaction | None) -> bool:
+    """Return True when all failed skills ended with business exceptions."""
+    if transaction is None:
+        return False
+    failed = transaction.failed_skills()
+    return bool(failed) and all(
+        skill.exceptions and isinstance(skill.exceptions[-1], BusinessException)
+        for skill in failed
+    )

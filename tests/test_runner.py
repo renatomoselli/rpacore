@@ -10,7 +10,7 @@ import pytest
 from rpacore.context import ProcessContext
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
-from rpacore.exceptions import BusinessException
+from rpacore.exceptions import BusinessException, SystemException
 from rpacore.queue import QueueItem
 import rpacore.runner as runner_module
 from rpacore.runner import QueueRunSummary, run_queue_loop
@@ -30,6 +30,7 @@ class _FakeQueue:
         self._items = list(items)
         self.completed: list[str] = []
         self.failed: list[str] = []
+        self.fail_retries: list[bool] = []
 
     def next_item(self, worker_id: str = "") -> QueueItem | None:
         return self._items.pop(0) if self._items else None
@@ -37,8 +38,9 @@ class _FakeQueue:
     def complete(self, item_id: str) -> None:
         self.completed.append(item_id)
 
-    def fail(self, item_id: str) -> None:
+    def fail(self, item_id: str, *, retry: bool = True) -> None:
         self.failed.append(item_id)
+        self.fail_retries.append(retry)
 
 
 def _item(ref: str) -> QueueItem:
@@ -53,6 +55,11 @@ class _SuccessSkill(Skill):
 class _BusinessFailSkill(Skill):
     def execute(self, ctx: ProcessContext) -> None:
         raise BusinessException("bad data", action=self.name)
+
+
+class _SystemFailSkill(Skill):
+    def execute(self, ctx: ProcessContext) -> None:
+        raise SystemException("system down", action=self.name)
 
 
 def _make_engine_with(skill_cls: type[Skill]) -> tuple[Engine, Transaction]:
@@ -71,6 +78,7 @@ def _run(
     build_raises: Exception | None = None,
     after_item=None,
     stop_event: threading.Event | None = None,
+    retry_business_failures: bool = False,
 ) -> tuple[QueueRunSummary, _FakeQueue]:
     queue = _FakeQueue(items)
 
@@ -88,6 +96,7 @@ def _run(
         worker_id="test-worker",
         after_item=after_item,
         stop_event=stop_event,
+        retry_business_failures=retry_business_failures,
     )
     return summary, queue
 
@@ -118,6 +127,30 @@ class TestQueueRunSummary:
         assert summary.completed == 0
         assert summary.failed == 2
         assert queue.failed == ["a", "b"]
+        assert queue.fail_retries == [False, False]
+
+    def test_system_fail_retries_queue_item(self) -> None:
+        summary, queue = _run(
+            [_item("a"), _item("b")],
+            skill_cls=_SystemFailSkill,
+        )
+        assert summary.processed == 2
+        assert summary.completed == 0
+        assert summary.failed == 2
+        assert queue.failed == ["a", "b"]
+        assert queue.fail_retries == [True, True]
+
+    def test_business_failures_can_use_queue_retry_policy(self) -> None:
+        summary, queue = _run(
+            [_item("a")],
+            skill_cls=_BusinessFailSkill,
+            retry_business_failures=True,
+        )
+        assert summary.processed == 1
+        assert summary.completed == 0
+        assert summary.failed == 1
+        assert queue.failed == ["a"]
+        assert queue.fail_retries == [True]
 
     def test_build_transaction_error_counted_as_failed(self) -> None:
         summary, queue = _run(
@@ -128,6 +161,7 @@ class TestQueueRunSummary:
         assert summary.completed == 0
         assert summary.failed == 1
         assert queue.failed == ["x"]
+        assert queue.fail_retries == [True]
 
     def test_mixed_outcomes(self) -> None:
         queue = _FakeQueue([_item("ok"), _item("bad")])
@@ -150,6 +184,33 @@ class TestQueueRunSummary:
         assert summary.processed == 2
         assert summary.completed == 1
         assert summary.failed == 1
+
+    def test_mixed_business_and_system_failure_retries_queue_item(self) -> None:
+        queue = _FakeQueue([_item("mixed")])
+
+        def build(item: QueueItem) -> Transaction:
+            return Transaction(
+                reference=item.reference,
+                skills=[
+                    _BusinessFailSkill("validate", 1),
+                    _SystemFailSkill("submit", 2),
+                ],
+            )
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=build,
+            config={},
+            credentials=_CREDS,
+            worker_id="w",
+        )
+
+        assert summary.processed == 1
+        assert summary.completed == 0
+        assert summary.failed == 1
+        assert queue.failed == ["mixed"]
+        assert queue.fail_retries == [True]
 
     def test_returns_queue_run_summary_instance(self) -> None:
         summary, _ = _run([])

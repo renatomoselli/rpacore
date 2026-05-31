@@ -41,7 +41,7 @@ class QueueProvider(Protocol):
     def add(self, item: QueueItem) -> None: ...
     def next_item(self, worker_id: str = "") -> QueueItem | None: ...
     def complete(self, item_id: str) -> None: ...
-    def fail(self, item_id: str) -> None: ...
+    def fail(self, item_id: str, *, retry: bool = True) -> None: ...
 
 
 _DEFAULT_DB_PATH = "queue.db"
@@ -97,8 +97,9 @@ class SqliteQueue:
     Stale reclaim: items left IN_PROGRESS longer than claim_timeout seconds
     are treated as abandoned and returned to PENDING on the next next_item() call.
 
-    Retry: fail() increments retry_count and resets to PENDING if under
-    max_retries; otherwise marks FAILED permanently.
+    Retry: fail() increments retry_count. With retry=True it resets to PENDING
+    if under max_retries; otherwise it marks FAILED permanently. With
+    retry=False it marks FAILED immediately.
 
     Config keys (all from the [queue] section of config.toml):
         db_path        (str)  Path to the SQLite file. Default: "queue.db"
@@ -232,8 +233,8 @@ class SqliteQueue:
         finally:
             conn.close()
 
-    def fail(self, item_id: str) -> None:
-        """Increment retry_count. Reset to PENDING if under max_retries, else mark FAILED."""
+    def fail(self, item_id: str, *, retry: bool = True) -> None:
+        """Increment retry_count and mark the item retriable or terminally failed."""
         conn = _connect(self.db_path)
         try:
             with conn:
@@ -243,7 +244,7 @@ class SqliteQueue:
                 if row is None:
                     return
                 new_count = row["retry_count"] + 1
-                if new_count <= self.max_retries:
+                if retry and new_count <= self.max_retries:
                     conn.execute(
                         "UPDATE queue_items SET status = 'pending', retry_count = ?, "
                         "claimed_at = NULL WHERE id = ?",

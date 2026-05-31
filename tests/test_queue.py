@@ -11,6 +11,7 @@ import pytest
 
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
+from rpacore.exceptions import BusinessException, SystemException
 from rpacore.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
 from rpacore.runner import run_queue_loop
 from rpacore.skill import Skill
@@ -155,6 +156,16 @@ class TestSqliteQueueCRUD:
         stored = q.get_item(item.id)
         assert stored.status == QueueStatus.FAILED
 
+    def test_fail_can_mark_terminal_without_retry(self, tmp_path):
+        q = make_queue(tmp_path, max_retries=3)
+        q.add(make_item())
+        item = q.next_item()
+        q.fail(item.id, retry=False)
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.status == QueueStatus.FAILED
+        assert stored.retry_count == 1
+
     def test_fail_unknown_id_is_noop(self, tmp_path):
         q = make_queue(tmp_path)
         q.fail("nonexistent-id")  # should not raise
@@ -265,6 +276,22 @@ class _FailSkill(Skill):
         raise RuntimeError("skill boom")
 
 
+class _BusinessFailSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("business_fail", 1)
+
+    def execute(self, ctx: ProcessContext) -> None:
+        raise BusinessException("bad data", action=self.name)
+
+
+class _SystemFailSkill(Skill):
+    def __init__(self) -> None:
+        super().__init__("system_fail", 1)
+
+    def execute(self, ctx: ProcessContext) -> None:
+        raise SystemException("service unavailable", action=self.name)
+
+
 class TestRunQueueLoop:
     def _make_ctx_parts(self):
         engine = Engine(max_retries=0)
@@ -304,6 +331,74 @@ class TestRunQueueLoop:
         run_queue_loop(q, engine, build_transaction, config, credentials)
         stored = q.get_item(item.id)
         assert stored.status == QueueStatus.FAILED, f"Expected failed, got {stored.status}"
+
+    def test_business_failure_does_not_requeue_by_default(self, tmp_path):
+        q = make_queue(tmp_path, max_retries=3)
+        item = make_item("ref-business")
+        q.add(item)
+
+        engine, credentials, config = self._make_ctx_parts()
+
+        def build_transaction(qi: QueueItem) -> Transaction:
+            return Transaction(reference=qi.reference, skills=[_BusinessFailSkill()])
+
+        run_queue_loop(q, engine, build_transaction, config, credentials)
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.status == QueueStatus.FAILED
+        assert stored.retry_count == 1
+        assert q.next_item("worker-2") is None
+
+    def test_system_failure_still_follows_queue_retry_policy(self, tmp_path):
+        q = make_queue(tmp_path, max_retries=3)
+        item = make_item("ref-system")
+        q.add(item)
+
+        engine, credentials, config = self._make_ctx_parts()
+        stop_event = threading.Event()
+
+        def build_transaction(qi: QueueItem) -> Transaction:
+            return Transaction(reference=qi.reference, skills=[_SystemFailSkill()])
+
+        run_queue_loop(
+            q,
+            engine,
+            build_transaction,
+            config,
+            credentials,
+            after_item=lambda item, tx, err: stop_event.set(),
+            stop_event=stop_event,
+        )
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.status == QueueStatus.PENDING
+        assert stored.retry_count == 1
+
+    def test_business_failure_can_follow_queue_retry_policy(self, tmp_path):
+        q = make_queue(tmp_path, max_retries=3)
+        item = make_item("ref-business-retry")
+        q.add(item)
+
+        engine, credentials, config = self._make_ctx_parts()
+        stop_event = threading.Event()
+
+        def build_transaction(qi: QueueItem) -> Transaction:
+            return Transaction(reference=qi.reference, skills=[_BusinessFailSkill()])
+
+        run_queue_loop(
+            q,
+            engine,
+            build_transaction,
+            config,
+            credentials,
+            after_item=lambda item, tx, err: stop_event.set(),
+            stop_event=stop_event,
+            retry_business_failures=True,
+        )
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.status == QueueStatus.PENDING
+        assert stored.retry_count == 1
 
     def test_payload_available_in_ctx_data(self, tmp_path):
         q = make_queue(tmp_path, max_retries=0)
