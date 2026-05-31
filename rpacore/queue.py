@@ -50,7 +50,7 @@ _DEFAULT_MAX_RETRIES = 3
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=1)
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
@@ -181,9 +181,11 @@ class SqliteQueue:
 
         now = datetime.now(timezone.utc)
         conn = _connect(self.db_path)
+        transaction_started = False
         try:
             # BEGIN IMMEDIATE prevents two workers from claiming the same item.
             conn.execute("BEGIN IMMEDIATE")
+            transaction_started = True
 
             # Reclaim stale items first.
             conn.execute(
@@ -215,7 +217,8 @@ class SqliteQueue:
             ).fetchone()
             return _row_to_item(updated)
         except Exception:
-            conn.execute("ROLLBACK")
+            if transaction_started:
+                conn.execute("ROLLBACK")
             raise
         finally:
             conn.close()

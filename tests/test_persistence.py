@@ -21,6 +21,12 @@ def make_transaction(**kwargs) -> Transaction:
     return Transaction(reference="REF-001", **kwargs)
 
 
+def lock_database(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path, timeout=1)
+    conn.execute("BEGIN EXCLUSIVE")
+    return conn
+
+
 class TestSaveAndLoad:
     def test_roundtrip_empty_transaction(self, db_path) -> None:
         tx = make_transaction()
@@ -176,6 +182,39 @@ class TestSaveAndLoad:
         tx = make_transaction(skills=[s1, s2])
         with pytest.raises(sqlite3.IntegrityError):
             save_transaction(tx, db_path)
+
+    def test_save_locked_database_exposes_sqlite_lock_error(self, db_path) -> None:
+        save_transaction(make_transaction(), db_path)
+        lock_conn = lock_database(db_path)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                save_transaction(make_transaction(), db_path)
+        finally:
+            lock_conn.rollback()
+            lock_conn.close()
+
+    def test_load_locked_database_exposes_sqlite_lock_error(self, db_path) -> None:
+        tx = make_transaction()
+        save_transaction(tx, db_path)
+        lock_conn = lock_database(db_path)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                load_transaction(tx.id, db_path)
+        finally:
+            lock_conn.rollback()
+            lock_conn.close()
+
+    def test_list_locked_database_exposes_sqlite_lock_error(self, db_path) -> None:
+        save_transaction(make_transaction(), db_path)
+        lock_conn = lock_database(db_path)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                from rpacore.persistence import list_transactions
+
+                list_transactions(db_path)
+        finally:
+            lock_conn.rollback()
+            lock_conn.close()
 
 
 class TestCrashRecovery:

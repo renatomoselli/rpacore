@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+import sqlite3
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -217,6 +218,21 @@ class TestSqliteQueueAtomicClaim:
             t.join()
 
         assert len(claimed_ids) == len(set(claimed_ids)), "Duplicate claims detected"
+
+    def test_locked_database_exposes_lock_error(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("locked"))
+
+        db_path = str(tmp_path / "queue.db")
+        lock_conn = sqlite3.connect(db_path, timeout=1)
+        try:
+            lock_conn.execute("BEGIN IMMEDIATE")
+
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                q.next_item("blocked-worker")
+        finally:
+            lock_conn.rollback()
+            lock_conn.close()
 
 
 # ---------------------------------------------------------------------------

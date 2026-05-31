@@ -11,7 +11,7 @@ from rpacore.transaction import Transaction
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=1)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     return conn
@@ -30,8 +30,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # Migration: add created_at for databases created before this column existed.
     try:
         conn.execute("ALTER TABLE transactions ADD COLUMN created_at TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass  # Column already present.
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
     conn.execute("""
         CREATE TABLE IF NOT EXISTS skills (
             id              TEXT PRIMARY KEY,
