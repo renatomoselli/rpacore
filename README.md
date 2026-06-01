@@ -52,6 +52,12 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
+To validate the installed-wheel path used for release gates:
+
+```bash
+python scripts/validate_installed_wheel.py
+```
+
 ## Quick Start
 
 ```python

@@ -185,6 +185,16 @@ For release-oriented work, validate not just tests but also packaging:
 - install the wheel into a clean virtualenv
 - run `twine check` before release actions
 
+Release gates use a reproducible installed-wheel smoke script:
+
+```powershell
+python scripts/validate_installed_wheel.py
+```
+
+The script builds a wheel, installs it into a clean virtual environment outside
+the checkout, verifies import/version/CLI behavior, and can optionally run
+selected `oref-examples` pytest paths via `--examples-pytest`.
+
 ## Vision
 
 RPA Core aims to be a deterministic, stateful RPA framework in Python, designed for
