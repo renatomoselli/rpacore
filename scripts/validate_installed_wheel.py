@@ -94,6 +94,7 @@ def validate_installed_wheel(
     _run([str(_venv_script(venv_dir, "rpacore")), "version"], cwd=outside_dir)
 
     if examples_pytest:
+        _run([str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir)
         for test_path in examples_pytest:
             _run([str(python), "-m", "pytest", test_path], cwd=examples_repo)
 

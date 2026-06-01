@@ -124,6 +124,9 @@ class TestInstalledWheelValidationScript:
                         examples_pytest=["examples/rest_api_batch/tests"],
                     )
 
+        assert len(calls) == 7
+        assert calls[-2][0][-2:] == ["install", "pytest"]
+        assert calls[-2][1] == work_dir / "outside"
         assert calls[-1][0][-2:] == ["pytest", "examples/rest_api_batch/tests"]
         assert calls[-1][1] == examples_repo
 
