@@ -30,8 +30,20 @@ def make_skill(name: str, order: int, status: Status = Status.SUCCESSFUL) -> Ski
     return s
 
 
-def biz(message: str, retry: int = 0, action: str = "", screenshot: str = "") -> BusinessException:
-    return BusinessException(message, retry_number=retry, action=action, screenshot_path=screenshot)
+def biz(
+    message: str,
+    retry: int = 0,
+    action: str = "",
+    screenshot: str = "",
+    stop: bool = False,
+) -> BusinessException:
+    return BusinessException(
+        message,
+        retry_number=retry,
+        action=action,
+        screenshot_path=screenshot,
+        stop=stop,
+    )
 
 
 def sys_(message: str, retry: int = 0, action: str = "", screenshot: str = "") -> SystemException:
@@ -214,6 +226,24 @@ class TestRenderText:
         assert "[BIZ]" not in text
         assert "[SYS]" not in text
 
+    def test_stopping_business_exception_is_labeled(self):
+        skill = make_skill("validate", 1, Status.FAILED)
+        skill.exceptions = [biz("bad data", retry=0, stop=True)]
+        tx = make_transaction(status=Status.FAILED, skills=[skill])
+
+        text = render_text(generate_report(tx))
+
+        assert "stop=true" in text
+
+    def test_skipped_skill_status_is_shown(self):
+        skill = make_skill("write_output", 2, Status.SKIPPED)
+        tx = make_transaction(status=Status.FAILED, skills=[skill])
+
+        text = render_text(generate_report(tx))
+
+        assert "write_output" in text
+        assert "skipped" in text
+
 
 # ---------------------------------------------------------------------------
 # TestRenderHTML
@@ -269,6 +299,15 @@ class TestRenderHTML:
         tx = make_transaction(skills=[skill])
         html = render_html(generate_report(tx))
         assert 'class="skill skipped"' in html
+
+    def test_stopping_business_exception_is_labeled(self):
+        skill = make_skill("validate", 1, Status.FAILED)
+        skill.exceptions = [biz("bad data", retry=0, stop=True)]
+        tx = make_transaction(status=Status.FAILED, skills=[skill])
+
+        html = render_html(generate_report(tx))
+
+        assert "stop=true" in html
 
 
 # ---------------------------------------------------------------------------

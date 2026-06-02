@@ -140,6 +140,8 @@ Create `config.toml` in the root of `rpacore-examples`:
 
 ```toml
 max_retries = 1
+retry_delay = 0.0
+retry_backoff = 1.0
 log_level = "INFO"
 db_path = "rpacore.db"
 screenshot_dir = ""
@@ -215,7 +217,11 @@ def main() -> None:
     ]
 
     ctx = ProcessContext(transaction=tx, config=config)
-    Engine(max_retries=int(config["max_retries"])).run(ctx)
+    Engine(
+        max_retries=int(config["max_retries"]),
+        retry_delay=float(config["retry_delay"]),
+        retry_backoff=float(config["retry_backoff"]),
+    ).run(ctx)
     save_transaction(tx, db_path=str(config["db_path"]))
 
     print(f"Transaction {tx.id}: {tx.status}")

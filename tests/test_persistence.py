@@ -148,6 +148,21 @@ class TestSaveAndLoad:
         assert loaded_exc.action == "validate"
         assert loaded_exc.retry_number == 0
 
+    def test_roundtrip_preserves_stopping_business_exception(self, db_path) -> None:
+        skill = Skill("validate", 1)
+        exc = BusinessException("bad data", action="validate", retry_number=0, stop=True)
+        skill.exceptions.append(exc)
+        skill.status = Status.FAILED
+        tx = make_transaction(skills=[skill])
+
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+
+        loaded_exc = loaded.skills[0].exceptions[0]
+        assert isinstance(loaded_exc, BusinessException)
+        assert loaded_exc.stop is True
+        assert loaded_exc.stops_execution is True
+
     def test_roundtrip_preserves_system_exception(self, db_path) -> None:
         skill = Skill("connect", 1)
         exc = SystemException("timeout", action="connect", retry_number=1)
@@ -354,6 +369,7 @@ class TestSchemaMigration:
         assert isinstance(loaded.skills[0].exceptions[0], BusinessException)
         assert str(loaded.skills[0].exceptions[0]) == "missing field"
         assert loaded.skills[0].exceptions[0].screenshot_path == "shot.png"
+        assert loaded.skills[0].exceptions[0].stops_execution is False
 
     def test_legacy_schema_gets_created_at_column(self, db_path) -> None:
         create_legacy_db(db_path)
@@ -366,6 +382,18 @@ class TestSchemaMigration:
         finally:
             conn.close()
         assert "created_at" in columns
+
+    def test_legacy_schema_gets_exception_stops_execution_column(self, db_path) -> None:
+        create_legacy_db(db_path)
+
+        list_transactions(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(exceptions)")}
+        finally:
+            conn.close()
+        assert "stops_execution" in columns
 
     def test_legacy_schema_backfills_created_at_for_since_filter(self, db_path) -> None:
         transaction_id = create_legacy_db(db_path)

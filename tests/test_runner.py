@@ -35,10 +35,10 @@ class _FakeQueue:
     def next_item(self, worker_id: str = "") -> QueueItem | None:
         return self._items.pop(0) if self._items else None
 
-    def complete(self, item_id: str) -> None:
+    def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
         self.completed.append(item_id)
 
-    def fail(self, item_id: str, *, retry: bool = True) -> None:
+    def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None:
         self.failed.append(item_id)
         self.fail_retries.append(retry)
 

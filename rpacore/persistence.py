@@ -72,9 +72,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             retry_number      INTEGER NOT NULL,
             datetime_occurred TEXT NOT NULL,
             screenshot_path   TEXT NOT NULL DEFAULT '',
+            stops_execution   INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
         )
     """)
+    _ensure_column(conn, "exceptions", "stops_execution", "stops_execution INTEGER NOT NULL DEFAULT 0")
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
     conn.commit()
 
@@ -128,8 +130,8 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
                     conn.execute(
                         "INSERT INTO exceptions "
                         "(skill_id, exception_type, message, action, retry_number, "
-                        "datetime_occurred, screenshot_path) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        "datetime_occurred, screenshot_path, stops_execution) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             sid,
                             "business" if isinstance(exc, BusinessException) else "system",
@@ -138,6 +140,7 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
                             exc.retry_number,
                             exc.datetime_occurred.isoformat(),
                             exc.screenshot_path,
+                            1 if exc.stops_execution else 0,
                         ),
                     )
     finally:
@@ -175,7 +178,7 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
 
             exc_rows = conn.execute(
                 "SELECT exception_type, message, action, retry_number, datetime_occurred, "
-                "screenshot_path FROM exceptions WHERE skill_id = ? ORDER BY id",
+                "screenshot_path, stops_execution FROM exceptions WHERE skill_id = ? ORDER BY id",
                 (sr["id"],),
             ).fetchall()
             for er in exc_rows:
@@ -188,6 +191,7 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
                         retry_number=er["retry_number"],
                         datetime_occurred=dt,
                         screenshot_path=screenshot,
+                        stop=bool(er["stops_execution"]),
                     )
                 else:
                     exc = SystemException(

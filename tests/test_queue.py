@@ -261,6 +261,59 @@ class TestSqliteQueueStaleReclaim:
         assert reclaimed.id == item.id
         assert reclaimed.claimed_by == "worker-b"
 
+    def test_complete_rejects_stale_original_claim(self, tmp_path):
+        q = make_queue(tmp_path, claim_timeout=1)
+        q.add(make_item("stale-complete"))
+        item = q.next_item("worker-a")
+        assert item is not None
+
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(tmp_path / "queue.db"))
+        conn.execute(
+            "UPDATE queue_items SET claimed_at = datetime('now', '-10 seconds') WHERE id = ?",
+            (item.id,),
+        )
+        conn.commit()
+        conn.close()
+
+        reclaimed = q.next_item("worker-b")
+        assert reclaimed is not None
+
+        with pytest.raises(RuntimeError, match="no longer claimed"):
+            q.complete(item.id, claimed_by="worker-a")
+
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.status is QueueStatus.IN_PROGRESS
+        assert stored.claimed_by == "worker-b"
+
+    def test_fail_rejects_stale_original_claim(self, tmp_path):
+        q = make_queue(tmp_path, claim_timeout=1)
+        q.add(make_item("stale-fail"))
+        item = q.next_item("worker-a")
+        assert item is not None
+
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(str(tmp_path / "queue.db"))
+        conn.execute(
+            "UPDATE queue_items SET claimed_at = datetime('now', '-10 seconds') WHERE id = ?",
+            (item.id,),
+        )
+        conn.commit()
+        conn.close()
+
+        reclaimed = q.next_item("worker-b")
+        assert reclaimed is not None
+
+        with pytest.raises(RuntimeError, match="no longer claimed"):
+            q.fail(item.id, claimed_by="worker-a")
+
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.status is QueueStatus.IN_PROGRESS
+        assert stored.retry_count == 0
+        assert stored.claimed_by == "worker-b"
+
 
 # ---------------------------------------------------------------------------
 # TestQueueProtocol

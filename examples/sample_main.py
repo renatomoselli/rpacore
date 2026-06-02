@@ -52,6 +52,8 @@ def main(
     # 4. Run the engine.
     engine = Engine(
         max_retries=int(config["max_retries"]),
+        retry_delay=float(config["retry_delay"]),
+        retry_backoff=float(config["retry_backoff"]),
         screenshot_dir=str(config["screenshot_dir"]),
     )
     credentials = build_credential_provider(str(config["credential_provider"]))
@@ -74,4 +76,3 @@ def main(
 
 if __name__ == "__main__":
     main()
-

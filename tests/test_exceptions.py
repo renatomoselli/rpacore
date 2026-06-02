@@ -21,6 +21,7 @@ class TestBusinessException:
         assert exc.action == ""
         assert exc.retry_number == 0
         assert exc.screenshot_path == ""
+        assert exc.stop is False
         assert isinstance(exc.datetime_occurred, datetime)
 
     def test_custom_fields(self) -> None:
@@ -31,15 +32,21 @@ class TestBusinessException:
             retry_number=2,
             datetime_occurred=dt,
             screenshot_path="/tmp/shot.png",
+            stop=True,
         )
         assert exc.action == "validate_invoice"
         assert exc.retry_number == 2
         assert exc.datetime_occurred == dt
         assert exc.screenshot_path == "/tmp/shot.png"
+        assert exc.stop is True
 
     def test_stops_execution_is_false(self) -> None:
         exc = BusinessException("test")
         assert exc.stops_execution is False
+
+    def test_stops_execution_reflects_stop(self) -> None:
+        exc = BusinessException("test", stop=True)
+        assert exc.stops_execution is True
 
     def test_can_be_raised_and_caught(self) -> None:
         with pytest.raises(BusinessException, match="rule failed"):

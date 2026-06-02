@@ -24,16 +24,18 @@ class BusinessException(Exception):
         retry_number: int = 0,
         datetime_occurred: datetime | None = None,
         screenshot_path: str = "",
+        stop: bool = False,
     ) -> None:
         super().__init__(message)
         self.action: str = action
         self.retry_number: int = retry_number
         self.datetime_occurred: datetime = datetime_occurred or datetime.now(timezone.utc)
         self.screenshot_path: str = screenshot_path
+        self.stop: bool = stop
 
     @property
     def stops_execution(self) -> bool:
-        return False
+        return self.stop
 
 
 class SystemException(Exception):

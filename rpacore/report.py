@@ -99,7 +99,8 @@ def render_text(report: TransactionReport) -> str:
         )
         for exc in sr.exceptions:
             kind = "BIZ" if isinstance(exc, BusinessException) else "SYS"
-            lines.append(f"      [{kind}] retry={exc.retry_number}: {exc}")
+            stop_text = " stop=true" if exc.stops_execution else ""
+            lines.append(f"      [{kind}] retry={exc.retry_number}{stop_text}: {exc}")
             if exc.action:
                 lines.append(f"             action: {exc.action}")
             if exc.screenshot_path:
@@ -166,6 +167,7 @@ def render_html(report: TransactionReport) -> str:
         for exc in sr.exceptions:
             kind = "BIZ" if isinstance(exc, BusinessException) else "SYS"
             exc_class = "biz" if isinstance(exc, BusinessException) else "sys"
+            stop_html = " stop=true" if exc.stops_execution else ""
             action_html = f" &mdash; action: {_esc(exc.action)}" if exc.action else ""
             screenshot_html = (
                 f'<br><a href="{_esc(exc.screenshot_path)}">screenshot</a>'
@@ -176,7 +178,7 @@ def render_html(report: TransactionReport) -> str:
                 _EXC_TEMPLATE.substitute(
                     exc_class=exc_class,
                     kind=kind,
-                    retry_number=exc.retry_number,
+                    retry_number=f"{exc.retry_number}{stop_html}",
                     message=_esc(str(exc)),
                     action_html=action_html,
                     screenshot_html=screenshot_html,

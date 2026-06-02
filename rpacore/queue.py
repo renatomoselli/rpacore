@@ -40,8 +40,8 @@ class QueueProvider(Protocol):
 
     def add(self, item: QueueItem) -> None: ...
     def next_item(self, worker_id: str = "") -> QueueItem | None: ...
-    def complete(self, item_id: str) -> None: ...
-    def fail(self, item_id: str, *, retry: bool = True) -> None: ...
+    def complete(self, item_id: str, *, claimed_by: str | None = None) -> None: ...
+    def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None: ...
 
 
 _DEFAULT_DB_PATH = "queue.db"
@@ -223,41 +223,81 @@ class SqliteQueue:
         finally:
             conn.close()
 
-    def complete(self, item_id: str) -> None:
+    def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
         """Mark an item as successfully processed."""
         conn = _connect(self.db_path)
         try:
             with conn:
-                conn.execute(
-                    "UPDATE queue_items SET status = 'successful', claimed_at = NULL "
-                    "WHERE id = ?",
-                    (item_id,),
-                )
+                if claimed_by is None:
+                    conn.execute(
+                        "UPDATE queue_items SET status = 'successful', claimed_at = NULL "
+                        "WHERE id = ?",
+                        (item_id,),
+                    )
+                else:
+                    result = conn.execute(
+                        "UPDATE queue_items SET status = 'successful', claimed_at = NULL "
+                        "WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
+                        (item_id, claimed_by),
+                    )
+                    if result.rowcount != 1:
+                        raise RuntimeError(
+                            f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
+                        )
         finally:
             conn.close()
 
-    def fail(self, item_id: str, *, retry: bool = True) -> None:
+    def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None:
         """Increment retry_count and mark the item retriable or terminally failed."""
         conn = _connect(self.db_path)
         try:
             with conn:
-                row = conn.execute(
-                    "SELECT retry_count FROM queue_items WHERE id = ?", (item_id,)
-                ).fetchone()
+                if claimed_by is None:
+                    row = conn.execute(
+                        "SELECT retry_count FROM queue_items WHERE id = ?", (item_id,)
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT retry_count FROM queue_items "
+                        "WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
+                        (item_id, claimed_by),
+                    ).fetchone()
                 if row is None:
+                    if claimed_by is not None:
+                        raise RuntimeError(
+                            f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
+                        )
                     return
                 new_count = row["retry_count"] + 1
                 if retry and new_count <= self.max_retries:
-                    conn.execute(
-                        "UPDATE queue_items SET status = 'pending', retry_count = ?, "
-                        "claimed_at = NULL WHERE id = ?",
-                        (new_count, item_id),
-                    )
+                    if claimed_by is None:
+                        result = conn.execute(
+                            "UPDATE queue_items SET status = 'pending', retry_count = ?, "
+                            "claimed_at = NULL WHERE id = ?",
+                            (new_count, item_id),
+                        )
+                    else:
+                        result = conn.execute(
+                            "UPDATE queue_items SET status = 'pending', retry_count = ?, "
+                            "claimed_at = NULL WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
+                            (new_count, item_id, claimed_by),
+                        )
                 else:
-                    conn.execute(
-                        "UPDATE queue_items SET status = 'failed', retry_count = ?, "
-                        "claimed_at = NULL WHERE id = ?",
-                        (new_count, item_id),
+                    if claimed_by is None:
+                        result = conn.execute(
+                            "UPDATE queue_items SET status = 'failed', retry_count = ?, "
+                            "claimed_at = NULL WHERE id = ?",
+                            (new_count, item_id),
+                        )
+                    else:
+                        result = conn.execute(
+                            "UPDATE queue_items SET status = 'failed', retry_count = ?, "
+                            "claimed_at = NULL WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
+                            (new_count, item_id, claimed_by),
+                        )
+                if claimed_by is not None and result.rowcount != 1:
+                    raise RuntimeError(
+                        f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                     )
         finally:
             conn.close()

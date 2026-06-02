@@ -14,6 +14,8 @@ class TestLoadConfig:
         config = load_config(tmp_path / "nonexistent.toml")
 
         assert config["max_retries"] == 0
+        assert config["retry_delay"] == 0.0
+        assert config["retry_backoff"] == 1.0
         assert config["log_level"] == "INFO"
         assert config["db_path"] == "rpacore.db"
 
@@ -30,6 +32,8 @@ class TestLoadConfig:
         config = load_config(toml)
 
         assert config["max_retries"] == 3
+        assert config["retry_delay"] == 0.0
+        assert config["retry_backoff"] == 1.0
         assert config["log_level"] == "DEBUG"
         assert config["db_path"] == str(tmp_path / "custom.db")
 
@@ -114,6 +118,83 @@ class TestLoadConfig:
         toml.write_text("max_retries = true\n", encoding="utf-8")
 
         with pytest.raises(TypeError, match="max_retries"):
+            load_config(toml)
+
+    def test_loads_retry_delay_and_backoff(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text("retry_delay = 0.5\nretry_backoff = 2\n", encoding="utf-8")
+
+        config = load_config(toml)
+
+        assert config["retry_delay"] == 0.5
+        assert config["retry_backoff"] == 2.0
+
+    def test_invalid_retry_delay_type_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('retry_delay = "0.5"\n', encoding="utf-8")
+
+        with pytest.raises(TypeError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == "retry_delay expected number >= 0; got str value='0.5'"
+
+    def test_negative_retry_delay_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text("retry_delay = -0.1\n", encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == "retry_delay expected number >= 0; got float value=-0.1"
+
+    def test_non_finite_retry_delay_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text("retry_delay = inf\n", encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == "retry_delay expected number >= 0; got float value=inf"
+
+    def test_bool_retry_delay_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text("retry_delay = true\n", encoding="utf-8")
+
+        with pytest.raises(TypeError, match="retry_delay"):
+            load_config(toml)
+
+    def test_invalid_retry_backoff_type_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('retry_backoff = "2"\n', encoding="utf-8")
+
+        with pytest.raises(TypeError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == "retry_backoff expected number >= 1; got str value='2'"
+
+    def test_retry_backoff_below_one_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text("retry_backoff = 0.5\n", encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == "retry_backoff expected number >= 1; got float value=0.5"
+
+    def test_non_finite_retry_backoff_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text("retry_backoff = nan\n", encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == "retry_backoff expected number >= 1; got float value=nan"
+
+    def test_bool_retry_backoff_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text("retry_backoff = false\n", encoding="utf-8")
+
+        with pytest.raises(TypeError, match="retry_backoff"):
             load_config(toml)
 
     def test_invalid_log_level_type_raises(self, tmp_path: Path) -> None:

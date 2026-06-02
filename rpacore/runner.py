@@ -151,7 +151,7 @@ def run_queue_loop(
                 )
 
         if originally_intended_complete:
-            queue.complete(item.id)
+            queue.complete(item.id, claimed_by=item.claimed_by)
             summary.completed += 1
             if callback_failed:
                 summary.callback_errors += 1
@@ -165,7 +165,7 @@ def run_queue_loop(
                 or error is not None
                 or not _transaction_has_only_business_failures(transaction)
             )
-            queue.fail(item.id, retry=retry)
+            queue.fail(item.id, retry=retry, claimed_by=item.claimed_by)
             summary.failed += 1
             if not error and not callback_failed and ctx is not None:
                 log.warning(

@@ -24,6 +24,11 @@ class BusinessFailSkill(Skill):
         raise BusinessException("rule violated", action=self.name)
 
 
+class StoppingBusinessFailSkill(Skill):
+    def execute(self, ctx: ProcessContext) -> None:
+        raise BusinessException("rule violated", action=self.name, stop=True)
+
+
 class SystemFailSkill(Skill):
     def execute(self, ctx: ProcessContext) -> None:
         raise SystemException("crash", action=self.name)
@@ -120,6 +125,60 @@ class TestEngineBusinessException:
         )
         Engine().run(_ctx(tx))
         assert tx.status is Status.FAILED
+
+    def test_stopping_business_exception_skips_downstream_pending_skills(self) -> None:
+        tx = Transaction(
+            reference="T1",
+            skills=[
+                StoppingBusinessFailSkill("validate", 1),
+                SuccessSkill("write_output", 2),
+            ],
+        )
+
+        Engine().run(_ctx(tx))
+
+        assert tx.skills[0].status is Status.FAILED
+        assert tx.skills[1].status is Status.SKIPPED
+
+    def test_stopping_business_exception_marks_transaction_failed(self) -> None:
+        tx = Transaction(
+            reference="T1",
+            skills=[
+                StoppingBusinessFailSkill("validate", 1),
+                SuccessSkill("write_output", 2),
+            ],
+        )
+
+        Engine().run(_ctx(tx))
+
+        assert tx.status is Status.FAILED
+
+    def test_stopping_business_exception_does_not_retry_failed_skill(self) -> None:
+        attempts: list[int] = []
+
+        class StopOnce(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                attempts.append(1)
+                raise BusinessException("bad data", action=self.name, stop=True)
+
+        tx = Transaction(reference="T1", skills=[StopOnce("validate", 1)])
+
+        Engine(max_retries=3).run(_ctx(tx))
+
+        assert attempts == [1]
+        assert tx.retry_count == 0
+
+    def test_stopping_business_exception_preserves_already_successful_downstream_skill(self) -> None:
+        successful = SuccessSkill("already_done", 2)
+        successful.status = Status.SUCCESSFUL
+        tx = Transaction(
+            reference="T1",
+            skills=[StoppingBusinessFailSkill("validate", 1), successful],
+        )
+
+        Engine().run(_ctx(tx))
+
+        assert successful.status is Status.SUCCESSFUL
 
 
 class TestEngineSystemException:
@@ -260,9 +319,45 @@ class TestEngineRetry:
     def test_default_max_retries_is_zero(self) -> None:
         assert Engine().max_retries == 0
 
+    def test_default_retry_delay_is_zero(self) -> None:
+        assert Engine().retry_delay == 0.0
+
+    def test_default_retry_backoff_is_one(self) -> None:
+        assert Engine().retry_backoff == 1.0
+
     def test_negative_max_retries_raises(self) -> None:
         with pytest.raises(ValueError, match="max_retries must be >= 0"):
             Engine(max_retries=-1)
+
+    def test_invalid_max_retries_type_raises(self) -> None:
+        with pytest.raises(TypeError, match="max_retries must be an int"):
+            Engine(max_retries="1")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="max_retries must be an int"):
+            Engine(max_retries=True)  # type: ignore[arg-type]
+
+    def test_invalid_retry_delay_values_raise(self) -> None:
+        with pytest.raises(ValueError, match="retry_delay must be >= 0"):
+            Engine(retry_delay=-0.1)
+        with pytest.raises(ValueError, match="retry_delay must be >= 0"):
+            Engine(retry_delay=float("inf"))
+        with pytest.raises(ValueError, match="retry_delay must be >= 0"):
+            Engine(retry_delay=float("nan"))
+        with pytest.raises(TypeError, match="retry_delay must be a number"):
+            Engine(retry_delay="0.1")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="retry_delay must be a number"):
+            Engine(retry_delay=True)
+
+    def test_invalid_retry_backoff_values_raise(self) -> None:
+        with pytest.raises(ValueError, match="retry_backoff must be >= 1"):
+            Engine(retry_backoff=0.5)
+        with pytest.raises(ValueError, match="retry_backoff must be >= 1"):
+            Engine(retry_backoff=float("inf"))
+        with pytest.raises(ValueError, match="retry_backoff must be >= 1"):
+            Engine(retry_backoff=float("nan"))
+        with pytest.raises(TypeError, match="retry_backoff must be a number"):
+            Engine(retry_backoff="2")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="retry_backoff must be a number"):
+            Engine(retry_backoff=False)
 
     def test_no_retry_by_default(self) -> None:
         tx = Transaction(
@@ -416,3 +511,41 @@ class TestEngineRetry:
         assert tx.skills[0].exceptions[0].retry_number == 0
         assert tx.skills[0].exceptions[1].retry_number == 1
         assert tx.skills[0].exceptions[2].retry_number == 2
+
+    def test_retry_delay_is_respected_before_retry_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+
+        class FlakySkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                if ctx.transaction.retry_count == 0:
+                    raise SystemException("transient", action=self.name)
+
+        monkeypatch.setattr("rpacore.engine.time.sleep", sleeps.append)
+        tx = Transaction(reference="T1", skills=[FlakySkill("a", 1)])
+
+        Engine(max_retries=1, retry_delay=0.25).run(_ctx(tx))
+
+        assert sleeps == [0.25]
+        assert tx.status is Status.SUCCESSFUL
+
+    def test_retry_backoff_multiplies_delay_per_retry_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+
+        monkeypatch.setattr("rpacore.engine.time.sleep", sleeps.append)
+        tx = Transaction(reference="T1", skills=[SystemFailSkill("a", 1)])
+
+        Engine(max_retries=3, retry_delay=0.5, retry_backoff=2).run(_ctx(tx))
+
+        assert sleeps == [0.5, 1.0, 2.0]
+        assert tx.retry_count == 3
+
+    def test_zero_retry_delay_does_not_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sleeps: list[float] = []
+
+        monkeypatch.setattr("rpacore.engine.time.sleep", sleeps.append)
+        tx = Transaction(reference="T1", skills=[SystemFailSkill("a", 1)])
+
+        Engine(max_retries=2, retry_delay=0.0).run(_ctx(tx))
+
+        assert sleeps == []
+        assert tx.retry_count == 2

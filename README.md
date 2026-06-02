@@ -88,7 +88,11 @@ tx.skills = [
 ]
 
 ctx = ProcessContext(transaction=tx, config=config)
-Engine(max_retries=config["max_retries"]).run(ctx)
+Engine(
+    max_retries=config["max_retries"],
+    retry_delay=config["retry_delay"],
+    retry_backoff=config["retry_backoff"],
+).run(ctx)
 save_transaction(tx, db_path=config["db_path"])
 ```
 
@@ -162,6 +166,8 @@ Create a `config.toml` in your project:
 
 ```toml
 max_retries = 2
+retry_delay = 0.0
+retry_backoff = 1.0
 log_level = "INFO"
 db_path = "rpacore.db"
 screenshot_dir = ""

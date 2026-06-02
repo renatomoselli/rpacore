@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from rpacore.credentials import SUPPORTED_CREDENTIAL_PROVIDERS
 
 _DEFAULTS: dict[str, object] = {
     "max_retries": 0,
+    "retry_delay": 0.0,
+    "retry_backoff": 1.0,
     "log_level": "INFO",
     "db_path": "rpacore.db",
     "screenshot_dir": "",
@@ -25,6 +28,20 @@ def _validate(config: dict[str, object]) -> None:
         raise type_error("max_retries", "int", max_retries)
     if max_retries < 0:
         raise value_error("max_retries", "int >= 0", max_retries)
+
+    retry_delay = config["retry_delay"]
+    if isinstance(retry_delay, bool) or not isinstance(retry_delay, (int, float)):
+        raise type_error("retry_delay", "number >= 0", retry_delay)
+    if retry_delay < 0 or not math.isfinite(retry_delay):
+        raise value_error("retry_delay", "number >= 0", retry_delay)
+    config["retry_delay"] = float(retry_delay)
+
+    retry_backoff = config["retry_backoff"]
+    if isinstance(retry_backoff, bool) or not isinstance(retry_backoff, (int, float)):
+        raise type_error("retry_backoff", "number >= 1", retry_backoff)
+    if retry_backoff < 1 or not math.isfinite(retry_backoff):
+        raise value_error("retry_backoff", "number >= 1", retry_backoff)
+    config["retry_backoff"] = float(retry_backoff)
 
     log_level = config["log_level"]
     if not isinstance(log_level, str):
