@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -170,6 +170,187 @@ class TestSqliteQueueCRUD:
     def test_fail_unknown_id_is_noop(self, tmp_path):
         q = make_queue(tmp_path)
         q.fail("nonexistent-id")  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# TestSqliteQueueIntrospection
+# ---------------------------------------------------------------------------
+
+class TestSqliteQueueIntrospection:
+    def test_list_items_returns_deterministic_order(self, tmp_path):
+        q = make_queue(tmp_path)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        later = make_item("later")
+        later.id = "b"
+        later.created_at = base + timedelta(seconds=1)
+        first_tie = make_item("first-tie")
+        first_tie.id = "a"
+        first_tie.created_at = base
+        second_tie = make_item("second-tie")
+        second_tie.id = "c"
+        second_tie.created_at = base
+
+        q.add(later)
+        q.add(second_tie)
+        q.add(first_tie)
+
+        assert [item.reference for item in q.list_items()] == [
+            "first-tie",
+            "second-tie",
+            "later",
+        ]
+
+    def test_list_items_filters_by_status(self, tmp_path):
+        q = make_queue(tmp_path, max_retries=0)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        pending = make_item("pending")
+        pending.created_at = base
+        successful = make_item("successful")
+        successful.created_at = base + timedelta(seconds=1)
+        failed = make_item("failed")
+        failed.created_at = base + timedelta(seconds=2)
+        q.add(pending)
+        q.add(successful)
+        q.add(failed)
+
+        claimed_success = q.next_item("worker")
+        q.complete(claimed_success.id, claimed_by="worker")
+        claimed_failed = q.next_item("worker")
+        q.fail(claimed_failed.id, retry=False, claimed_by="worker")
+
+        assert [item.reference for item in q.list_items(statuses=[QueueStatus.PENDING])] == ["failed"]
+        assert [item.reference for item in q.list_items(statuses=[QueueStatus.SUCCESSFUL])] == ["pending"]
+
+    def test_list_items_accepts_empty_statuses(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("invoice-1"))
+
+        assert q.list_items(statuses=[]) == []
+
+    def test_list_items_accepts_generator_statuses(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("invoice-1"))
+
+        statuses = (status for status in [QueueStatus.PENDING])
+
+        assert [item.reference for item in q.list_items(statuses=statuses)] == ["invoice-1"]
+
+    def test_list_items_can_limit_and_offset(self, tmp_path):
+        q = make_queue(tmp_path)
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        for index, reference in enumerate(["one", "two", "three"]):
+            item = make_item(reference)
+            item.created_at = base + timedelta(seconds=index)
+            q.add(item)
+
+        assert [item.reference for item in q.list_items(limit=2)] == ["one", "two"]
+        assert [item.reference for item in q.list_items(limit=2, offset=1)] == ["two", "three"]
+
+    def test_has_reference_filters_by_status(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("invoice-1"))
+
+        assert q.has_reference("invoice-1")
+        assert q.has_reference("invoice-1", statuses=[QueueStatus.PENDING])
+        assert not q.has_reference("invoice-1", statuses=[QueueStatus.SUCCESSFUL])
+        assert not q.has_reference("invoice-2")
+
+    def test_has_reference_accepts_empty_statuses(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("invoice-1"))
+
+        assert not q.has_reference("invoice-1", statuses=[])
+
+    def test_has_reference_accepts_generator_statuses(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("invoice-1"))
+
+        statuses = (status for status in [QueueStatus.PENDING])
+
+        assert q.has_reference("invoice-1", statuses=statuses)
+
+    def test_add_once_skips_active_duplicate_reference(self, tmp_path):
+        q = make_queue(tmp_path)
+
+        assert q.add_once(make_item("invoice-1")) is True
+        assert q.add_once(make_item("invoice-1")) is False
+
+        items = q.list_items()
+        assert len(items) == 1
+        assert items[0].reference == "invoice-1"
+
+    def test_add_once_skips_in_progress_duplicate_reference(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("invoice-1"))
+        claimed = q.next_item("worker")
+        assert claimed is not None
+
+        assert q.add_once(make_item("invoice-1")) is False
+
+        items = q.list_items()
+        assert len(items) == 1
+        assert items[0].status is QueueStatus.IN_PROGRESS
+
+    def test_add_once_allows_terminal_reference_by_default(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("invoice-1"))
+        claimed = q.next_item("worker")
+        assert claimed is not None
+        q.complete(claimed.id, claimed_by="worker")
+
+        assert q.add_once(make_item("invoice-1")) is True
+
+        items = q.list_items()
+        assert [item.status for item in items] == [
+            QueueStatus.SUCCESSFUL,
+            QueueStatus.PENDING,
+        ]
+
+    def test_add_once_can_treat_terminal_reference_as_active(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("invoice-1"))
+        claimed = q.next_item("worker")
+        assert claimed is not None
+        q.complete(claimed.id, claimed_by="worker")
+
+        inserted = q.add_once(
+            make_item("invoice-1"),
+            active_statuses=[QueueStatus.PENDING, QueueStatus.IN_PROGRESS, QueueStatus.SUCCESSFUL],
+        )
+
+        assert inserted is False
+        assert len(q.list_items()) == 1
+
+    def test_add_once_with_active_statuses_none_checks_any_status(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("invoice-1"))
+        claimed = q.next_item("worker")
+        assert claimed is not None
+        q.complete(claimed.id, claimed_by="worker")
+
+        inserted = q.add_once(make_item("invoice-1"), active_statuses=None)
+
+        assert inserted is False
+        assert len(q.list_items()) == 1
+
+    def test_add_once_with_empty_active_statuses_inserts_unconditionally(self, tmp_path):
+        q = make_queue(tmp_path)
+
+        assert q.add_once(make_item("invoice-1"), active_statuses=[]) is True
+        assert q.add_once(make_item("invoice-1"), active_statuses=[]) is True
+        assert len(q.list_items()) == 2
+
+    def test_queue_schema_has_introspection_indexes(self, tmp_path):
+        q = make_queue(tmp_path)
+        conn = sqlite3.connect(q.db_path)
+        try:
+            indexes = {row[1] for row in conn.execute("PRAGMA index_list(queue_items)").fetchall()}
+        finally:
+            conn.close()
+
+        assert "idx_queue_items_created_at_id" in indexes
+        assert "idx_queue_items_status_created_at_id" in indexes
+        assert "idx_queue_items_reference_status" in indexes
 
 
 # ---------------------------------------------------------------------------

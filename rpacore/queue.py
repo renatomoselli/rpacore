@@ -8,7 +8,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Iterable, Protocol, runtime_checkable
 
 from rpacore._validation import type_error, value_error
 
@@ -70,6 +70,18 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             claimed_at   TEXT
         )
     """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_queue_items_created_at_id "
+        "ON queue_items (created_at ASC, id ASC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_queue_items_status_created_at_id "
+        "ON queue_items (status, created_at ASC, id ASC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_queue_items_reference_status "
+        "ON queue_items (reference, status)"
+    )
 
 
 def _row_to_item(row: sqlite3.Row) -> QueueItem:
@@ -85,6 +97,55 @@ def _row_to_item(row: sqlite3.Row) -> QueueItem:
         created_at=datetime.fromisoformat(row["created_at"]),
         claimed_by=row["claimed_by"],
         claimed_at=claimed_at,
+    )
+
+
+def _status_values(statuses: Iterable[QueueStatus]) -> list[str]:
+    return [status.value for status in statuses]
+
+
+def _limit_offset_clause(*, limit: int | None, offset: int) -> tuple[str, list[int]]:
+    if isinstance(limit, bool) or (limit is not None and not isinstance(limit, int)):
+        raise type_error("queue.list_items.limit", "int | None", limit)
+    if isinstance(offset, bool) or not isinstance(offset, int):
+        raise type_error("queue.list_items.offset", "int", offset)
+    if limit is not None and limit < 0:
+        raise value_error("queue.list_items.limit", "int >= 0 | None", limit)
+    if offset < 0:
+        raise value_error("queue.list_items.offset", "int >= 0", offset)
+
+    if limit is None:
+        if offset == 0:
+            return "", []
+        return " LIMIT -1 OFFSET ?", [offset]
+    return " LIMIT ? OFFSET ?", [limit, offset]
+
+
+def _status_filter_clause(statuses: Iterable[QueueStatus] | None) -> tuple[str, list[str]]:
+    if statuses is None:
+        return "", []
+    status_values = _status_values(statuses)
+    if not status_values:
+        return " AND 1=0", []
+    placeholders = ", ".join("?" for _ in status_values)
+    return f" AND status IN ({placeholders})", status_values
+
+
+def _insert_item(conn: sqlite3.Connection, item: QueueItem) -> None:
+    conn.execute(
+        "INSERT INTO queue_items "
+        "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            item.id,
+            item.reference,
+            json.dumps(item.payload),
+            item.status,
+            item.retry_count,
+            item.created_at.isoformat(),
+            item.claimed_by,
+            item.claimed_at.isoformat() if item.claimed_at else None,
+        ),
     )
 
 
@@ -152,21 +213,83 @@ class SqliteQueue:
         conn = _connect(self.db_path)
         try:
             with conn:
-                conn.execute(
-                    "INSERT INTO queue_items "
-                    "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        item.id,
-                        item.reference,
-                        json.dumps(item.payload),
-                        item.status,
-                        item.retry_count,
-                        item.created_at.isoformat(),
-                        item.claimed_by,
-                        item.claimed_at.isoformat() if item.claimed_at else None,
-                    ),
-                )
+                _insert_item(conn, item)
+        finally:
+            conn.close()
+
+    def list_items(
+        self,
+        *,
+        statuses: Iterable[QueueStatus] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[QueueItem]:
+        """Return queue items, optionally filtered by status, in deterministic order."""
+        status_filter, status_values = _status_filter_clause(statuses)
+        limit_clause, limit_params = _limit_offset_clause(limit=limit, offset=offset)
+
+        conn = _connect(self.db_path)
+        try:
+            rows = conn.execute(
+                "SELECT * FROM queue_items WHERE 1=1"
+                f"{status_filter} ORDER BY created_at ASC, id ASC{limit_clause}",
+                [*status_values, *limit_params],
+            ).fetchall()
+            return [_row_to_item(row) for row in rows]
+        finally:
+            conn.close()
+
+    def has_reference(
+        self,
+        reference: str,
+        *,
+        statuses: Iterable[QueueStatus] | None = None,
+    ) -> bool:
+        """Return True when a queue item exists for reference and optional statuses."""
+        status_filter, status_values = _status_filter_clause(statuses)
+
+        conn = _connect(self.db_path)
+        try:
+            row = conn.execute(
+                f"SELECT 1 FROM queue_items WHERE reference = ?{status_filter} LIMIT 1",
+                [reference, *status_values],
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+    def add_once(
+        self,
+        item: QueueItem,
+        *,
+        active_statuses: Iterable[QueueStatus] | None = (QueueStatus.PENDING, QueueStatus.IN_PROGRESS),
+    ) -> bool:
+        """Insert item unless another item with the same reference is active."""
+        status_filter, status_values = _status_filter_clause(active_statuses)
+        conn = _connect(self.db_path)
+        transaction_started = False
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            transaction_started = True
+
+            if active_statuses is None or status_values:
+                duplicate = conn.execute(
+                    f"SELECT 1 FROM queue_items WHERE reference = ?{status_filter} LIMIT 1",
+                    [item.reference, *status_values],
+                ).fetchone()
+                if duplicate is not None:
+                    conn.execute("ROLLBACK")
+                    transaction_started = False
+                    return False
+
+            _insert_item(conn, item)
+            conn.execute("COMMIT")
+            transaction_started = False
+            return True
+        except Exception:
+            if transaction_started:
+                conn.execute("ROLLBACK")
+            raise
         finally:
             conn.close()
 
