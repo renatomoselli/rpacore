@@ -13,6 +13,7 @@ def _resolve_version() -> str:
 __version__ = _resolve_version()
 
 from rpacore.config import load_config
+from rpacore.config_validation import optional_config, require_config, require_section
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialNotFoundError, CredentialProvider, EnvCredentialProvider, KeyringCredentialProvider, build_credential_provider
 from rpacore.engine import Engine
@@ -46,11 +47,14 @@ __all__ = [
     "list_transactions",
     "load_config",
     "load_transaction",
+    "optional_config",
     "ProcessContext",
     "QueueItem",
     "QueueProvider",
     "QueueRunSummary",
     "QueueStatus",
+    "require_config",
+    "require_section",
     "resume_transaction",
     "WebhookNotifier",
     "render_html",
