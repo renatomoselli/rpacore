@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import socket
+import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -14,10 +16,15 @@ from rpacore.exceptions import BusinessException
 from rpacore.engine import Engine
 from rpacore.logger import get_logger
 from rpacore.notify import Notifier, dispatch
+from rpacore.persistence import save_transaction
 from rpacore.queue import QueueItem, QueueProvider
 from rpacore.report import generate_report
 from rpacore.status import Status
 from rpacore.transaction import Transaction
+
+
+_PERSISTENCE_SAVE_ATTEMPTS = 3
+_PERSISTENCE_RETRY_DELAY_SECONDS = 0.05
 
 
 @dataclass
@@ -28,6 +35,7 @@ class QueueRunSummary:
     completed: int = field(default=0)
     failed: int = field(default=0)
     callback_errors: int = field(default=0)
+    persistence_errors: int = field(default=0)
 
 
 def run_queue_loop(
@@ -43,6 +51,7 @@ def run_queue_loop(
     after_item: Callable[[QueueItem, Transaction | None, Exception | None], None] | None = None,
     stop_event: threading.Event | None = None,
     retry_business_failures: bool = False,
+    transaction_db_path: str | None = None,
 ) -> QueueRunSummary:
     """Drain a queue by running each item through the engine.
 
@@ -50,6 +59,7 @@ def run_queue_loop(
     - Calls build_transaction(item) to construct a Transaction (user responsibility).
     - Builds a ProcessContext with the item's payload in ctx.data.
     - Runs engine.run(ctx).
+        - Saves the transaction when transaction_db_path is set.
         - Generates a report and dispatches notifiers after engine.run(ctx).
     - Calls queue.complete() if transaction.status is SUCCESSFUL.
     - Calls queue.fail() with retry=False for business-only transaction failures
@@ -58,7 +68,7 @@ def run_queue_loop(
     - Also calls queue.fail() if build_transaction() or any unexpected error raises.
     - Calls after_item(item, transaction, error) once per item regardless of outcome.
             transaction is None if build_transaction() raised; error is None on normal paths
-            and set for unexpected processing or post-processing failures.
+            and set for unexpected processing, reporting, or transaction persistence failures.
       Fires before the final queue state transition (complete/fail). If the callback
       raises on a success-path item, the item is still marked complete (the automation
       ran) but the error is counted in QueueRunSummary.callback_errors. If the callback
@@ -83,6 +93,12 @@ def run_queue_loop(
                            If True, retry failed business transactions according to the
                            queue retry policy. Defaults to False so deterministic business
                            failures are terminal queue outcomes.
+        transaction_db_path:
+                           Optional SQLite transaction database path. When set, each
+                           transaction is saved after engine.run(ctx) completes and before
+                           callbacks run. Persistence is best-effort: if the process exits
+                           between engine completion and save, the queue remains the source
+                           of truth and may retry the item.
 
     Returns:
         QueueRunSummary with counts of processed, completed, and failed items.
@@ -104,6 +120,7 @@ def run_queue_loop(
         transaction: Transaction | None = None
         ctx: ProcessContext | None = None
         error: Exception | None = None
+        persistence_error: Exception | None = None
         originally_intended_complete = False
         callback_failed = False
 
@@ -121,6 +138,25 @@ def run_queue_loop(
             )
             engine.run(ctx)
             originally_intended_complete = ctx.transaction.status == Status.SUCCESSFUL
+            if transaction_db_path is not None:
+                persistence_error = _save_transaction_with_retries(
+                    ctx.transaction,
+                    db_path=transaction_db_path,
+                )
+                if persistence_error is not None:
+                    summary.persistence_errors += 1
+                    log.error(
+                        "Transaction persistence failed; preserving queue outcome",
+                        extra={
+                            "event": "transaction_persistence_error",
+                            "queue_item_id": item.id,
+                            "queue_reference": item.reference,
+                            "transaction_id": ctx.transaction.id,
+                            "transaction_reference": ctx.transaction.reference,
+                            "worker_id": worker_id,
+                        },
+                        exc_info=(type(persistence_error), persistence_error, persistence_error.__traceback__),
+                    )
         except Exception as exc:
             error = exc
             log.exception(
@@ -142,7 +178,7 @@ def run_queue_loop(
 
         if after_item is not None:
             try:
-                after_item(item, transaction, error)
+                after_item(item, transaction, error if error is not None else persistence_error)
             except Exception:
                 callback_failed = True
                 log.exception(
@@ -186,3 +222,18 @@ def _transaction_has_only_business_failures(transaction: Transaction | None) -> 
         skill.exceptions and isinstance(skill.exceptions[-1], BusinessException)
         for skill in failed
     )
+
+
+def _save_transaction_with_retries(transaction: Transaction, *, db_path: str) -> Exception | None:
+    """Save a transaction, retrying short-lived SQLite lock failures."""
+    for attempt in range(_PERSISTENCE_SAVE_ATTEMPTS):
+        try:
+            save_transaction(transaction, db_path=db_path)
+            return None
+        except sqlite3.OperationalError as exc:
+            if attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1:
+                return exc
+            time.sleep(_PERSISTENCE_RETRY_DELAY_SECONDS * (2 ** attempt))
+        except Exception as exc:
+            return exc
+    return None

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import sqlite3
 import threading
 from typing import Iterator
 
@@ -11,6 +13,7 @@ from rpacore.context import ProcessContext
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, SystemException
+from rpacore.persistence import list_transactions
 from rpacore.queue import QueueItem
 import rpacore.runner as runner_module
 from rpacore.runner import QueueRunSummary, run_queue_loop
@@ -79,7 +82,10 @@ def _run(
     after_item=None,
     stop_event: threading.Event | None = None,
     retry_business_failures: bool = False,
+    transaction_db_path: str | None = None,
+    logger=None,
 ) -> tuple[QueueRunSummary, _FakeQueue]:
+    """Run the queue loop with default stubs and optional behavior overrides."""
     queue = _FakeQueue(items)
 
     def _build(item: QueueItem) -> Transaction:
@@ -97,6 +103,8 @@ def _run(
         after_item=after_item,
         stop_event=stop_event,
         retry_business_failures=retry_business_failures,
+        transaction_db_path=transaction_db_path,
+        logger=logger,
     )
     return summary, queue
 
@@ -354,6 +362,157 @@ class TestAfterItem:
             after_item=lambda item, tx, err: None,
         )
         assert summary.callback_errors == 0
+
+
+# ---------------------------------------------------------------------------
+# runner-managed transaction persistence
+# ---------------------------------------------------------------------------
+
+class TestRunnerManagedTransactionPersistence:
+    def test_successful_transaction_saved_without_after_item(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+
+        summary, queue = _run([_item("ok")], transaction_db_path=db_path)
+
+        assert summary == QueueRunSummary(processed=1, completed=1, failed=0)
+        assert queue.completed == ["ok"]
+        transactions = list_transactions(db_path=db_path)
+        assert len(transactions) == 1
+        assert transactions[0].reference == "ok"
+        assert transactions[0].status is Status.SUCCESSFUL
+        assert transactions[0].skills[0].status is Status.SUCCESSFUL
+
+    def test_failed_transaction_saved_without_after_item(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+
+        summary, queue = _run(
+            [_item("bad")],
+            skill_cls=_BusinessFailSkill,
+            transaction_db_path=db_path,
+        )
+
+        assert summary == QueueRunSummary(processed=1, completed=0, failed=1)
+        assert queue.failed == ["bad"]
+        transactions = list_transactions(db_path=db_path)
+        assert len(transactions) == 1
+        assert transactions[0].reference == "bad"
+        assert transactions[0].status is Status.FAILED
+        assert transactions[0].skills[0].status is Status.FAILED
+        assert isinstance(transactions[0].skills[0].exceptions[0], BusinessException)
+
+    def test_callback_failure_does_not_prevent_persistence(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+
+        def _bad_callback(item, tx, err):
+            raise RuntimeError("callback failed")
+
+        summary, queue = _run(
+            [_item("ok")],
+            after_item=_bad_callback,
+            transaction_db_path=db_path,
+        )
+
+        assert summary.callback_errors == 1
+        assert summary.persistence_errors == 0
+        assert queue.completed == ["ok"]
+        transactions = list_transactions(db_path=db_path)
+        assert len(transactions) == 1
+        assert transactions[0].reference == "ok"
+
+    def test_persistence_failure_is_counted_and_logged(self, monkeypatch, caplog) -> None:
+        def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
+            raise RuntimeError("sqlite locked")
+
+        monkeypatch.setattr(runner_module, "save_transaction", _fail_save)
+        logger = logging.getLogger("test.runner.persistence")
+
+        with caplog.at_level(logging.ERROR, logger=logger.name):
+            summary, queue = _run([_item("ok")], transaction_db_path="broken.db", logger=logger)
+
+        assert summary.persistence_errors == 1
+        assert summary.completed == 1
+        assert summary.failed == 0
+        assert queue.completed == ["ok"]
+        assert any(
+            record.__dict__.get("event") == "transaction_persistence_error"
+            and record.__dict__.get("queue_item_id") == "ok"
+            and record.__dict__.get("transaction_reference") == "ok"
+            for record in caplog.records
+        )
+
+    def test_transient_sqlite_persistence_failure_is_retried(self, monkeypatch) -> None:
+        attempts: list[str] = []
+        sleeps: list[float] = []
+
+        def _save_after_two_failures(transaction: Transaction, db_path: str = "rpacore.db") -> None:
+            attempts.append(transaction.reference)
+            if len(attempts) < 3:
+                raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(runner_module, "save_transaction", _save_after_two_failures)
+        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
+
+        summary, queue = _run([_item("ok")], transaction_db_path="transactions.db")
+
+        assert summary.persistence_errors == 0
+        assert queue.completed == ["ok"]
+        assert attempts == ["ok", "ok", "ok"]
+        assert sleeps == [0.05, 0.1]
+
+    def test_persistence_failure_visible_to_after_item_without_changing_queue_outcome(self, monkeypatch) -> None:
+        def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
+            raise RuntimeError("write failed")
+
+        errors: list[Exception | None] = []
+        monkeypatch.setattr(runner_module, "save_transaction", _fail_save)
+
+        summary, queue = _run(
+            [_item("ok")],
+            after_item=lambda item, tx, err: errors.append(err),
+            transaction_db_path="transactions.db",
+        )
+
+        assert summary.persistence_errors == 1
+        assert summary.completed == 1
+        assert summary.failed == 0
+        assert queue.completed == ["ok"]
+        assert isinstance(errors[0], RuntimeError)
+        assert str(errors[0]) == "write failed"
+
+    def test_business_failure_stays_terminal_when_persistence_fails(self, monkeypatch) -> None:
+        def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
+            raise RuntimeError("write failed")
+
+        errors: list[Exception | None] = []
+        monkeypatch.setattr(runner_module, "save_transaction", _fail_save)
+
+        summary, queue = _run(
+            [_item("bad")],
+            skill_cls=_BusinessFailSkill,
+            after_item=lambda item, tx, err: errors.append(err),
+            transaction_db_path="transactions.db",
+        )
+
+        assert summary.persistence_errors == 1
+        assert summary.completed == 0
+        assert summary.failed == 1
+        assert queue.failed == ["bad"]
+        assert queue.fail_retries == [False]
+        assert isinstance(errors[0], RuntimeError)
+
+    def test_default_transaction_db_path_preserves_current_behavior(self, monkeypatch) -> None:
+        calls: list[Transaction] = []
+
+        def _record_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
+            calls.append(transaction)
+
+        monkeypatch.setattr(runner_module, "save_transaction", _record_save)
+
+        summary, queue = _run([_item("ok")])
+
+        assert summary == QueueRunSummary(processed=1, completed=1, failed=0)
+        assert queue.completed == ["ok"]
+        assert calls == []
 
 
 # ---------------------------------------------------------------------------
