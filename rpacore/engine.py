@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Literal
 
 from rpacore.context import ProcessContext
@@ -69,22 +70,27 @@ class Engine:
         transaction.status = Status.IN_PROGRESS
         self._log_transaction_started(transaction)
 
-        self._execute_pass(ctx, blocked=None)
+        executor = ThreadPoolExecutor(max_workers=1) if any(skill.timeout is not None for skill in transaction.skills) else None
+        try:
+            self._execute_pass(ctx, blocked=None, executor=executor)
 
-        while transaction.retry_count < self.max_retries:
-            retryable = self._retryable_failed_skills(transaction)
-            if not retryable:
-                break
-            for skill in retryable:
-                skill.status = Status.PENDING
-            self._sleep_before_retry(transaction.retry_count)
-            transaction.retry_count += 1
-            # Block only business-failed skills; PENDING skills that never ran should also execute.
-            business_failed = {
-                id(s) for s in transaction.failed_skills()
-                if s.exceptions and isinstance(s.exceptions[-1], BusinessException)
-            }
-            self._execute_pass(ctx, blocked=business_failed)
+            while transaction.retry_count < self.max_retries:
+                retryable = self._retryable_failed_skills(transaction)
+                if not retryable:
+                    break
+                for skill in retryable:
+                    skill.status = Status.PENDING
+                self._sleep_before_retry(transaction.retry_count)
+                transaction.retry_count += 1
+                # Block only business-failed skills; PENDING skills that never ran should also execute.
+                business_failed = {
+                    id(s) for s in transaction.failed_skills()
+                    if s.exceptions and isinstance(s.exceptions[-1], BusinessException)
+                }
+                self._execute_pass(ctx, blocked=business_failed, executor=executor)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         if all(s.status in (Status.SUCCESSFUL, Status.SKIPPED) for s in transaction.skills):
             transaction.status = Status.SUCCESSFUL
@@ -110,6 +116,7 @@ class Engine:
         self,
         ctx: ProcessContext,
         blocked: set[int] | None,
+        executor: ThreadPoolExecutor | None,
     ) -> None:
         """Run one execution pass.
 
@@ -128,7 +135,7 @@ class Engine:
             skill.status = Status.IN_PROGRESS
             self._log_skill_started(transaction, skill)
             try:
-                skill.execute(ctx)
+                self._execute_skill(skill, ctx, executor)
                 if skill.status is not Status.SKIPPED:
                     skill.status = Status.SUCCESSFUL
                 self._log_skill_completed(transaction, skill)
@@ -162,6 +169,33 @@ class Engine:
                 skill.exceptions.append(wrapped)
                 self._log_skill_failed(transaction, skill, wrapped, level="error")
                 break
+
+    def _execute_skill(
+        self,
+        skill: Skill,
+        ctx: ProcessContext,
+        executor: ThreadPoolExecutor | None,
+    ) -> None:
+        """Execute a skill directly or through the configured timeout boundary.
+
+        A timeout stops the engine from waiting but cannot forcibly terminate the
+        running worker thread. Timed skill code must remain safe if it finishes later.
+        """
+        if skill.timeout is None:
+            skill.execute(ctx)
+            return
+        if executor is None:
+            raise RuntimeError("Timed skill requires timeout executor")
+
+        future = executor.submit(skill.execute, ctx)
+        try:
+            future.result(timeout=skill.timeout)
+        except FutureTimeoutError as exc:
+            if future.done():
+                future.result()
+                return
+            future.cancel()
+            raise SystemException("Skill timed out", action=skill.name) from exc
 
     def _skip_downstream_pending_skills(self, transaction: Transaction, failed_skill: Skill) -> None:
         """Mark pending skills after a stopping business failure as skipped."""

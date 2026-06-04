@@ -30,6 +30,10 @@ class TestSkillFreshState:
         skill = Skill("login", 1)
         assert skill.exceptions == []
 
+    def test_timeout_defaults_to_none(self) -> None:
+        skill = Skill("login", 1)
+        assert skill.timeout is None
+
     def test_arguments_not_shared_between_instances(self) -> None:
         a = Skill("a", 1)
         b = Skill("b", 2)
@@ -53,6 +57,26 @@ class TestSkillCustomArguments:
         skill = Skill("login", 1, arguments=args)
         skill.arguments["password"] = "secret"
         assert "password" not in args
+
+
+class TestSkillTimeout:
+    def test_custom_timeout(self) -> None:
+        skill = Skill("login", 1, timeout=0.5)
+        assert skill.timeout == 0.5
+
+    def test_integer_timeout_normalized_to_float(self) -> None:
+        skill = Skill("login", 1, timeout=2)
+        assert skill.timeout == 2.0
+
+    @pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+    def test_invalid_timeout_value_raises(self, timeout: float) -> None:
+        with pytest.raises(ValueError, match="skill.timeout"):
+            Skill("login", 1, timeout=timeout)
+
+    @pytest.mark.parametrize("timeout", [True, "1"])
+    def test_invalid_timeout_type_raises(self, timeout: object) -> None:
+        with pytest.raises(TypeError, match="skill.timeout"):
+            Skill("login", 1, timeout=timeout)  # type: ignore[arg-type]
 
 
 class TestSkillExecute:
