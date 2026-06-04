@@ -84,8 +84,10 @@ def _run(
     retry_business_failures: bool = False,
     transaction_db_path: str | None = None,
     logger=None,
+    on_start=None,
+    on_finish=None,
 ) -> tuple[QueueRunSummary, _FakeQueue]:
-    """Run the queue loop with default stubs and optional behavior overrides."""
+    """Run the queue loop with default stubs, forwarding optional runner behavior."""
     queue = _FakeQueue(items)
 
     def _build(item: QueueItem) -> Transaction:
@@ -105,6 +107,8 @@ def _run(
         retry_business_failures=retry_business_failures,
         transaction_db_path=transaction_db_path,
         logger=logger,
+        on_start=on_start,
+        on_finish=on_finish,
     )
     return summary, queue
 
@@ -340,6 +344,15 @@ class TestAfterItem:
         assert isinstance(errors[0], RuntimeError)
         assert str(errors[0]) == "report crash"
 
+    def test_report_generation_memory_error_propagates(self, monkeypatch) -> None:
+        def _boom_report(tx: Transaction) -> object:
+            raise MemoryError("out of memory")
+
+        monkeypatch.setattr(runner_module, "generate_report", _boom_report)
+
+        with pytest.raises(MemoryError, match="out of memory"):
+            _run([_item("a")])
+
     def test_callback_exception_on_failure_path_still_fails(self) -> None:
         """If after_item raises for a failing item, queue.fail() is still called."""
         def _bad_callback(item, tx, err):
@@ -362,6 +375,13 @@ class TestAfterItem:
             after_item=lambda item, tx, err: None,
         )
         assert summary.callback_errors == 0
+
+    def test_after_item_memory_error_propagates(self) -> None:
+        def _fail_callback(item, tx, err):
+            raise MemoryError("out of memory")
+
+        with pytest.raises(MemoryError, match="out of memory"):
+            _run([_item("a")], after_item=_fail_callback)
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +479,15 @@ class TestRunnerManagedTransactionPersistence:
         assert attempts == ["ok", "ok", "ok"]
         assert sleeps == [0.05, 0.1]
 
+    def test_persistence_memory_error_propagates(self, monkeypatch) -> None:
+        def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
+            raise MemoryError("out of memory")
+
+        monkeypatch.setattr(runner_module, "save_transaction", _fail_save)
+
+        with pytest.raises(MemoryError, match="out of memory"):
+            _run([_item("ok")], transaction_db_path="transactions.db")
+
     def test_persistence_failure_visible_to_after_item_without_changing_queue_outcome(self, monkeypatch) -> None:
         def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
             raise RuntimeError("write failed")
@@ -552,3 +581,255 @@ class TestStopEvent:
         summary, queue = _run([_item("a"), _item("b"), _item("c")])
         assert summary.processed == 3
         assert queue.completed == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# lifecycle hooks
+# ---------------------------------------------------------------------------
+
+class TestLifecycleHooks:
+    def test_on_start_data_appears_in_every_item_context(self) -> None:
+        seen: list[dict[str, object]] = []
+        queue = _FakeQueue([_item("a"), _item("b")])
+
+        class _CaptureSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                seen.append(dict(ctx.data))
+
+        run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_CaptureSkill("capture", 1)],
+            ),
+            config={"session_name": "shared"},
+            credentials=_CREDS,
+            worker_id="worker",
+            on_start=lambda config: {"session": config["session_name"]},
+        )
+
+        assert seen == [{"session": "shared"}, {"session": "shared"}]
+
+    def test_item_payload_takes_precedence_over_on_start_data(self) -> None:
+        item = _item("a")
+        item.payload = {"value": "item", "item_only": True}
+        seen: list[dict[str, object]] = []
+
+        class _CaptureSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                seen.append(dict(ctx.data))
+
+        run_queue_loop(
+            queue=_FakeQueue([item]),
+            engine=Engine(),
+            build_transaction=lambda queue_item: Transaction(
+                reference=queue_item.reference,
+                skills=[_CaptureSkill("capture", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="worker",
+            on_start=lambda config: {"value": "shared", "shared_only": True},
+        )
+
+        assert seen == [{"value": "item", "shared_only": True, "item_only": True}]
+
+    def test_item_contexts_receive_independent_shared_data_dicts(self) -> None:
+        seen: list[dict[str, object]] = []
+        queue = _FakeQueue([_item("a"), _item("b")])
+
+        class _MutateSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                seen.append(dict(ctx.data))
+                ctx.data["mutated"] = True
+
+        run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_MutateSkill("mutate", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="worker",
+            on_start=lambda config: {"shared": True},
+        )
+
+        assert seen == [{"shared": True}, {"shared": True}]
+
+    def test_nested_on_start_values_retain_shared_identity(self) -> None:
+        resource = {"session_id": "shared"}
+        seen: list[object] = []
+
+        class _CaptureSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                seen.append(ctx.data["resource"])
+
+        _run(
+            [_item("a"), _item("b")],
+            skill_cls=_CaptureSkill,
+            on_start=lambda config: {"resource": resource},
+        )
+
+        assert seen == [resource, resource]
+        assert seen[0] is resource
+        assert seen[1] is resource
+
+    def test_on_start_none_preserves_payload_only_behavior(self) -> None:
+        item = _item("a")
+        item.payload = {"value": "item"}
+        seen: list[dict[str, object]] = []
+
+        class _CaptureSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                seen.append(dict(ctx.data))
+
+        run_queue_loop(
+            queue=_FakeQueue([item]),
+            engine=Engine(),
+            build_transaction=lambda queue_item: Transaction(
+                reference=queue_item.reference,
+                skills=[_CaptureSkill("capture", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="worker",
+            on_start=lambda config: None,
+        )
+
+        assert seen == [{"value": "item"}]
+
+    def test_on_start_exception_propagates_before_processing(self) -> None:
+        queue = _FakeQueue([_item("a")])
+        summaries: list[QueueRunSummary] = []
+
+        def _fail_start(config: dict[str, object]) -> dict[str, object]:
+            raise RuntimeError("login failed")
+
+        with pytest.raises(RuntimeError, match="login failed"):
+            run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(reference=item.reference),
+                config={},
+                credentials=_CREDS,
+                worker_id="worker",
+                on_start=_fail_start,
+                on_finish=lambda summary: summaries.append(summary),
+            )
+
+        assert queue.completed == []
+        assert queue.failed == []
+        assert summaries == [QueueRunSummary()]
+
+    def test_invalid_on_start_return_raises_before_processing(self) -> None:
+        queue = _FakeQueue([_item("a")])
+        summaries: list[QueueRunSummary] = []
+
+        with pytest.raises(TypeError) as exc_info:
+            run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(reference=item.reference),
+                config={},
+                credentials=_CREDS,
+                worker_id="worker",
+                on_start=lambda config: "invalid",  # type: ignore[return-value]
+                on_finish=lambda summary: summaries.append(summary),
+            )
+
+        assert str(exc_info.value) == "on_start return expected dict | None; got str value='invalid'"
+        assert queue.completed == []
+        assert queue.failed == []
+        assert summaries == [QueueRunSummary()]
+
+    def test_on_finish_fires_once_with_final_summary(self) -> None:
+        summaries: list[QueueRunSummary] = []
+
+        summary, queue = _run(
+            [_item("a"), _item("b")],
+            on_finish=lambda final_summary: summaries.append(final_summary),
+        )
+
+        assert queue.completed == ["a", "b"]
+        assert summaries == [summary]
+        assert summaries[0].processed == 2
+        assert summaries[0].completed == 2
+
+    def test_on_finish_fires_when_stop_event_is_already_set(self) -> None:
+        event = threading.Event()
+        event.set()
+        summaries: list[QueueRunSummary] = []
+
+        summary, queue = _run(
+            [_item("a")],
+            stop_event=event,
+            on_finish=lambda final_summary: summaries.append(final_summary),
+        )
+
+        assert queue.completed == []
+        assert summaries == [summary]
+        assert summary.processed == 0
+
+    def test_on_finish_fires_when_queue_processing_raises(self) -> None:
+        summaries: list[QueueRunSummary] = []
+
+        class _FailingQueue(_FakeQueue):
+            def next_item(self, worker_id: str = "") -> QueueItem | None:
+                raise RuntimeError("queue unavailable")
+
+        with pytest.raises(RuntimeError, match="queue unavailable"):
+            run_queue_loop(
+                queue=_FailingQueue([]),
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(reference=item.reference),
+                config={},
+                credentials=_CREDS,
+                worker_id="worker",
+                on_finish=lambda final_summary: summaries.append(final_summary),
+            )
+
+        assert len(summaries) == 1
+        assert summaries[0] == QueueRunSummary()
+
+    def test_on_finish_exception_is_logged_and_swallowed(self, caplog) -> None:
+        logger = logging.getLogger("test.runner.on_finish")
+
+        def _fail_finish(summary: QueueRunSummary) -> None:
+            raise RuntimeError("cleanup failed")
+
+        with caplog.at_level(logging.ERROR, logger=logger.name):
+            summary, queue = _run(
+                [_item("a")],
+                logger=logger,
+                on_finish=_fail_finish,
+            )
+
+        assert summary.completed == 1
+        assert summary.lifecycle_errors == 1
+        assert queue.completed == ["a"]
+        assert any(
+            record.__dict__.get("event") == "on_finish_error"
+            and record.getMessage() == "on_finish callback raised during lifecycle cleanup"
+            for record in caplog.records
+        )
+
+    def test_on_finish_memory_error_propagates(self) -> None:
+        def _fail_finish(summary: QueueRunSummary) -> None:
+            raise MemoryError("out of memory")
+
+        with pytest.raises(MemoryError, match="out of memory"):
+            _run([_item("a")], on_finish=_fail_finish)
+
+    def test_successful_on_finish_does_not_increment_lifecycle_errors(self) -> None:
+        summary, _ = _run([_item("a")], on_finish=lambda final_summary: None)
+
+        assert summary.lifecycle_errors == 0
+
+    def test_omitted_hooks_preserve_current_behavior(self) -> None:
+        summary, queue = _run([_item("a")])
+
+        assert summary == QueueRunSummary(processed=1, completed=1, failed=0)
+        assert queue.completed == ["a"]

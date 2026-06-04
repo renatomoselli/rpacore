@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
+from rpacore._validation import type_error
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialProvider
 from rpacore.exceptions import BusinessException
@@ -36,6 +37,7 @@ class QueueRunSummary:
     failed: int = field(default=0)
     callback_errors: int = field(default=0)
     persistence_errors: int = field(default=0)
+    lifecycle_errors: int = field(default=0)
 
 
 def run_queue_loop(
@@ -52,6 +54,8 @@ def run_queue_loop(
     stop_event: threading.Event | None = None,
     retry_business_failures: bool = False,
     transaction_db_path: str | None = None,
+    on_start: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
+    on_finish: Callable[[QueueRunSummary], None] | None = None,
 ) -> QueueRunSummary:
     """Drain a queue by running each item through the engine.
 
@@ -74,6 +78,11 @@ def run_queue_loop(
       ran) but the error is counted in QueueRunSummary.callback_errors. If the callback
       raises on a failure-path item, queue.fail() is called as normal. The loop always
       continues regardless.
+    - Calls on_start(config) before claiming any items. Returned data is shallow-copied
+      into every item context, with item payload values taking precedence. Top-level
+      keys are isolated per item; nested values and resources retain shared identity.
+    - Calls on_finish(summary) exactly once after the loop exits. Exceptions are logged
+      and swallowed so cleanup cannot change the run outcome.
 
     Args:
         queue:             The queue to drain.
@@ -99,6 +108,11 @@ def run_queue_loop(
                            callbacks run. Persistence is best-effort: if the process exits
                            between engine completion and save, the queue remains the source
                            of truth and may retry the item.
+        on_start:          Optional callback fired before claiming items. Receives config
+                           and may return shared data shallow-copied into every item
+                           context. Nested values and resources remain shared.
+        on_finish:         Optional callback fired exactly once after the loop exits.
+                           Receives the final summary. Exceptions are logged and swallowed.
 
     Returns:
         QueueRunSummary with counts of processed, completed, and failed items.
@@ -109,6 +123,63 @@ def run_queue_loop(
     _notifiers: list[Notifier] = notifiers if notifiers is not None else []
     summary = QueueRunSummary()
 
+    try:
+        shared_data: dict[str, object] = {}
+        if on_start is not None:
+            start_data = on_start(config)
+            if start_data is not None:
+                if not isinstance(start_data, dict):
+                    raise type_error("on_start return", "dict | None", start_data)
+                shared_data = dict(start_data)
+
+        return _run_items(
+            queue,
+            engine,
+            build_transaction,
+            config,
+            credentials,
+            worker_id=worker_id,
+            notifiers=_notifiers,
+            log=log,
+            after_item=after_item,
+            stop_event=stop_event,
+            retry_business_failures=retry_business_failures,
+            transaction_db_path=transaction_db_path,
+            shared_data=shared_data,
+            summary=summary,
+        )
+    finally:
+        if on_finish is not None:
+            try:
+                on_finish(summary)
+            except MemoryError:
+                raise
+            except Exception:
+                summary.lifecycle_errors += 1
+                log.exception(
+                    "on_finish callback raised during lifecycle cleanup",
+                    extra={"event": "on_finish_error", "worker_id": worker_id},
+                )
+
+
+def _run_items(
+    queue: QueueProvider,
+    engine: Engine,
+    build_transaction: Callable[[QueueItem], Transaction],
+    config: dict[str, object],
+    credentials: CredentialProvider,
+    *,
+    worker_id: str,
+    notifiers: list[Notifier],
+    log: logging.Logger,
+    after_item: Callable[[QueueItem, Transaction | None, Exception | None], None] | None,
+    stop_event: threading.Event | None,
+    retry_business_failures: bool,
+    transaction_db_path: str | None,
+    shared_data: dict[str, object],
+    summary: QueueRunSummary,
+) -> QueueRunSummary:
+    """Process queue items after lifecycle startup has completed."""
     while True:
         if stop_event is not None and stop_event.is_set():
             break
@@ -130,10 +201,12 @@ def run_queue_loop(
         )
         try:
             transaction = build_transaction(item)
+            item_data = dict(shared_data)
+            item_data.update(item.payload)
             ctx = ProcessContext(
                 transaction=transaction,
                 config=config,
-                data=dict(item.payload),
+                data=item_data,
                 credentials=credentials,
             )
             engine.run(ctx)
@@ -157,6 +230,8 @@ def run_queue_loop(
                         },
                         exc_info=(type(persistence_error), persistence_error, persistence_error.__traceback__),
                     )
+        except MemoryError:
+            raise
         except Exception as exc:
             error = exc
             log.exception(
@@ -167,7 +242,9 @@ def run_queue_loop(
         if ctx is not None:
             try:
                 report = generate_report(ctx.transaction)
-                dispatch(_notifiers, report, logger=log)
+                dispatch(notifiers, report, logger=log)
+            except MemoryError:
+                raise
             except Exception as exc:
                 if error is None:
                     error = exc
@@ -179,6 +256,8 @@ def run_queue_loop(
         if after_item is not None:
             try:
                 after_item(item, transaction, error if error is not None else persistence_error)
+            except MemoryError:
+                raise
             except Exception:
                 callback_failed = True
                 log.exception(
@@ -234,6 +313,8 @@ def _save_transaction_with_retries(transaction: Transaction, *, db_path: str) ->
             if attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1:
                 return exc
             time.sleep(_PERSISTENCE_RETRY_DELAY_SECONDS * (2 ** attempt))
+        except MemoryError:
+            raise
         except Exception as exc:
             return exc
     return None
