@@ -20,6 +20,7 @@ from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, SystemException
 from rpacore.logger import configure_logger, get_logger
 from rpacore.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifiers, dispatch
+from rpacore.paths import resolve_config_path, resolve_config_paths
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
 from rpacore.recovery import resume_transaction
@@ -55,6 +56,8 @@ __all__ = [
     "QueueStatus",
     "require_config",
     "require_section",
+    "resolve_config_path",
+    "resolve_config_paths",
     "resume_transaction",
     "WebhookNotifier",
     "render_html",
