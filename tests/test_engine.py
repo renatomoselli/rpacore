@@ -1,8 +1,5 @@
 """Tests for rpacore.engine."""
 
-import threading
-import time
-
 import pytest
 
 from rpacore.context import ProcessContext
@@ -318,78 +315,13 @@ class TestEngineStateTransitions:
         assert s2.status is Status.SUCCESSFUL
 
 
-class TestEngineSkillTimeout:
-    def test_timeout_marks_skill_and_transaction_failed(self) -> None:
-        release = threading.Event()
-
-        class HangingSkill(Skill):
-            def execute(self, ctx: ProcessContext) -> None:
-                release.wait(timeout=1)
-
-        skill = HangingSkill("slow", 1, timeout=0.01)
-        tx = Transaction(reference="T1", skills=[skill])
-
-        try:
-            Engine().run(_ctx(tx))
-        finally:
-            release.set()
-
-        assert tx.status is Status.FAILED
-        assert skill.status is Status.FAILED
-        assert len(skill.exceptions) == 1
-        assert isinstance(skill.exceptions[0], SystemException)
-        assert str(skill.exceptions[0]) == "Skill timed out"
-        assert skill.exceptions[0].action == "slow"
-
-    def test_timeout_none_does_not_create_executor(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        def _unexpected_executor(*args, **kwargs):
-            raise AssertionError("timeout executor created")
-
-        monkeypatch.setattr("rpacore.engine.ThreadPoolExecutor", _unexpected_executor)
-        tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
-
-        Engine().run(_ctx(tx))
-
-        assert tx.status is Status.SUCCESSFUL
-
-    def test_timeout_long_enough_completes_normally(self) -> None:
-        class ShortSkill(Skill):
-            def execute(self, ctx: ProcessContext) -> None:
-                time.sleep(0.01)
-                ctx.data["done"] = True
-
-        skill = ShortSkill("short", 1, timeout=0.5)
-        tx = Transaction(reference="T1", skills=[skill])
-        ctx = _ctx(tx)
-
-        Engine().run(ctx)
-
-        assert tx.status is Status.SUCCESSFUL
-        assert skill.status is Status.SUCCESSFUL
-        assert ctx.data == {"done": True}
-
-    def test_exception_inside_timeout_uses_normal_classification(self) -> None:
-        class TimedBusinessFailSkill(Skill):
-            def execute(self, ctx: ProcessContext) -> None:
-                raise BusinessException("invalid row", action=self.name)
-
-        failed = TimedBusinessFailSkill("validate", 1, timeout=0.5)
-        followup = SuccessSkill("followup", 2)
-        tx = Transaction(reference="T1", skills=[failed, followup])
-
-        Engine().run(_ctx(tx))
-
-        assert tx.status is Status.FAILED
-        assert failed.status is Status.FAILED
-        assert isinstance(failed.exceptions[0], BusinessException)
-        assert followup.status is Status.SUCCESSFUL
-
-    def test_timeout_error_raised_by_skill_is_not_deadline_timeout(self) -> None:
+class TestEngineDirectSkillExecution:
+    def test_timeout_error_raised_by_skill_uses_normal_classification(self) -> None:
         class RaisesTimeoutError(Skill):
             def execute(self, ctx: ProcessContext) -> None:
                 raise TimeoutError("service timeout")
 
-        skill = RaisesTimeoutError("service", 1, timeout=0.5)
+        skill = RaisesTimeoutError("service", 1)
         tx = Transaction(reference="T1", skills=[skill])
 
         Engine().run(_ctx(tx))

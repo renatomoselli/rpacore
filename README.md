@@ -204,6 +204,20 @@ raise BusinessException("bad row", action=self.name, stop=True)
 
 That API is planned, not yet implemented in the current package.
 
+## Timeouts and Deadlines
+
+RPA Core does not provide a generic per-skill timeout. Python threads cannot be
+safely stopped, so an in-process timeout can mark a skill failed while the timed
+out code keeps running and mutating external systems.
+
+Configure I/O timeouts in the library that performs the work, such as the HTTP,
+SMTP, browser, database, or desktop automation client used by a skill. If an
+automation needs a hard deadline with termination, run it behind an external
+worker-process or orchestrator boundary and record the outcome back into RPA
+Core. RPA Core v0.1.0 intentionally rejects Pebble or similar process-timeout
+dependencies because process termination cannot make arbitrary external side
+effects reversible.
+
 ## Optional Dependencies
 
 ```bash
