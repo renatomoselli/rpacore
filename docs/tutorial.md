@@ -240,6 +240,12 @@ What this file does:
 - runs the engine
 - saves the finished transaction to SQLite
 
+The engine validates transaction wiring before any skill runs. The transaction
+reference and skill names must be non-empty, skill names must be unique, and
+execution orders must be unique positive integers. This example saves
+persistence after `Engine.run()` finishes; normal execution is not yet
+crash-durable at each skill boundary.
+
 ## Step 9: Run the Example
 
 From the `rpacore-examples` folder, run:

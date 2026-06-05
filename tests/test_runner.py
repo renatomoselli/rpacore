@@ -12,7 +12,7 @@ import pytest
 from rpacore.context import ProcessContext
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
-from rpacore.exceptions import BusinessException, SystemException
+from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.persistence import list_transactions
 from rpacore.queue import QueueItem
 import rpacore.runner as runner_module
@@ -174,6 +174,37 @@ class TestQueueRunSummary:
         assert summary.failed == 1
         assert queue.failed == ["x"]
         assert queue.fail_retries == [True]
+
+    def test_execution_validation_error_is_terminal_queue_failure(self) -> None:
+        queue = _FakeQueue([_item("invalid")])
+
+        def _build_invalid(item: QueueItem) -> Transaction:
+            return Transaction(reference=item.reference, skills=[Skill("", 1)])
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=_build_invalid,
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+        )
+
+        assert summary.processed == 1
+        assert summary.completed == 0
+        assert summary.failed == 1
+        assert queue.failed == ["invalid"]
+        assert queue.fail_retries == [False]
+
+    def test_build_transaction_validation_error_is_terminal_queue_failure(self) -> None:
+        summary, queue = _run(
+            [_item("invalid")],
+            build_raises=ExecutionValidationError("invalid transaction wiring"),
+        )
+
+        assert summary.failed == 1
+        assert queue.failed == ["invalid"]
+        assert queue.fail_retries == [False]
 
     def test_mixed_outcomes(self) -> None:
         queue = _FakeQueue([_item("ok"), _item("bad")])

@@ -508,6 +508,13 @@ class TestDispatch:
         dispatch([bad], _make_report(), logger=log)
         assert cap.records, "Expected an error log record"
 
+    def test_memory_error_propagates(self):
+        bad = MagicMock(spec=Notifier)
+        bad.send.side_effect = MemoryError("out of memory")
+
+        with pytest.raises(MemoryError, match="out of memory"):
+            dispatch([bad], _make_report())
+
 
 # ---------------------------------------------------------------------------
 # TestBuildNotifiers

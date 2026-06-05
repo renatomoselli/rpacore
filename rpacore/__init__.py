@@ -17,7 +17,7 @@ from rpacore.config_validation import optional_config, require_config, require_s
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialNotFoundError, CredentialProvider, EnvCredentialProvider, KeyringCredentialProvider, build_credential_provider
 from rpacore.engine import Engine
-from rpacore.exceptions import BusinessException, SystemException
+from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.logger import configure_logger, get_logger
 from rpacore.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifiers, dispatch
 from rpacore.paths import resolve_config_path, resolve_config_paths
@@ -41,6 +41,7 @@ __all__ = [
     "Engine",
     "EnvCredentialProvider",
     "EmailNotifier",
+    "ExecutionValidationError",
     "generate_report",
     "get_logger",
     "KeyringCredentialProvider",

@@ -8,7 +8,7 @@ import time
 from typing import Literal
 
 from rpacore.context import ProcessContext
-from rpacore.exceptions import BusinessException, SystemException
+from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.logger import get_logger
 from rpacore.screenshot import capture_screenshot
 from rpacore.skill import Skill
@@ -33,7 +33,8 @@ class Engine:
         Only skills whose last recorded exception is a SystemException are retried.
         BusinessException failures are permanent — retrying won't fix bad data.
         Each retry pass increments transaction.retry_count.
-        Retry is immediate, within the same Engine.run() call.
+        Retry happens within the same Engine.run() call after the configured
+        retry delay and backoff.
     """
 
     def __init__(
@@ -66,6 +67,11 @@ class Engine:
     def run(self, ctx: ProcessContext) -> None:
         """Execute all skills in the transaction, retrying retryable failed skills up to max_retries times."""
         transaction = ctx.transaction
+        try:
+            transaction.validate_for_execution()
+        except ExecutionValidationError:
+            transaction.status = Status.FAILED
+            raise
         transaction.status = Status.IN_PROGRESS
         self._log_transaction_started(transaction)
 
@@ -134,32 +140,34 @@ class Engine:
                 self._log_skill_completed(transaction, skill)
             except BusinessException as exc:
                 exc.retry_number = transaction.retry_count
-                if self.screenshot_dir:
-                    exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 skill.status = Status.FAILED
                 skill.exceptions.append(exc)
+                if self.screenshot_dir:
+                    exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 self._log_skill_failed(transaction, skill, exc, level="warning")
                 if exc.stops_execution:
                     self._skip_downstream_pending_skills(transaction, skill)
                     break
             except SystemException as exc:
                 exc.retry_number = transaction.retry_count
-                if self.screenshot_dir:
-                    exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 skill.status = Status.FAILED
                 skill.exceptions.append(exc)
+                if self.screenshot_dir:
+                    exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 self._log_skill_failed(transaction, skill, exc, level="error")
                 break
+            except MemoryError:
+                raise
             except Exception as exc:
                 wrapped = SystemException(
                     str(exc),
                     action=skill.name,
                     retry_number=transaction.retry_count,
                 )
-                if self.screenshot_dir:
-                    wrapped.screenshot_path = capture_screenshot(self.screenshot_dir)
                 skill.status = Status.FAILED
                 skill.exceptions.append(wrapped)
+                if self.screenshot_dir:
+                    wrapped.screenshot_path = capture_screenshot(self.screenshot_dir)
                 self._log_skill_failed(transaction, skill, wrapped, level="error")
                 break
 

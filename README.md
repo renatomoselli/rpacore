@@ -160,6 +160,20 @@ PENDING -> IN_PROGRESS -> SUCCESSFUL
                        -> FAILED
 ```
 
+`Engine.run()` validates transaction wiring before any skill runs. Transaction
+references and skill names must be non-empty, skill names must be unique within
+the transaction, and skill execution orders must be unique positive integers.
+Malformed wiring raises `ExecutionValidationError`, marks the transaction
+`FAILED`, and should be treated as a permanent configuration or code issue, not
+as a retryable runtime failure. The same validation applies to loaded
+transactions before resume, so persisted malformed skill wiring must be fixed
+rather than silently re-run.
+
+Persistence is normally written by user wiring or the queue runner after
+`Engine.run()` finishes. Loading a persisted transaction resets any
+`IN_PROGRESS` transaction or skill to `FAILED`, but ordinary in-process
+execution is not yet crash-durable at each successful skill boundary.
+
 ## Configuration
 
 Create a `config.toml` in your project:
@@ -196,13 +210,11 @@ max_retries = 3
 | `SystemException` | Technical failure, such as network or file errors. | Skill fails, execution stops, retryable. |
 | Any other exception | Unhandled Python exception. | Wrapped as `SystemException`. |
 
-Phase 5 plans to add explicit business-stop behavior:
+Use `stop=True` for a business failure that should stop downstream work:
 
 ```python
 raise BusinessException("bad row", action=self.name, stop=True)
 ```
-
-That API is planned, not yet implemented in the current package.
 
 ## Timeouts and Deadlines
 

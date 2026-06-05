@@ -13,7 +13,7 @@ from typing import Callable
 from rpacore._validation import type_error
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialProvider
-from rpacore.exceptions import BusinessException
+from rpacore.exceptions import BusinessException, ExecutionValidationError
 from rpacore.engine import Engine
 from rpacore.logger import get_logger
 from rpacore.notify import Notifier, dispatch
@@ -275,11 +275,14 @@ def _run_items(
                 extra={"event": "queue_item_complete", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
             )
         else:
-            retry = (
-                retry_business_failures
-                or error is not None
-                or not _transaction_has_only_business_failures(transaction)
-            )
+            if isinstance(error, ExecutionValidationError):
+                retry = False
+            else:
+                retry = (
+                    retry_business_failures
+                    or error is not None
+                    or not _transaction_has_only_business_failures(transaction)
+                )
             queue.fail(item.id, retry=retry, claimed_by=item.claimed_by)
             summary.failed += 1
             if not error and not callback_failed and ctx is not None:

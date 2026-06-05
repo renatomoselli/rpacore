@@ -61,6 +61,19 @@ class TestCaptureScreenshot:
 
         assert result == ""
 
+    def test_memory_error_propagates(self, tmp_path: object) -> None:
+        mock_sct_instance = MagicMock()
+        mock_sct_instance.__enter__ = MagicMock(return_value=mock_sct_instance)
+        mock_sct_instance.__exit__ = MagicMock(return_value=False)
+        mock_sct_instance.shot.side_effect = MemoryError("out of memory")
+
+        mock_mss_module = MagicMock()
+        mock_mss_module.mss.return_value = mock_sct_instance
+
+        with patch.dict("sys.modules", {"mss": mock_mss_module}):
+            with pytest.raises(MemoryError, match="out of memory"):
+                capture_screenshot(str(tmp_path))
+
 
 class TestEngineScreenshotIntegration:
     """Verify the engine sets screenshot_path on exceptions when screenshot_dir is configured."""

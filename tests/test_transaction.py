@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from rpacore.exceptions import ExecutionValidationError
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import Transaction
@@ -134,3 +135,48 @@ class TestTransactionStatusTransitions:
         tx = Transaction(reference="INV-001")
         tx.status = Status.FAILED
         assert tx.status is Status.FAILED
+
+
+class TestTransactionExecutionValidation:
+    def test_valid_transaction_passes(self) -> None:
+        tx = Transaction(reference="INV-001", skills=[Skill("login", 1)])
+        tx.validate_for_execution()
+
+    @pytest.mark.parametrize("reference", ["", "   "])
+    def test_blank_reference_raises(self, reference: str) -> None:
+        tx = Transaction(reference=reference)
+        with pytest.raises(ExecutionValidationError, match="transaction.reference"):
+            tx.validate_for_execution()
+
+    def test_non_string_reference_raises(self) -> None:
+        tx = Transaction(reference=123)  # type: ignore[arg-type]
+        with pytest.raises(ExecutionValidationError, match="transaction.reference"):
+            tx.validate_for_execution()
+
+    @pytest.mark.parametrize("name", ["", "   "])
+    def test_blank_skill_name_raises(self, name: str) -> None:
+        tx = Transaction(reference="INV-001", skills=[Skill(name, 1)])
+        with pytest.raises(ExecutionValidationError, match="skill.name"):
+            tx.validate_for_execution()
+
+    def test_duplicate_skill_name_raises(self) -> None:
+        tx = Transaction(reference="INV-001", skills=[Skill("login", 1), Skill("login", 2)])
+        with pytest.raises(ExecutionValidationError, match="skill.name must be unique"):
+            tx.validate_for_execution()
+
+    @pytest.mark.parametrize("execution_order", [0, -1])
+    def test_non_positive_execution_order_raises(self, execution_order: int) -> None:
+        tx = Transaction(reference="INV-001", skills=[Skill("login", execution_order)])
+        with pytest.raises(ExecutionValidationError, match="skill.execution_order"):
+            tx.validate_for_execution()
+
+    @pytest.mark.parametrize("execution_order", [True, "1"])
+    def test_non_integer_execution_order_raises(self, execution_order: object) -> None:
+        tx = Transaction(reference="INV-001", skills=[Skill("login", execution_order)])  # type: ignore[arg-type]
+        with pytest.raises(ExecutionValidationError, match="skill.execution_order"):
+            tx.validate_for_execution()
+
+    def test_duplicate_execution_order_raises(self) -> None:
+        tx = Transaction(reference="INV-001", skills=[Skill("login", 1), Skill("submit", 1)])
+        with pytest.raises(ExecutionValidationError, match="skill.execution_order must be unique"):
+            tx.validate_for_execution()

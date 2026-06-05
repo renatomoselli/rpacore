@@ -4,7 +4,7 @@ import pytest
 
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
-from rpacore.exceptions import BusinessException, SystemException
+from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import Transaction
@@ -314,6 +314,24 @@ class TestEngineStateTransitions:
         assert s1.status is Status.SKIPPED
         assert s2.status is Status.SUCCESSFUL
 
+    def test_invalid_transaction_shape_fails_before_skill_side_effects(self) -> None:
+        effects: list[str] = []
+
+        class TrackSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                effects.append(self.name)
+
+        tx = Transaction(
+            reference="T1",
+            skills=[TrackSkill("duplicate", 1), TrackSkill("duplicate", 2)],
+        )
+
+        with pytest.raises(ExecutionValidationError, match="skill.name must be unique"):
+            Engine().run(_ctx(tx))
+
+        assert effects == []
+        assert tx.status is Status.FAILED
+
 
 class TestEngineDirectSkillExecution:
     def test_timeout_error_raised_by_skill_uses_normal_classification(self) -> None:
@@ -330,6 +348,35 @@ class TestEngineDirectSkillExecution:
         assert isinstance(skill.exceptions[0], SystemException)
         assert str(skill.exceptions[0]) == "service timeout"
         assert skill.exceptions[0].action == "service"
+
+    def test_memory_error_propagates(self) -> None:
+        class MemoryFailSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                raise MemoryError("out of memory")
+
+        skill = MemoryFailSkill("allocate", 1)
+        tx = Transaction(reference="T1", skills=[skill])
+
+        with pytest.raises(MemoryError, match="out of memory"):
+            Engine().run(_ctx(tx))
+
+        assert skill.exceptions == []
+        assert skill.status is Status.IN_PROGRESS
+
+    def test_screenshot_memory_error_preserves_business_failure_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fail_screenshot(directory: str) -> str:
+            raise MemoryError("out of memory")
+
+        skill = BusinessFailSkill("validate", 1)
+        tx = Transaction(reference="T1", skills=[skill])
+        monkeypatch.setattr("rpacore.engine.capture_screenshot", _fail_screenshot)
+
+        with pytest.raises(MemoryError, match="out of memory"):
+            Engine(screenshot_dir="screenshots").run(_ctx(tx))
+
+        assert skill.status is Status.FAILED
+        assert len(skill.exceptions) == 1
+        assert isinstance(skill.exceptions[0], BusinessException)
 
 
 class TestEngineRetry:
@@ -492,16 +539,6 @@ class TestEngineRetry:
         assert tx.status is Status.SUCCESSFUL
         assert counts["a"] == 2
         assert counts["b"] == 1  # ran on retry pass after a succeeded
-
-    def test_transaction_failed_when_skill_left_pending(self) -> None:
-        # Verifies final status requires all skills SUCCESSFUL or SKIPPED
-        s1 = SuccessSkill("a", 1)
-        s2 = SuccessSkill("b", 2)
-        tx = Transaction(reference="T1", skills=[s1, s2])
-        Engine().run(_ctx(tx))
-        s2.status = Status.PENDING  # manually corrupt state
-        # Re-evaluate status directly to confirm rule
-        assert not all(s.status in (Status.SUCCESSFUL, Status.SKIPPED) for s in tx.skills)
 
     def test_unhandled_exception_is_retried(self) -> None:
         attempts: list[int] = []

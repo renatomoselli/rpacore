@@ -213,6 +213,8 @@ def dispatch(
     for notifier in notifiers:
         try:
             notifier.send(report)
+        except MemoryError:
+            raise
         except Exception:
             log.exception(
                 "Notifier %s failed; swallowing to protect transaction outcome",

@@ -38,6 +38,8 @@ def capture_screenshot(directory: str) -> str:
             sct.shot(output=str(filepath))
 
         return str(filepath)
+    except MemoryError:
+        raise
     except Exception:
         logger.warning("Screenshot capture failed", exc_info=True)
         return ""

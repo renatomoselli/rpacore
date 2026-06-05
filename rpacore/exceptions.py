@@ -8,6 +8,10 @@ Two categories:
 from datetime import datetime, timezone
 
 
+class ExecutionValidationError(ValueError):
+    """Permanent invalid transaction or skill wiring detected before execution."""
+
+
 class BusinessException(Exception):
     """Expected business rule violation.
 
