@@ -263,6 +263,13 @@ itself must stay useful without it:
 
 See `book/notes/future-rpacore-cloud-thesis.md` for the private planning note.
 
+## Compatibility Baseline
+
+`v0.1.0` is the first supported public compatibility baseline. Breaking changes
+made before that release are tracked for maintainers in
+[docs/pre-v0.1.0-api-migration.md](docs/pre-v0.1.0-api-migration.md), not hidden
+behind compatibility aliases.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
