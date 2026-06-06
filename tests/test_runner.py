@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+from contextlib import contextmanager
 from typing import Iterator
 
 import pytest
@@ -13,7 +14,7 @@ from rpacore.context import ProcessContext
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
-from rpacore.persistence import list_transactions
+from rpacore.persistence import list_transactions, load_transaction
 from rpacore.queue import QueueItem
 import rpacore.runner as runner_module
 from rpacore.runner import QueueRunSummary, run_queue_loop
@@ -84,7 +85,7 @@ def _run(
     retry_business_failures: bool = False,
     transaction_db_path: str | None = None,
     logger=None,
-    on_start=None,
+    resource_scope=None,
     on_finish=None,
 ) -> tuple[QueueRunSummary, _FakeQueue]:
     """Run the queue loop with default stubs, forwarding optional runner behavior."""
@@ -107,10 +108,15 @@ def _run(
         retry_business_failures=retry_business_failures,
         transaction_db_path=transaction_db_path,
         logger=logger,
-        on_start=on_start,
+        resource_scope=resource_scope,
         on_finish=on_finish,
     )
     return summary, queue
+
+
+@contextmanager
+def _resource_scope(resources: dict[str, object] | None):
+    yield resources
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +580,119 @@ class TestRunnerManagedTransactionPersistence:
         assert queue.completed == ["ok"]
         assert calls == []
 
+    def test_queue_payload_is_saved_as_transaction_state(self, tmp_path) -> None:
+        item = _item("ok")
+        item.payload = {"invoice_id": 42}
+        db_path = str(tmp_path / "transactions.db")
+
+        summary, queue = _run([item], transaction_db_path=db_path)
+
+        loaded = list_transactions(db_path)[0]
+        assert summary.completed == 1
+        assert queue.completed == ["ok"]
+        assert loaded.reference == "ok"
+        assert loaded.state == {"invoice_id": 42}
+
+    def test_resources_are_not_persisted_with_transaction_state(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        transaction_ids: list[str] = []
+
+        class _UseResourceSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                assert "session" in ctx.resources
+                ctx.state["done"] = True
+                transaction_ids.append(ctx.transaction.id)
+
+        _run(
+            [_item("ok")],
+            skill_cls=_UseResourceSkill,
+            transaction_db_path=db_path,
+            resource_scope=_resource_scope({"session": object()}),
+        )
+
+        loaded = load_transaction(transaction_ids[0], db_path)
+        assert loaded.state == {"done": True}
+
+    def test_non_json_safe_queue_payload_fails_before_state_seed(self) -> None:
+        item = _item("bad")
+        item.payload = {"client": object()}
+        errors: list[Exception | None] = []
+
+        summary, queue = _run(
+            [item],
+            after_item=lambda item, tx, err: errors.append(err),
+        )
+
+        assert summary.failed == 1
+        assert queue.failed == ["bad"]
+        assert isinstance(errors[0], TypeError)
+        assert "queue item payload['client'] expected JSON value" in str(errors[0])
+
+    def test_non_json_safe_final_state_prevents_queue_completion(self, tmp_path) -> None:
+        errors: list[Exception | None] = []
+
+        class _BadStateSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                ctx.state["client"] = object()
+
+        summary, queue = _run(
+            [_item("bad-state")],
+            skill_cls=_BadStateSkill,
+            transaction_db_path=str(tmp_path / "transactions.db"),
+            after_item=lambda item, tx, err: errors.append(err),
+        )
+
+        assert summary.completed == 0
+        assert summary.failed == 1
+        assert summary.persistence_errors == 0
+        assert queue.completed == []
+        assert queue.failed == ["bad-state"]
+        assert queue.fail_retries == [False]
+        assert isinstance(errors[0], TypeError)
+        assert "transaction.state['client'] expected JSON value" in str(errors[0])
+
+    def test_payload_state_collision_is_logged_at_warning(self) -> None:
+        item = _item("ok")
+        item.payload = {"invoice_id": "payload"}
+        warning_extras: list[dict[str, object]] = []
+
+        class _CaptureLogger:
+            def debug(self, message: str, *, extra: dict[str, object]) -> None:
+                pass
+
+            def info(self, message: str, *, extra: dict[str, object]) -> None:
+                pass
+
+            def warning(self, message: str, *, extra: dict[str, object]) -> None:
+                warning_extras.append(extra)
+
+            def error(self, *args, **kwargs) -> None:
+                pass
+
+            def exception(self, *args, **kwargs) -> None:
+                pass
+
+        def _build(queue_item: QueueItem) -> Transaction:
+            return Transaction(
+                reference=queue_item.reference,
+                state={"invoice_id": "prebuilt"},
+                skills=[_SuccessSkill("step", 1)],
+            )
+
+        run_queue_loop(
+            queue=_FakeQueue([item]),
+            engine=Engine(),
+            build_transaction=_build,
+            config={},
+            credentials=_CREDS,
+            worker_id="worker",
+            logger=_CaptureLogger(),  # type: ignore[arg-type]
+        )
+
+        assert len(warning_extras) == 1
+        assert warning_extras[0]["event"] == "queue_payload_state_collision"
+        assert warning_extras[0]["state_keys"] == ["invoice_id"]
+
 
 # ---------------------------------------------------------------------------
 # stop_event
@@ -619,13 +738,13 @@ class TestStopEvent:
 # ---------------------------------------------------------------------------
 
 class TestLifecycleHooks:
-    def test_on_start_data_appears_in_every_item_context(self) -> None:
+    def test_resource_scope_resources_appear_in_every_item_context(self) -> None:
         seen: list[dict[str, object]] = []
         queue = _FakeQueue([_item("a"), _item("b")])
 
         class _CaptureSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
-                seen.append(dict(ctx.data))
+                seen.append(dict(ctx.resources))
 
         run_queue_loop(
             queue=queue,
@@ -637,19 +756,19 @@ class TestLifecycleHooks:
             config={"session_name": "shared"},
             credentials=_CREDS,
             worker_id="worker",
-            on_start=lambda config: {"session": config["session_name"]},
+            resource_scope=_resource_scope({"session": "shared"}),
         )
 
         assert seen == [{"session": "shared"}, {"session": "shared"}]
 
-    def test_item_payload_takes_precedence_over_on_start_data(self) -> None:
+    def test_item_payload_populates_state_while_resource_scope_populates_resources(self) -> None:
         item = _item("a")
-        item.payload = {"value": "item", "item_only": True}
-        seen: list[dict[str, object]] = []
+        item.payload = {"value": "item"}
+        seen: list[tuple[dict[str, object], dict[str, object]]] = []
 
         class _CaptureSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
-                seen.append(dict(ctx.data))
+                seen.append((dict(ctx.state), dict(ctx.resources)))
 
         run_queue_loop(
             queue=_FakeQueue([item]),
@@ -661,19 +780,19 @@ class TestLifecycleHooks:
             config={},
             credentials=_CREDS,
             worker_id="worker",
-            on_start=lambda config: {"value": "shared", "shared_only": True},
+            resource_scope=_resource_scope({"value": "resource", "shared_only": True}),
         )
 
-        assert seen == [{"value": "item", "shared_only": True, "item_only": True}]
+        assert seen == [({"value": "item"}, {"value": "resource", "shared_only": True})]
 
-    def test_item_contexts_receive_independent_shared_data_dicts(self) -> None:
+    def test_item_contexts_receive_independent_resource_dicts(self) -> None:
         seen: list[dict[str, object]] = []
         queue = _FakeQueue([_item("a"), _item("b")])
 
         class _MutateSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
-                seen.append(dict(ctx.data))
-                ctx.data["mutated"] = True
+                seen.append(dict(ctx.resources))
+                ctx.resources["mutated"] = True
 
         run_queue_loop(
             queue=queue,
@@ -685,37 +804,37 @@ class TestLifecycleHooks:
             config={},
             credentials=_CREDS,
             worker_id="worker",
-            on_start=lambda config: {"shared": True},
+            resource_scope=_resource_scope({"shared": True}),
         )
 
         assert seen == [{"shared": True}, {"shared": True}]
 
-    def test_nested_on_start_values_retain_shared_identity(self) -> None:
+    def test_nested_resource_scope_values_retain_shared_identity(self) -> None:
         resource = {"session_id": "shared"}
         seen: list[object] = []
 
         class _CaptureSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
-                seen.append(ctx.data["resource"])
+                seen.append(ctx.resources["resource"])
 
         _run(
             [_item("a"), _item("b")],
             skill_cls=_CaptureSkill,
-            on_start=lambda config: {"resource": resource},
+            resource_scope=_resource_scope({"resource": resource}),
         )
 
         assert seen == [resource, resource]
         assert seen[0] is resource
         assert seen[1] is resource
 
-    def test_on_start_none_preserves_payload_only_behavior(self) -> None:
+    def test_resource_scope_none_preserves_payload_only_state_behavior(self) -> None:
         item = _item("a")
         item.payload = {"value": "item"}
-        seen: list[dict[str, object]] = []
+        seen: list[tuple[dict[str, object], dict[str, object]]] = []
 
         class _CaptureSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
-                seen.append(dict(ctx.data))
+                seen.append((dict(ctx.state), dict(ctx.resources)))
 
         run_queue_loop(
             queue=_FakeQueue([item]),
@@ -727,17 +846,26 @@ class TestLifecycleHooks:
             config={},
             credentials=_CREDS,
             worker_id="worker",
-            on_start=lambda config: None,
+            resource_scope=_resource_scope(None),
         )
 
-        assert seen == [{"value": "item"}]
+        assert seen == [({"value": "item"}, {})]
 
-    def test_on_start_exception_propagates_before_processing(self) -> None:
-        queue = _FakeQueue([_item("a")])
+    def test_resource_scope_setup_exception_propagates_before_processing(self) -> None:
         summaries: list[QueueRunSummary] = []
+        next_calls = 0
 
-        def _fail_start(config: dict[str, object]) -> dict[str, object]:
+        class _CountingQueue(_FakeQueue):
+            def next_item(self, worker_id: str = "") -> QueueItem | None:
+                nonlocal next_calls
+                next_calls += 1
+                return super().next_item(worker_id)
+        queue = _CountingQueue([_item("a")])
+
+        @contextmanager
+        def _fail_scope():
             raise RuntimeError("login failed")
+            yield {}
 
         with pytest.raises(RuntimeError, match="login failed"):
             run_queue_loop(
@@ -747,15 +875,16 @@ class TestLifecycleHooks:
                 config={},
                 credentials=_CREDS,
                 worker_id="worker",
-                on_start=_fail_start,
+                resource_scope=_fail_scope(),
                 on_finish=lambda summary: summaries.append(summary),
             )
 
         assert queue.completed == []
         assert queue.failed == []
+        assert next_calls == 0
         assert summaries == [QueueRunSummary()]
 
-    def test_invalid_on_start_return_raises_before_processing(self) -> None:
+    def test_invalid_resource_scope_yield_raises_before_processing(self) -> None:
         queue = _FakeQueue([_item("a")])
         summaries: list[QueueRunSummary] = []
 
@@ -767,14 +896,108 @@ class TestLifecycleHooks:
                 config={},
                 credentials=_CREDS,
                 worker_id="worker",
-                on_start=lambda config: "invalid",  # type: ignore[return-value]
+                resource_scope=_resource_scope("invalid"),  # type: ignore[arg-type]
                 on_finish=lambda summary: summaries.append(summary),
             )
 
-        assert str(exc_info.value) == "on_start return expected dict | None; got str value='invalid'"
+        assert str(exc_info.value) == "resource_scope yield expected dict | None; got str value='invalid'"
         assert queue.completed == []
         assert queue.failed == []
         assert summaries == [QueueRunSummary()]
+
+    def test_resource_scope_setup_and_cleanup_happen_once_on_normal_run(self) -> None:
+        events: list[str] = []
+
+        @contextmanager
+        def _scope():
+            events.append("setup")
+            try:
+                yield {"session": object()}
+            finally:
+                events.append("cleanup")
+
+        summary, queue = _run([_item("a"), _item("b")], resource_scope=_scope())
+
+        assert summary.processed == 2
+        assert queue.completed == ["a", "b"]
+        assert events == ["setup", "cleanup"]
+
+    def test_resource_scope_setup_and_cleanup_happen_once_on_empty_queue(self) -> None:
+        events: list[str] = []
+
+        @contextmanager
+        def _scope():
+            events.append("setup")
+            try:
+                yield {}
+            finally:
+                events.append("cleanup")
+
+        summary, queue = _run([], resource_scope=_scope())
+
+        assert summary.processed == 0
+        assert queue.completed == []
+        assert events == ["setup", "cleanup"]
+
+    def test_resource_scope_cleanup_happens_once_after_processing_error(self) -> None:
+        events: list[str] = []
+
+        @contextmanager
+        def _scope():
+            events.append("setup")
+            try:
+                yield {}
+            finally:
+                events.append("cleanup")
+
+        summary, queue = _run(
+            [_item("a")],
+            build_raises=RuntimeError("cannot build"),
+            resource_scope=_scope(),
+        )
+
+        assert summary.failed == 1
+        assert queue.failed == ["a"]
+        assert events == ["setup", "cleanup"]
+
+    def test_resource_scope_cleanup_error_propagates_after_queue_outcome(self) -> None:
+        summaries: list[QueueRunSummary] = []
+        queue = _FakeQueue([_item("a")])
+
+        @contextmanager
+        def _scope():
+            yield {}
+            raise RuntimeError("cleanup failed")
+
+        with pytest.raises(RuntimeError, match="cleanup failed"):
+            run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SuccessSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="worker",
+                resource_scope=_scope(),
+                on_finish=lambda summary: summaries.append(summary),
+            )
+
+        assert queue.completed == ["a"]
+        assert queue.failed == []
+        assert summaries == [QueueRunSummary(processed=1, completed=1)]
+
+    def test_on_start_keyword_is_not_accepted(self) -> None:
+        with pytest.raises(TypeError, match="on_start"):
+            run_queue_loop(
+                queue=_FakeQueue([]),
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(reference=item.reference),
+                config={},
+                credentials=_CREDS,
+                on_start=lambda config: {},  # type: ignore[call-arg]
+            )
 
     def test_on_finish_fires_once_with_final_summary(self) -> None:
         summaries: list[QueueRunSummary] = []

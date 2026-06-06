@@ -111,8 +111,8 @@ class FetchRecord(Skill):
                 action="FetchRecord",
             )
 
-        # Fetch and store data for later skills.
-        ctx.data["record"] = {"id": record_id}
+        # Fetch and store durable state for later skills.
+        ctx.state["record"] = {"id": record_id}
 ```
 
 ## Project Structure

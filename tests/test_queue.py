@@ -113,6 +113,64 @@ class TestSqliteQueueCRUD:
         assert claimed.status == QueueStatus.IN_PROGRESS
         assert claimed.claimed_by == "worker-1"
 
+    def test_add_rejects_non_json_safe_payload(self, tmp_path):
+        q = make_queue(tmp_path)
+        item = make_item("bad", {"client": object()})
+
+        with pytest.raises(TypeError) as exc_info:
+            q.add(item)
+
+        assert "queue item payload['client'] expected JSON value" in str(exc_info.value)
+
+    def test_add_rejects_circular_payload(self, tmp_path):
+        q = make_queue(tmp_path)
+        payload: dict[str, object] = {}
+        payload["self"] = payload
+        item = make_item("bad", payload)
+
+        with pytest.raises(TypeError) as exc_info:
+            q.add(item)
+
+        assert "queue item payload['self'] expected acyclic JSON value" in str(exc_info.value)
+
+    def test_add_rejects_non_object_payload(self, tmp_path):
+        q = make_queue(tmp_path)
+        item = make_item("bad")
+        item.payload = ["invoice"]  # type: ignore[assignment]
+
+        with pytest.raises(TypeError) as exc_info:
+            q.add(item)
+
+        assert "queue item payload expected JSON object" in str(exc_info.value)
+
+    def test_next_item_rejects_pre_existing_non_object_payload(self, tmp_path):
+        q = make_queue(tmp_path)
+        conn = sqlite3.connect(q.db_path)
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "INSERT INTO queue_items "
+                "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("bad-payload", "bad", "[]", "pending", 0, now, "", None),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(TypeError) as exc_info:
+            q.next_item("worker")
+
+        assert "queue item payload expected JSON object" in str(exc_info.value)
+        conn = sqlite3.connect(q.db_path)
+        try:
+            status = conn.execute(
+                "SELECT status FROM queue_items WHERE id = ?", ("bad-payload",)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert status == "pending"
+
     def test_next_item_empty_returns_none(self, tmp_path):
         q = make_queue(tmp_path)
         assert q.next_item() is None
@@ -671,7 +729,7 @@ class TestRunQueueLoop:
         assert stored.status == QueueStatus.PENDING
         assert stored.retry_count == 1
 
-    def test_payload_available_in_ctx_data(self, tmp_path):
+    def test_payload_available_in_transaction_state(self, tmp_path):
         q = make_queue(tmp_path, max_retries=0)
         q.add(make_item("ref-data", payload={"key": "value"}))
 
@@ -683,7 +741,7 @@ class TestRunQueueLoop:
                 super().__init__("capture", 1)
 
             def execute(self, ctx: ProcessContext) -> None:
-                captured.append(dict(ctx.data))
+                captured.append(dict(ctx.state))
 
         def build_transaction(item: QueueItem) -> Transaction:
             t = Transaction(reference=item.reference)

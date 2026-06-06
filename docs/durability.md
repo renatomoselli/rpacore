@@ -12,6 +12,39 @@ persistence adapters for databases such as PostgreSQL or MySQL.
 The storage contract is still kept explicit and portable so a future backend can
 preserve the same transaction semantics without changing how skills are written.
 
+## Durable State and Resources
+
+`Transaction.state` is the durable, transaction-owned state mapping. Skills
+access it through `ProcessContext.state`, and queue item payload initializes it
+when `run_queue_loop()` builds an item context.
+
+If `build_transaction()` pre-populates `Transaction.state` with a key that is
+also present in the queue item payload, the queue payload value wins. The runner
+logs the collision at warning level with the overlapping keys.
+
+State must be JSON-safe: dictionaries with string keys, lists, strings, numbers,
+booleans, or `None`. RPA Core validates durable state at explicit boundaries
+where bytes are produced or persisted. `save_transaction()` validates the full
+transaction state before writing, and the queue runner validates item payload
+before seeding state. Errors include the path to the offending value and direct
+runtime objects toward `ProcessContext.resources` or durable artifact paths.
+
+`ProcessContext.resources` is for ephemeral runtime objects such as clients,
+sessions, handles, and open files. Resources are never persisted with
+transactions and are not included in reports or notifications.
+
+Queue resource lifecycle:
+
+- queue item payload populates `ctx.state`
+- `resource_scope` is entered once before queue claims and exited once after
+  processing
+- `resource_scope` may yield resources that populate `ctx.resources`
+- each item context receives a shallow copy of the resource mapping, so
+  top-level resource names are isolated while nested resource objects retain
+  identity
+- resource setup failures prevent queue claims
+- resource cleanup failures propagate after already-decided queue outcomes
+
 ## Transaction Persistence
 
 Transaction history is written through:
@@ -69,7 +102,7 @@ The current transaction persistence component is recorded as:
 
 ```text
 component = "transactions"
-version   = 1
+version   = 2
 ```
 
 The SQLite queue records its own component version:
@@ -86,7 +119,7 @@ independent.
 ## Migrations
 
 Transaction schema migrations are explicit and sequential. The current latest
-transaction schema is version 1.
+transaction schema is version 2.
 
 Version 1 stores:
 
@@ -96,8 +129,16 @@ Version 1 stores:
 - transaction `created_at`
 - exception `stops_execution`
 
+Version 2 adds:
+
+- durable transaction `state`
+
+This migration is additive and forward-only. Rolling back to version 1 code
+means the older code can coexist with the extra `transactions.state` column, but
+the schema version remains recorded as version 2.
+
 Private-development databases created before component schema versions are still
-readable. When opened, they are migrated to transaction schema version 1 by
+readable. When opened, they are migrated to transaction schema version 2 by
 adding missing columns and recording the component version.
 
 Migration defaults must not invent execution history. Current legacy defaults
@@ -105,6 +146,7 @@ are deliberately limited:
 
 - missing `transactions.created_at` is backfilled so list filtering can work
 - missing `exceptions.stops_execution` defaults to `false`
+- missing `transactions.state` defaults to an empty object
 
 Future persisted models must add fixture-based migration tests from the previous
 latest schema to the new latest schema.

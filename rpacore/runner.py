@@ -7,9 +7,11 @@ import socket
 import sqlite3
 import threading
 import time
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Callable
 
+from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore._validation import type_error
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialProvider
@@ -54,14 +56,14 @@ def run_queue_loop(
     stop_event: threading.Event | None = None,
     retry_business_failures: bool = False,
     transaction_db_path: str | None = None,
-    on_start: Callable[[dict[str, object]], dict[str, object] | None] | None = None,
+    resource_scope: AbstractContextManager[dict[str, object] | None] | None = None,
     on_finish: Callable[[QueueRunSummary], None] | None = None,
 ) -> QueueRunSummary:
     """Drain a queue by running each item through the engine.
 
     Claims items one at a time until the queue is empty. For each item:
     - Calls build_transaction(item) to construct a Transaction (user responsibility).
-    - Builds a ProcessContext with the item's payload in ctx.data.
+    - Builds a ProcessContext with the item's payload in transaction.state.
     - Runs engine.run(ctx).
         - Saves the transaction when transaction_db_path is set.
         - Generates a report and dispatches notifiers after engine.run(ctx).
@@ -78,9 +80,9 @@ def run_queue_loop(
       ran) but the error is counted in QueueRunSummary.callback_errors. If the callback
       raises on a failure-path item, queue.fail() is called as normal. The loop always
       continues regardless.
-    - Calls on_start(config) before claiming any items. Returned data is shallow-copied
-      into every item context, with item payload values taking precedence. Top-level
-      keys are isolated per item; nested values and resources retain shared identity.
+    - Enters resource_scope before claiming any items. Returned resources are
+      shallow-copied into every item context. Top-level resource names are isolated;
+      nested resource objects retain shared identity.
     - Calls on_finish(summary) exactly once after the loop exits. Exceptions are logged
       and swallowed so cleanup cannot change the run outcome.
 
@@ -108,9 +110,10 @@ def run_queue_loop(
                            callbacks run. Persistence is best-effort: if the process exits
                            between engine completion and save, the queue remains the source
                            of truth and may retry the item.
-        on_start:          Optional callback fired before claiming items. Receives config
-                           and may return shared data shallow-copied into every item
-                           context. Nested values and resources remain shared.
+        resource_scope:    Optional context manager entered before queue claims and
+                           exited after processing. It may return shared resources
+                           shallow-copied into every item context. Cleanup failures
+                           propagate after already-decided queue outcomes.
         on_finish:         Optional callback fired exactly once after the loop exits.
                            Receives the final summary. Exceptions are logged and swallowed.
 
@@ -124,30 +127,46 @@ def run_queue_loop(
     summary = QueueRunSummary()
 
     try:
-        shared_data: dict[str, object] = {}
-        if on_start is not None:
-            start_data = on_start(config)
-            if start_data is not None:
-                if not isinstance(start_data, dict):
-                    raise type_error("on_start return", "dict | None", start_data)
-                shared_data = dict(start_data)
+        shared_resources: dict[str, object] = {}
+        if resource_scope is None:
+            return _run_items(
+                queue,
+                engine,
+                build_transaction,
+                config,
+                credentials,
+                worker_id=worker_id,
+                notifiers=_notifiers,
+                log=log,
+                after_item=after_item,
+                stop_event=stop_event,
+                retry_business_failures=retry_business_failures,
+                transaction_db_path=transaction_db_path,
+                shared_resources=shared_resources,
+                summary=summary,
+            )
 
-        return _run_items(
-            queue,
-            engine,
-            build_transaction,
-            config,
-            credentials,
-            worker_id=worker_id,
-            notifiers=_notifiers,
-            log=log,
-            after_item=after_item,
-            stop_event=stop_event,
-            retry_business_failures=retry_business_failures,
-            transaction_db_path=transaction_db_path,
-            shared_data=shared_data,
-            summary=summary,
-        )
+        with resource_scope as scope_resources:
+            if scope_resources is not None:
+                if not isinstance(scope_resources, dict):
+                    raise type_error("resource_scope yield", "dict | None", scope_resources)
+                shared_resources = dict(scope_resources)
+            return _run_items(
+                queue,
+                engine,
+                build_transaction,
+                config,
+                credentials,
+                worker_id=worker_id,
+                notifiers=_notifiers,
+                log=log,
+                after_item=after_item,
+                stop_event=stop_event,
+                retry_business_failures=retry_business_failures,
+                transaction_db_path=transaction_db_path,
+                shared_resources=shared_resources,
+                summary=summary,
+            )
     finally:
         if on_finish is not None:
             try:
@@ -176,7 +195,7 @@ def _run_items(
     stop_event: threading.Event | None,
     retry_business_failures: bool,
     transaction_db_path: str | None,
-    shared_data: dict[str, object],
+    shared_resources: dict[str, object],
     summary: QueueRunSummary,
 ) -> QueueRunSummary:
     """Process queue items after lifecycle startup has completed."""
@@ -201,15 +220,30 @@ def _run_items(
         )
         try:
             transaction = build_transaction(item)
-            item_data = dict(shared_data)
-            item_data.update(item.payload)
+            validate_json_object(item.payload, path="queue item payload")
+            state_collisions = sorted(set(transaction.state).intersection(item.payload))
+            if state_collisions:
+                log.warning(
+                    "Queue item payload overwrote pre-existing transaction state keys",
+                    extra={
+                        "event": "queue_payload_state_collision",
+                        "queue_item_id": item.id,
+                        "queue_reference": item.reference,
+                        "transaction_id": transaction.id,
+                        "transaction_reference": transaction.reference,
+                        "state_keys": state_collisions,
+                        "worker_id": worker_id,
+                    },
+                )
+            transaction.state = {**transaction.state, **item.payload}
             ctx = ProcessContext(
                 transaction=transaction,
                 config=config,
-                data=item_data,
+                resources=dict(shared_resources),
                 credentials=credentials,
             )
             engine.run(ctx)
+            validate_json_object(ctx.transaction.state, path="transaction.state")
             originally_intended_complete = ctx.transaction.status == Status.SUCCESSFUL
             if transaction_db_path is not None:
                 persistence_error = _save_transaction_with_retries(
@@ -275,7 +309,7 @@ def _run_items(
                 extra={"event": "queue_item_complete", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
             )
         else:
-            if isinstance(error, ExecutionValidationError):
+            if isinstance(error, (ExecutionValidationError, JsonStateError)):
                 retry = False
             else:
                 retry = (

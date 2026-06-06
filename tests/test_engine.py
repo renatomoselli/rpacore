@@ -16,7 +16,7 @@ def _ctx(tx: Transaction) -> ProcessContext:
 
 class SuccessSkill(Skill):
     def execute(self, ctx: ProcessContext) -> None:
-        ctx.data[self.name] = "done"
+        ctx.state[self.name] = "done"
 
 
 class BusinessFailSkill(Skill):
@@ -56,7 +56,7 @@ class TestEngineHappyPath:
         )
         ctx = _ctx(tx)
         Engine().run(ctx)
-        assert ctx.data == {"a": "done", "b": "done"}
+        assert ctx.state == {"a": "done", "b": "done"}
 
     def test_skills_run_in_execution_order(self) -> None:
         order: list[str] = []
@@ -77,12 +77,12 @@ class TestEngineHappyPath:
         Engine().run(_ctx(tx))
         assert tx.status is Status.SUCCESSFUL
 
-    def test_default_data_is_empty_dict(self) -> None:
+    def test_default_state_is_empty_dict(self) -> None:
         tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
         ctx = _ctx(tx)
         Engine().run(ctx)
         assert tx.status is Status.SUCCESSFUL
-        assert "a" in ctx.data
+        assert "a" in ctx.state
 
     def test_ordinary_return_marks_skill_successful(self) -> None:
         skill = SuccessSkill("a", 1)
@@ -179,6 +179,31 @@ class TestEngineBusinessException:
         Engine().run(_ctx(tx))
 
         assert successful.status is Status.SUCCESSFUL
+
+    def test_rerun_failed_transaction_resets_skipped_downstream_skills(self) -> None:
+        attempts: list[str] = []
+
+        class FailsThenSucceeds(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                attempts.append(self.name)
+                if len(attempts) == 1:
+                    raise BusinessException("bad data", action=self.name, stop=True)
+
+        tx = Transaction(
+            reference="T1",
+            skills=[
+                FailsThenSucceeds("validate", 1),
+                SuccessSkill("write_output", 2),
+            ],
+        )
+        Engine().run(_ctx(tx))
+        assert tx.status is Status.FAILED
+        assert tx.skills[1].status is Status.SKIPPED
+
+        Engine().run(_ctx(tx))
+
+        assert tx.status is Status.SUCCESSFUL
+        assert tx.skills[1].status is Status.SUCCESSFUL
 
 
 class TestEngineSystemException:

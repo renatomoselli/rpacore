@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Iterable, Protocol, runtime_checkable
 
+from rpacore._json_state import validate_json_object
 from rpacore._validation import type_error, value_error
 
 
@@ -98,14 +99,22 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def _row_to_item(row: sqlite3.Row) -> QueueItem:
+def _load_payload(raw_payload: str) -> dict[str, object]:
+    payload = json.loads(raw_payload)
+    validate_json_object(payload, path="queue item payload")
+    return payload
+
+
+def _row_to_item(row: sqlite3.Row, *, payload: dict[str, object] | None = None) -> QueueItem:
     claimed_at = None
     if row["claimed_at"]:
         claimed_at = datetime.fromisoformat(row["claimed_at"])
+    if payload is None:
+        payload = _load_payload(row["payload"])
     return QueueItem(
         id=row["id"],
         reference=row["reference"],
-        payload=json.loads(row["payload"]),
+        payload=payload,
         status=QueueStatus(row["status"]),
         retry_count=row["retry_count"],
         created_at=datetime.fromisoformat(row["created_at"]),
@@ -146,6 +155,7 @@ def _status_filter_clause(statuses: Iterable[QueueStatus] | None) -> tuple[str, 
 
 
 def _insert_item(conn: sqlite3.Connection, item: QueueItem) -> None:
+    validate_json_object(item.payload, path="queue item payload")
     conn.execute(
         "INSERT INTO queue_items "
         "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at) "
@@ -331,11 +341,10 @@ class SqliteQueue:
         try:
             with conn:
                 _ensure_schema(conn)
-            # BEGIN IMMEDIATE prevents two workers from claiming the same item.
+
+            # Reclaim stale items in a short write transaction before selecting.
             conn.execute("BEGIN IMMEDIATE")
             transaction_started = True
-
-            # Reclaim stale items first.
             conn.execute(
                 "UPDATE queue_items SET status = 'pending', claimed_by = '', claimed_at = NULL "
                 "WHERE status = 'in_progress' "
@@ -343,27 +352,40 @@ class SqliteQueue:
                 "AND (CAST(strftime('%s', ?) AS INTEGER) - CAST(strftime('%s', claimed_at) AS INTEGER)) > ?",
                 (now.isoformat(), self.claim_timeout),
             )
-
-            # Claim the oldest pending item (tie-break on id for determinism).
-            row = conn.execute(
-                "SELECT * FROM queue_items WHERE status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1"
-            ).fetchone()
-
-            if row is None:
-                conn.execute("COMMIT")
-                return None
-
-            conn.execute(
-                "UPDATE queue_items SET status = 'in_progress', claimed_by = ?, claimed_at = ? WHERE id = ?",
-                (worker_id, now.isoformat(), row["id"]),
-            )
             conn.execute("COMMIT")
+            transaction_started = False
 
-            # Re-fetch to get the updated row.
-            updated = conn.execute(
-                "SELECT * FROM queue_items WHERE id = ?", (row["id"],)
-            ).fetchone()
-            return _row_to_item(updated)
+            while True:
+                # Validate outside the write lock. A guarded UPDATE below keeps
+                # claiming atomic when multiple workers race for the same row.
+                row = conn.execute(
+                    "SELECT * FROM queue_items WHERE status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1"
+                ).fetchone()
+
+                if row is None:
+                    return None
+
+                payload = _load_payload(row["payload"])
+                now = datetime.now(timezone.utc)
+
+                conn.execute("BEGIN IMMEDIATE")
+                transaction_started = True
+                result = conn.execute(
+                    "UPDATE queue_items SET status = 'in_progress', claimed_by = ?, claimed_at = ? "
+                    "WHERE id = ? AND status = 'pending'",
+                    (worker_id, now.isoformat(), row["id"]),
+                )
+                if result.rowcount != 1:
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    continue
+                conn.execute("COMMIT")
+                transaction_started = False
+
+                updated = conn.execute(
+                    "SELECT * FROM queue_items WHERE id = ?", (row["id"],)
+                ).fetchone()
+                return _row_to_item(updated, payload=payload)
         except Exception:
             if transaction_started:
                 conn.execute("ROLLBACK")

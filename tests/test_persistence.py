@@ -85,6 +85,51 @@ def create_legacy_db(db_path: str) -> str:
     return transaction_id
 
 
+def create_v1_db(db_path: str) -> str:
+    transaction_id = "v1-tx-001"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "CREATE TABLE rpacore_schema_versions ("
+            "component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
+            ("transactions", 1),
+        )
+        conn.execute(
+            "CREATE TABLE transactions ("
+            "id TEXT PRIMARY KEY, reference TEXT NOT NULL, status TEXT NOT NULL, "
+            "retry_count INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(
+            "CREATE TABLE skills ("
+            "id TEXT PRIMARY KEY, transaction_id TEXT NOT NULL, "
+            "name TEXT NOT NULL, execution_order INTEGER NOT NULL, "
+            "status TEXT NOT NULL, arguments TEXT NOT NULL DEFAULT '{}', "
+            "UNIQUE (transaction_id, name, execution_order), "
+            "FOREIGN KEY (transaction_id) REFERENCES transactions(id))"
+        )
+        conn.execute(
+            "CREATE TABLE exceptions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, skill_id TEXT NOT NULL, "
+            "exception_type TEXT NOT NULL, message TEXT NOT NULL, action TEXT NOT NULL, "
+            "retry_number INTEGER NOT NULL, datetime_occurred TEXT NOT NULL, "
+            "screenshot_path TEXT NOT NULL DEFAULT '', stops_execution INTEGER NOT NULL DEFAULT 0, "
+            "FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE)"
+        )
+        conn.execute(
+            "INSERT INTO transactions (id, reference, status, retry_count, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (transaction_id, "v1-ref", "pending", 0, "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return transaction_id
+
+
 class TestSaveAndLoad:
     def test_roundtrip_empty_transaction(self, db_path) -> None:
         tx = make_transaction()
@@ -107,6 +152,80 @@ class TestSaveAndLoad:
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
         assert loaded.retry_count == 3
+
+    def test_roundtrip_preserves_transaction_state(self, db_path) -> None:
+        tx = make_transaction(state={"invoice": {"id": 42}, "tags": ["new", "vip"]})
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+        assert loaded.state == {"invoice": {"id": 42}, "tags": ["new", "vip"]}
+
+    def test_save_rejects_non_json_safe_transaction_state(self, db_path) -> None:
+        tx = make_transaction()
+        tx.state["client"] = object()
+
+        with pytest.raises(TypeError) as exc_info:
+            save_transaction(tx, db_path)
+
+        message = str(exc_info.value)
+        assert "transaction.state['client'] expected JSON value" in message
+        assert "ctx.resources" in message
+
+    def test_save_rejects_circular_transaction_state(self, db_path) -> None:
+        tx = make_transaction()
+        tx.state["self"] = tx.state
+
+        with pytest.raises(TypeError) as exc_info:
+            save_transaction(tx, db_path)
+
+        assert "transaction.state['self'] expected acyclic JSON value" in str(exc_info.value)
+
+    def test_save_rejects_non_object_transaction_state(self, db_path) -> None:
+        tx = make_transaction()
+        tx.state = ["invoice"]  # type: ignore[assignment]
+
+        with pytest.raises(TypeError) as exc_info:
+            save_transaction(tx, db_path)
+
+        assert "transaction.state expected JSON object" in str(exc_info.value)
+
+    def test_save_rejects_nested_non_json_safe_transaction_state(self, db_path) -> None:
+        tx = make_transaction(state={"invoice": {"ids": [1, object()]}})
+
+        with pytest.raises(TypeError) as exc_info:
+            save_transaction(tx, db_path)
+
+        assert "transaction.state['invoice']['ids'][1] expected JSON value" in str(exc_info.value)
+
+    def test_load_rejects_corrupt_transaction_state_json(self, db_path) -> None:
+        tx = make_transaction()
+        save_transaction(tx, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("UPDATE transactions SET state = ? WHERE id = ?", ("not-json", tx.id))
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(SystemException) as exc_info:
+            load_transaction(tx.id, db_path)
+
+        assert f"Persisted transaction state is invalid for transaction {tx.id!r}" in str(exc_info.value)
+        assert exc_info.value.action == "repair transaction state in the persistence database"
+
+    def test_load_rejects_non_object_transaction_state_json(self, db_path) -> None:
+        tx = make_transaction()
+        save_transaction(tx, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("UPDATE transactions SET state = ? WHERE id = ?", ("[]", tx.id))
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(SystemException) as exc_info:
+            load_transaction(tx.id, db_path)
+
+        assert "transaction.state expected JSON object" in str(exc_info.value)
 
     def test_roundtrip_preserves_skills(self, db_path) -> None:
         s1 = Skill("login", 1)
@@ -361,6 +480,7 @@ class TestSchemaMigration:
         assert loaded.reference == "legacy-ref"
         assert loaded.status is Status.FAILED
         assert loaded.retry_count == 2
+        assert loaded.state == {}
         assert len(loaded.skills) == 1
         assert loaded.skills[0].name == "validate"
         assert loaded.skills[0].status is Status.FAILED
@@ -395,6 +515,25 @@ class TestSchemaMigration:
             conn.close()
         assert "stops_execution" in columns
 
+    def test_v1_schema_gets_state_column(self, db_path) -> None:
+        create_v1_db(db_path)
+
+        list_transactions(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(transactions)")}
+        finally:
+            conn.close()
+        assert "state" in columns
+
+    def test_v1_schema_loads_with_empty_state(self, db_path) -> None:
+        transaction_id = create_v1_db(db_path)
+
+        loaded = load_transaction(transaction_id, db_path)
+
+        assert loaded.state == {}
+
     def test_legacy_schema_backfills_created_at_for_since_filter(self, db_path) -> None:
         transaction_id = create_legacy_db(db_path)
         cutoff = datetime.now(timezone.utc)
@@ -424,7 +563,7 @@ class TestSchemaMigration:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert version == 1
+        assert version == 2
 
     def test_transaction_and_queue_schema_versions_can_share_database(self, db_path) -> None:
         from rpacore.queue import QueueItem, SqliteQueue
@@ -441,7 +580,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 1), ("transactions", 1)]
+        assert rows == [("queue", 1), ("transactions", 2)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)
@@ -452,13 +591,13 @@ class TestSchemaMigration:
             )
             conn.execute(
                 "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
-                ("transactions", 2),
+                ("transactions", 3),
             )
             conn.commit()
         finally:
             conn.close()
 
-        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 2"):
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 3"):
             list_transactions(db_path)
 
     def test_unrelated_schema_errors_are_not_swallowed(self, db_path) -> None:

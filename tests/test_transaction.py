@@ -39,11 +39,21 @@ class TestTransactionFreshState:
         tx = Transaction(reference="INV-001")
         assert tx.skills == []
 
+    def test_state_defaults_to_empty_dict(self) -> None:
+        tx = Transaction(reference="INV-001")
+        assert tx.state == {}
+
     def test_skills_not_shared_between_instances(self) -> None:
         a = Transaction(reference="A")
         b = Transaction(reference="B")
         a.skills.append(Skill("login", 1))
         assert len(b.skills) == 0
+
+    def test_state_not_shared_between_instances(self) -> None:
+        a = Transaction(reference="A")
+        b = Transaction(reference="B")
+        a.state["invoice"] = 42
+        assert b.state == {}
 
     def test_negative_retry_count_raises(self) -> None:
         with pytest.raises(ValueError, match="retry_count must be >= 0"):
@@ -62,6 +72,16 @@ class TestTransactionCustomValues:
     def test_custom_status(self) -> None:
         tx = Transaction(reference="INV-001", status=Status.IN_PROGRESS)
         assert tx.status is Status.IN_PROGRESS
+
+    def test_custom_state(self) -> None:
+        tx = Transaction(reference="INV-001", state={"invoice": 42})
+        assert tx.state == {"invoice": 42}
+
+    def test_custom_state_does_not_keep_reference(self) -> None:
+        state = {"invoice": 42}
+        tx = Transaction(reference="INV-001", state=state)
+        tx.state["status"] = "ready"
+        assert state == {"invoice": 42}
 
     def test_custom_skills(self) -> None:
         skills = [Skill("a", 1), Skill("b", 2)]

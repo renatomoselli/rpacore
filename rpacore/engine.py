@@ -72,6 +72,8 @@ class Engine:
         except ExecutionValidationError:
             transaction.status = Status.FAILED
             raise
+        if transaction.status is Status.FAILED:
+            self._reset_skipped_skills(transaction)
         transaction.status = Status.IN_PROGRESS
         self._log_transaction_started(transaction)
 
@@ -111,6 +113,12 @@ class Engine:
             s for s in transaction.failed_skills()
             if s.exceptions and isinstance(s.exceptions[-1], SystemException)
         ]
+
+    def _reset_skipped_skills(self, transaction: Transaction) -> None:
+        """Make skipped work runnable when a failed transaction is explicitly re-run."""
+        for skill in transaction.skills:
+            if skill.status is Status.SKIPPED:
+                skill.status = Status.PENDING
 
     def _execute_pass(
         self,

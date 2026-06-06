@@ -80,12 +80,12 @@ class TestSkillExecute:
 
         class LoginSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
-                ctx.data["logged_in"] = True
+                ctx.state["logged_in"] = True
 
         skill = LoginSkill("login", 1)
         ctx = ProcessContext(transaction=Transaction(reference="test"))
         skill.execute(ctx)
-        assert ctx.data["logged_in"] is True
+        assert ctx.state["logged_in"] is True
 
 
 class TestSkillStatusTransitions:

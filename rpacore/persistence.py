@@ -4,6 +4,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore.exceptions import BusinessException, SystemException
 from rpacore.skill import Skill
 from rpacore.status import Status
@@ -12,7 +13,7 @@ from rpacore.transaction import Transaction
 
 _SCHEMA_TABLE = "rpacore_schema_versions"
 _TRANSACTION_SCHEMA_COMPONENT = "transactions"
-_TRANSACTION_SCHEMA_VERSION = 1
+_TRANSACTION_SCHEMA_VERSION = 2
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -111,6 +112,16 @@ def _migrate_transactions_to_v1(conn: sqlite3.Connection) -> None:
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 1)
 
 
+def _migrate_transactions_to_v2(conn: sqlite3.Connection) -> None:
+    """Add durable transaction state.
+
+    This migration is additive and forward-only. Older v1 code can coexist with
+    the extra column, but the component schema version remains v2.
+    """
+    _ensure_column(conn, "transactions", "state", "state TEXT NOT NULL DEFAULT '{}'")
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 2)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run explicit transaction schema migrations through the latest version."""
     with conn:
@@ -124,6 +135,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 1:
             _migrate_transactions_to_v1(conn)
             current_version = 1
+        if current_version < 2:
+            _migrate_transactions_to_v2(conn)
+            current_version = 2
         if current_version != _TRANSACTION_SCHEMA_VERSION:
             raise RuntimeError(
                 "Unsupported transaction schema version "
@@ -135,12 +149,27 @@ def _skill_id(transaction_id: str, skill: Skill) -> str:
     return f"{transaction_id}:{skill.name}:{skill.execution_order}"
 
 
+def _load_transaction_state(row: sqlite3.Row) -> dict[str, object]:
+    try:
+        state = json.loads(row["state"])
+        validate_json_object(state, path="transaction.state")
+    except (json.JSONDecodeError, JsonStateError) as exc:
+        raise SystemException(
+            f"Persisted transaction state is invalid for transaction {row['id']!r}: {exc}",
+            action="repair transaction state in the persistence database",
+        ) from exc
+    return state
+
+
 def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> None:
     """Persist a transaction and all its skills and exceptions.
 
     Safe to call multiple times. Skills are deleted and reinserted on each save,
     so removed or reordered skills are correctly reflected.
     """
+    validate_json_object(transaction.state, path="transaction.state")
+    state_json = json.dumps(transaction.state)
+
     conn = _connect(db_path)
     try:
         _ensure_schema(conn)
@@ -150,14 +179,30 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
             # preserves an existing created_at unless a legacy row needs backfill.
             conn.execute(
                 "INSERT OR IGNORE INTO transactions "
-                "(id, reference, status, retry_count, created_at) VALUES (?, ?, ?, ?, ?)",
-                (transaction.id, transaction.reference, transaction.status, transaction.retry_count, now_iso),
+                "(id, reference, status, retry_count, created_at, state) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    transaction.id,
+                    transaction.reference,
+                    transaction.status,
+                    transaction.retry_count,
+                    now_iso,
+                    state_json,
+                ),
             )
             conn.execute(
                 "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
-                "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END "
+                "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END, "
+                "state = ? "
                 "WHERE id = ?",
-                (transaction.reference, transaction.status, transaction.retry_count, now_iso, transaction.id),
+                (
+                    transaction.reference,
+                    transaction.status,
+                    transaction.retry_count,
+                    now_iso,
+                    state_json,
+                    transaction.id,
+                ),
             )
             # Delete all existing skills (cascades to exceptions via ON DELETE CASCADE).
             conn.execute("DELETE FROM skills WHERE transaction_id = ?", (transaction.id,))
@@ -207,11 +252,12 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
     try:
         _ensure_schema(conn)
         row = conn.execute(
-            "SELECT id, reference, status, retry_count FROM transactions WHERE id = ?",
+            "SELECT id, reference, status, retry_count, state FROM transactions WHERE id = ?",
             (transaction_id,),
         ).fetchone()
         if row is None:
             raise KeyError(f"Transaction not found: {transaction_id!r}")
+        transaction_state = _load_transaction_state(row)
 
         skill_rows = conn.execute(
                 "SELECT id, name, execution_order, status, arguments FROM skills "
@@ -263,6 +309,7 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
             id=row["id"],
             status=tx_status,
             retry_count=row["retry_count"],
+            state=transaction_state,
             skills=skills,
         )
     finally:

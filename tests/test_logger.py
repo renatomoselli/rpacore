@@ -16,7 +16,7 @@ from rpacore.transaction import Transaction
 
 class SuccessSkill(Skill):
     def execute(self, ctx: ProcessContext) -> None:
-        ctx.data[self.name] = "done"
+        ctx.state[self.name] = "done"
 
 
 class BusinessFailSkill(Skill):

@@ -17,32 +17,38 @@ class ProcessContext:
     Attributes:
         transaction:  The active transaction being executed.
         config:       Framework configuration (from config.toml / load_config()).
-        data:         Mutable dict for skills to share data within one run.
+        state:        Durable transaction state persisted with the transaction.
+        resources:    Ephemeral runtime objects available only during this run.
         credentials:  Provider for named credentials. Defaults to EnvCredentialProvider.
     """
 
     transaction: Transaction
     config: dict[str, object] = field(default_factory=dict)
-    data: dict[str, object] = field(default_factory=dict)
+    resources: dict[str, object] = field(default_factory=dict)
     credentials: CredentialProvider = field(default_factory=EnvCredentialProvider)
 
-    def require_data(
+    @property
+    def state(self) -> dict[str, object]:
+        """Return the transaction's durable JSON-safe state mapping."""
+        return self.transaction.state
+
+    def require_state(
         self,
         key: str,
         expected_type: ExpectedType | None = None,
         *,
         action: str = "",
     ) -> object:
-        """Return required shared data or raise an actionable SystemException."""
+        """Return required durable state or raise an actionable SystemException."""
         return self._require_value(
-            self.data,
+            self.state,
             key,
             expected_type,
-            source="data",
+            source="state",
             action=action,
         )
 
-    def optional_data(
+    def optional_state(
         self,
         key: str,
         expected_type: ExpectedType,
@@ -50,14 +56,14 @@ class ProcessContext:
         *,
         action: str = "",
     ) -> object:
-        """Return optional shared data or default, validating present values."""
-        if key not in self.data:
+        """Return optional durable state or default, validating present values."""
+        if key not in self.state:
             return default
         return self._require_value(
-            self.data,
+            self.state,
             key,
             expected_type,
-            source="data",
+            source="state",
             action=action,
         )
 

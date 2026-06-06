@@ -50,7 +50,7 @@ def resume_transaction(
         concrete.exceptions = [copy(exc) for exc in loaded_skill.exceptions]
         concrete.status = loaded_skill.status
 
-        if concrete.status not in (Status.SUCCESSFUL, Status.SKIPPED):
+        if concrete.status is not Status.SUCCESSFUL:
             concrete.status = Status.PENDING
 
         restored.append(concrete)

@@ -23,11 +23,13 @@ class Transaction:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     status: Status = Status.PENDING
     retry_count: int = 0
+    state: dict[str, object] = field(default_factory=dict)
     skills: list[Skill] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.retry_count < 0:
             raise ValueError(f"retry_count must be >= 0, got {self.retry_count}")
+        self.state = dict(self.state)
         self.skills = list(self.skills)
 
     def ordered_skills(self) -> list[Skill]:

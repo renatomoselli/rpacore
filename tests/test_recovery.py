@@ -123,7 +123,7 @@ def test_resume_extra_skill_mapping_raises_clear_error(db_path) -> None:
         )
 
 
-def test_resume_preserves_skipped_skills(db_path) -> None:
+def test_resume_resets_skipped_skills_to_pending(db_path) -> None:
     counts: dict[str, int] = {}
 
     skipped = Skill("optional", 1)
@@ -143,12 +143,12 @@ def test_resume_preserves_skipped_skills(db_path) -> None:
         db_path=db_path,
     )
 
-    assert resumed.skills[0].status is Status.SKIPPED
+    assert resumed.skills[0].status is Status.PENDING
     assert resumed.skills[1].status is Status.PENDING
 
     Engine().run(ProcessContext(transaction=resumed))
 
-    assert counts.get("optional", 0) == 0
+    assert counts.get("optional", 0) == 1
     assert counts.get("main", 0) == 1
     assert resumed.status is Status.SUCCESSFUL
 
