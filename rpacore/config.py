@@ -14,7 +14,7 @@ _DEFAULTS: dict[str, object] = {
     "retry_delay": 0.0,
     "retry_backoff": 1.0,
     "log_level": "INFO",
-    "db_path": "rpacore.db",
+    "transaction_db_path": "rpacore.db",
     "screenshot_dir": "",
     "credential_provider": "env",
 }
@@ -23,6 +23,13 @@ _LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSE
 
 def _validate(config: dict[str, object]) -> None:
     """Validate known configuration keys, raising TypeError or ValueError on bad values."""
+    if "db_path" in config:
+        raise value_error(
+            "db_path",
+            "renamed to transaction_db_path",
+            config["db_path"],
+        )
+
     max_retries = config["max_retries"]
     if isinstance(max_retries, bool) or not isinstance(max_retries, int):
         raise type_error("max_retries", "int", max_retries)
@@ -51,9 +58,9 @@ def _validate(config: dict[str, object]) -> None:
         raise value_error("log_level", "one of CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET", log_level)
     config["log_level"] = normalized_log_level
 
-    db_path = config["db_path"]
-    if not isinstance(db_path, str):
-        raise type_error("db_path", "str", db_path)
+    transaction_db_path = config["transaction_db_path"]
+    if not isinstance(transaction_db_path, str):
+        raise type_error("transaction_db_path", "str", transaction_db_path)
 
     screenshot_dir = config["screenshot_dir"]
     if not isinstance(screenshot_dir, str):
@@ -66,6 +73,25 @@ def _validate(config: dict[str, object]) -> None:
         raise value_error("credential_provider", "one of env, keyring", credential_provider)
 
 
+def _resolve_config_path_value(base: Path, value: str) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        return value
+    return str(base / path)
+
+
+def _resolve_database_paths(config: dict[str, object], *, base_dir: Path) -> None:
+    transaction_db_path = config["transaction_db_path"]
+    if isinstance(transaction_db_path, str):
+        config["transaction_db_path"] = _resolve_config_path_value(base_dir, transaction_db_path)
+
+    queue = config.get("queue")
+    if isinstance(queue, dict):
+        queue_db_path = queue.get("db_path")
+        if isinstance(queue_db_path, str):
+            queue["db_path"] = _resolve_config_path_value(base_dir, queue_db_path)
+
+
 def load_config(path: str | Path = "config.toml", *, require_file: bool = False) -> dict[str, object]:
     """Load configuration from a TOML file and return a plain dict.
 
@@ -73,7 +99,8 @@ def load_config(path: str | Path = "config.toml", *, require_file: bool = False)
     Pass require_file=True to raise FileNotFoundError when the file is missing.
     Known keys are validated at load time. Unknown keys pass through.
     log_level is normalized to uppercase in the returned dict.
-    db_path is resolved relative to the config file's directory.
+    transaction_db_path and queue.db_path are resolved relative to the config
+    file's directory.
     """
     config = dict(_DEFAULTS)
     resolved = Path(path)
@@ -83,9 +110,7 @@ def load_config(path: str | Path = "config.toml", *, require_file: bool = False)
             overrides = tomllib.load(f)
         config.update(overrides)
 
-        db_path = config["db_path"]
-        if isinstance(db_path, str) and not Path(db_path).is_absolute():
-            config["db_path"] = str(resolved.resolve().parent / db_path)
+        _resolve_database_paths(config, base_dir=resolved.resolve().parent)
     elif require_file:
         raise FileNotFoundError(f"Config file not found: {resolved}")
 

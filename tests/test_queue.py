@@ -6,6 +6,7 @@ import threading
 import time
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -351,6 +352,26 @@ class TestSqliteQueueIntrospection:
         assert "idx_queue_items_created_at_id" in indexes
         assert "idx_queue_items_status_created_at_id" in indexes
         assert "idx_queue_items_reference_status" in indexes
+
+    def test_component_schema_version_recorded(self, tmp_path):
+        q = make_queue(tmp_path)
+        conn = sqlite3.connect(q.db_path)
+        try:
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions WHERE component = 'queue'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        assert version == 1
+
+    def test_add_recreates_schema_if_database_file_is_deleted_after_init(self, tmp_path):
+        q = make_queue(tmp_path)
+        Path(q.db_path).unlink()
+
+        q.add(make_item("after-delete"))
+
+        assert [item.reference for item in q.list_items()] == ["after-delete"]
 
 
 # ---------------------------------------------------------------------------

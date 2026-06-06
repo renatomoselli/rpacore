@@ -93,7 +93,7 @@ Engine(
     retry_delay=config["retry_delay"],
     retry_backoff=config["retry_backoff"],
 ).run(ctx)
-save_transaction(tx, db_path=config["db_path"])
+save_transaction(tx, db_path=config["transaction_db_path"])
 ```
 
 ## Writing a Skill
@@ -183,7 +183,7 @@ max_retries = 2
 retry_delay = 0.0
 retry_backoff = 1.0
 log_level = "INFO"
-db_path = "rpacore.db"
+transaction_db_path = "rpacore.db"
 screenshot_dir = ""
 credential_provider = "env"
 
@@ -246,6 +246,9 @@ integration-style tests for the framework itself:
 - `examples/sample_main.py`
 
 For a step-by-step beginner guide, see [docs/tutorial.md](docs/tutorial.md).
+
+For persistence, migrations, and crash-behavior details, see
+[docs/durability.md](docs/durability.md).
 
 For fuller showcase automations, see the examples repository:
 

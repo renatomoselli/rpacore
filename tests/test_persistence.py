@@ -412,17 +412,54 @@ class TestSchemaMigration:
         assert [tx.id for tx in first] == [transaction_id]
         assert [tx.id for tx in second] == [transaction_id]
 
-    def test_schema_version_is_recorded_after_migration(self, db_path) -> None:
+    def test_component_schema_version_is_recorded_after_migration(self, db_path) -> None:
         create_legacy_db(db_path)
 
         list_transactions(db_path)
 
         conn = sqlite3.connect(db_path)
         try:
-            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions WHERE component = 'transactions'"
+            ).fetchone()[0]
         finally:
             conn.close()
-        assert user_version == 1
+        assert version == 1
+
+    def test_transaction_and_queue_schema_versions_can_share_database(self, db_path) -> None:
+        from rpacore.queue import QueueItem, SqliteQueue
+
+        save_transaction(make_transaction(), db_path)
+        queue = SqliteQueue({"db_path": db_path})
+        queue.add(QueueItem(reference="queue-ref", payload={}))
+
+        conn = sqlite3.connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT component, version FROM rpacore_schema_versions ORDER BY component"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        assert rows == [("queue", 1), ("transactions", 1)]
+
+    def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rpacore_schema_versions ("
+                "component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
+                ("transactions", 2),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 2"):
+            list_transactions(db_path)
 
     def test_unrelated_schema_errors_are_not_swallowed(self, db_path) -> None:
         conn = sqlite3.connect(db_path)

@@ -10,7 +10,9 @@ from rpacore.status import Status
 from rpacore.transaction import Transaction
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_TABLE = "rpacore_schema_versions"
+_TRANSACTION_SCHEMA_COMPONENT = "transactions"
+_TRANSACTION_SCHEMA_VERSION = 1
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -30,12 +32,41 @@ def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, 
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create or migrate persistence tables.
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
 
-    This is intentionally idempotent because save, load, and list operations all
-    call it before touching persisted transactions.
-    """
+
+def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rpacore_schema_versions (
+            component TEXT PRIMARY KEY,
+            version   INTEGER NOT NULL
+        )
+    """)
+
+
+def _component_schema_version(conn: sqlite3.Connection, component: str) -> int:
+    row = conn.execute(
+        f"SELECT version FROM {_SCHEMA_TABLE} WHERE component = ?",
+        (component,),
+    ).fetchone()
+    return 0 if row is None else int(row["version"])
+
+
+def _record_component_schema_version(conn: sqlite3.Connection, component: str, version: int) -> None:
+    conn.execute(
+        f"INSERT INTO {_SCHEMA_TABLE} (component, version) VALUES (?, ?) "
+        "ON CONFLICT(component) DO UPDATE SET version = excluded.version",
+        (component, version),
+    )
+
+
+def _migrate_transactions_to_v1(conn: sqlite3.Connection) -> None:
+    """Create or migrate the v1 transaction persistence schema."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id          TEXT PRIMARY KEY,
@@ -77,8 +108,27 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
     """)
     _ensure_column(conn, "exceptions", "stops_execution", "stops_execution INTEGER NOT NULL DEFAULT 0")
-    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
-    conn.commit()
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 1)
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Run explicit transaction schema migrations through the latest version."""
+    with conn:
+        _ensure_schema_version_table(conn)
+        current_version = _component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT)
+        if current_version == 0 and _table_exists(conn, "transactions"):
+            # Pre-version-table private-development databases are migrated by
+            # the v1 migration, which adds missing columns without rewriting
+            # existing execution truth.
+            current_version = 0
+        if current_version < 1:
+            _migrate_transactions_to_v1(conn)
+            current_version = 1
+        if current_version != _TRANSACTION_SCHEMA_VERSION:
+            raise RuntimeError(
+                "Unsupported transaction schema version "
+                f"{current_version}; expected {_TRANSACTION_SCHEMA_VERSION}"
+            )
 
 
 def _skill_id(transaction_id: str, skill: Skill) -> str:

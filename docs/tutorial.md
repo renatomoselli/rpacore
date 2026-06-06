@@ -143,7 +143,7 @@ max_retries = 1
 retry_delay = 0.0
 retry_backoff = 1.0
 log_level = "INFO"
-db_path = "rpacore.db"
+transaction_db_path = "rpacore.db"
 screenshot_dir = ""
 credential_provider = "env"
 ```
@@ -222,7 +222,7 @@ def main() -> None:
         retry_delay=float(config["retry_delay"]),
         retry_backoff=float(config["retry_backoff"]),
     ).run(ctx)
-    save_transaction(tx, db_path=str(config["db_path"]))
+    save_transaction(tx, db_path=str(config["transaction_db_path"]))
 
     print(f"Transaction {tx.id}: {tx.status}")
 

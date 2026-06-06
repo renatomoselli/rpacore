@@ -17,7 +17,7 @@ class TestLoadConfig:
         assert config["retry_delay"] == 0.0
         assert config["retry_backoff"] == 1.0
         assert config["log_level"] == "INFO"
-        assert config["db_path"] == "rpacore.db"
+        assert config["transaction_db_path"] == "rpacore.db"
 
     def test_require_file_missing_file_raises(self, tmp_path: Path) -> None:
         missing = tmp_path / "nonexistent.toml"
@@ -27,7 +27,10 @@ class TestLoadConfig:
 
     def test_loads_values_from_file(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
-        toml.write_text('max_retries = 3\nlog_level = "DEBUG"\ndb_path = "custom.db"\n', encoding="utf-8")
+        toml.write_text(
+            'max_retries = 3\nlog_level = "DEBUG"\ntransaction_db_path = "custom.db"\n',
+            encoding="utf-8",
+        )
 
         config = load_config(toml)
 
@@ -35,7 +38,7 @@ class TestLoadConfig:
         assert config["retry_delay"] == 0.0
         assert config["retry_backoff"] == 1.0
         assert config["log_level"] == "DEBUG"
-        assert config["db_path"] == str(tmp_path / "custom.db")
+        assert config["transaction_db_path"] == str(tmp_path / "custom.db")
 
     def test_partial_file_merges_with_defaults(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
@@ -45,7 +48,7 @@ class TestLoadConfig:
 
         assert config["max_retries"] == 5
         assert config["log_level"] == "INFO"
-        assert config["db_path"] == str(tmp_path / "rpacore.db")
+        assert config["transaction_db_path"] == str(tmp_path / "rpacore.db")
 
     def test_returns_plain_dict(self, tmp_path: Path) -> None:
         config = load_config(tmp_path / "nonexistent.toml")
@@ -77,23 +80,52 @@ class TestLoadConfig:
 
         assert config["custom_key"] == "custom_value"
 
-    def test_db_path_resolved_relative_to_config_directory(self, tmp_path: Path) -> None:
+    def test_old_top_level_db_path_raises_migration_error(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
-        toml.write_text('db_path = "mydb.db"\n', encoding="utf-8")
+        toml.write_text('db_path = "old.db"\n', encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == (
+            "db_path expected renamed to transaction_db_path; got str value='old.db'"
+        )
+
+    def test_transaction_db_path_resolved_relative_to_config_directory(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('transaction_db_path = "mydb.db"\n', encoding="utf-8")
 
         config = load_config(toml)
 
-        assert config["db_path"] == str(tmp_path.resolve() / "mydb.db")
+        assert config["transaction_db_path"] == str(tmp_path.resolve() / "mydb.db")
 
-    def test_absolute_db_path_not_modified(self, tmp_path: Path) -> None:
+    def test_queue_db_path_resolved_relative_to_config_directory(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('[queue]\ndb_path = "queue.db"\n', encoding="utf-8")
+
+        config = load_config(toml)
+
+        assert config["queue"]["db_path"] == str(tmp_path.resolve() / "queue.db")  # type: ignore[index]
+
+    def test_absolute_transaction_db_path_not_modified(self, tmp_path: Path) -> None:
         absolute = str((tmp_path / "absolute.db").resolve())
         toml_value = absolute.replace("\\", "\\\\")
         toml = tmp_path / "config.toml"
-        toml.write_text(f'db_path = "{toml_value}"\n', encoding="utf-8")
+        toml.write_text(f'transaction_db_path = "{toml_value}"\n', encoding="utf-8")
 
         config = load_config(toml)
 
-        assert config["db_path"] == absolute
+        assert config["transaction_db_path"] == absolute
+
+    def test_absolute_queue_db_path_not_modified(self, tmp_path: Path) -> None:
+        absolute = str((tmp_path / "queue.db").resolve())
+        toml_value = absolute.replace("\\", "\\\\")
+        toml = tmp_path / "config.toml"
+        toml.write_text(f'[queue]\ndb_path = "{toml_value}"\n', encoding="utf-8")
+
+        config = load_config(toml)
+
+        assert config["queue"]["db_path"] == absolute  # type: ignore[index]
 
     def test_invalid_max_retries_type_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
@@ -226,14 +258,14 @@ class TestLoadConfig:
 
         assert config["log_level"] == "DEBUG"
 
-    def test_invalid_db_path_type_raises(self, tmp_path: Path) -> None:
+    def test_invalid_transaction_db_path_type_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
-        toml.write_text("db_path = 123\n", encoding="utf-8")
+        toml.write_text("transaction_db_path = 123\n", encoding="utf-8")
 
         with pytest.raises(TypeError) as exc_info:
             load_config(toml)
 
-        assert str(exc_info.value) == "db_path expected str; got int value=123"
+        assert str(exc_info.value) == "transaction_db_path expected str; got int value=123"
 
     def test_invalid_credential_provider_type_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"

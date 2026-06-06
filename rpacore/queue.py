@@ -47,6 +47,9 @@ class QueueProvider(Protocol):
 _DEFAULT_DB_PATH = "queue.db"
 _DEFAULT_CLAIM_TIMEOUT = 30
 _DEFAULT_MAX_RETRIES = 3
+_SCHEMA_TABLE = "rpacore_schema_versions"
+_QUEUE_SCHEMA_COMPONENT = "queue"
+_QUEUE_SCHEMA_VERSION = 1
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -58,6 +61,12 @@ def _connect(db_path: str) -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rpacore_schema_versions (
+            component TEXT PRIMARY KEY,
+            version   INTEGER NOT NULL
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS queue_items (
             id           TEXT PRIMARY KEY,
@@ -81,6 +90,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_queue_items_reference_status "
         "ON queue_items (reference, status)"
+    )
+    conn.execute(
+        f"INSERT INTO {_SCHEMA_TABLE} (component, version) VALUES (?, ?) "
+        "ON CONFLICT(component) DO UPDATE SET version = excluded.version",
+        (_QUEUE_SCHEMA_COMPONENT, _QUEUE_SCHEMA_VERSION),
     )
 
 
@@ -201,6 +215,8 @@ class SqliteQueue:
         """Return a queue item by ID, or None if not found."""
         conn = _connect(self.db_path)
         try:
+            with conn:
+                _ensure_schema(conn)
             row = conn.execute(
                 "SELECT * FROM queue_items WHERE id = ?", (item_id,)
             ).fetchone()
@@ -213,6 +229,7 @@ class SqliteQueue:
         conn = _connect(self.db_path)
         try:
             with conn:
+                _ensure_schema(conn)
                 _insert_item(conn, item)
         finally:
             conn.close()
@@ -230,6 +247,8 @@ class SqliteQueue:
 
         conn = _connect(self.db_path)
         try:
+            with conn:
+                _ensure_schema(conn)
             rows = conn.execute(
                 "SELECT * FROM queue_items WHERE 1=1"
                 f"{status_filter} ORDER BY created_at ASC, id ASC{limit_clause}",
@@ -250,6 +269,8 @@ class SqliteQueue:
 
         conn = _connect(self.db_path)
         try:
+            with conn:
+                _ensure_schema(conn)
             row = conn.execute(
                 f"SELECT 1 FROM queue_items WHERE reference = ?{status_filter} LIMIT 1",
                 [reference, *status_values],
@@ -269,6 +290,8 @@ class SqliteQueue:
         conn = _connect(self.db_path)
         transaction_started = False
         try:
+            with conn:
+                _ensure_schema(conn)
             conn.execute("BEGIN IMMEDIATE")
             transaction_started = True
 
@@ -306,6 +329,8 @@ class SqliteQueue:
         conn = _connect(self.db_path)
         transaction_started = False
         try:
+            with conn:
+                _ensure_schema(conn)
             # BEGIN IMMEDIATE prevents two workers from claiming the same item.
             conn.execute("BEGIN IMMEDIATE")
             transaction_started = True
@@ -351,6 +376,7 @@ class SqliteQueue:
         conn = _connect(self.db_path)
         try:
             with conn:
+                _ensure_schema(conn)
                 if claimed_by is None:
                     conn.execute(
                         "UPDATE queue_items SET status = 'successful', claimed_at = NULL "
@@ -375,6 +401,7 @@ class SqliteQueue:
         conn = _connect(self.db_path)
         try:
             with conn:
+                _ensure_schema(conn)
                 if claimed_by is None:
                     row = conn.execute(
                         "SELECT retry_count FROM queue_items WHERE id = ?", (item_id,)

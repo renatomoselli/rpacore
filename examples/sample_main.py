@@ -26,7 +26,7 @@ from examples.sample_skill import ConfirmOutput, ValidateInput, WriteGreeting
 def main(
     *,
     config_path: str = "config.toml",
-    db_path: str | None = None,
+    transaction_db_path: str | None = None,
     output_path: str | None = None,
 ) -> None:
     # 1. Load configuration from config.toml (falls back to defaults if absent).
@@ -61,8 +61,12 @@ def main(
     engine.run(ctx)
 
     # 5. Persist the result so failed runs can be inspected (and resumed).
-    #    db_path defaults to config value; pass an override for testing.
-    _db_path = db_path if db_path is not None else str(config["db_path"])
+    #    transaction_db_path defaults to config value; pass an override for testing.
+    _db_path = (
+        transaction_db_path
+        if transaction_db_path is not None
+        else str(config["transaction_db_path"])
+    )
     save_transaction(transaction, db_path=_db_path)
 
     # 6. Dispatch notifications (email / webhook) if configured.
