@@ -66,6 +66,11 @@ class _SystemFailSkill(Skill):
         raise SystemException("system down", action=self.name)
 
 
+class _StateSkill(Skill):
+    def execute(self, ctx: ProcessContext) -> None:
+        ctx.state[self.name] = "done"
+
+
 def _make_engine_with(skill_cls: type[Skill]) -> tuple[Engine, Transaction]:
     """Return (engine, transaction) pre-loaded with one skill instance."""
     tx = Transaction(reference="T", skills=[skill_cls("step", 1)])
@@ -476,7 +481,7 @@ class TestRunnerManagedTransactionPersistence:
         assert len(transactions) == 1
         assert transactions[0].reference == "ok"
 
-    def test_persistence_failure_is_counted_and_logged(self, monkeypatch, caplog) -> None:
+    def test_checkpoint_failure_is_counted_logged_and_prevents_completion(self, monkeypatch, caplog) -> None:
         def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
             raise RuntimeError("sqlite locked")
 
@@ -487,11 +492,13 @@ class TestRunnerManagedTransactionPersistence:
             summary, queue = _run([_item("ok")], transaction_db_path="broken.db", logger=logger)
 
         assert summary.persistence_errors == 1
-        assert summary.completed == 1
-        assert summary.failed == 0
-        assert queue.completed == ["ok"]
+        assert summary.completed == 0
+        assert summary.failed == 1
+        assert queue.completed == []
+        assert queue.failed == ["ok"]
+        assert queue.fail_retries == [True]
         assert any(
-            record.__dict__.get("event") == "transaction_persistence_error"
+            record.__dict__.get("event") == "transaction_checkpoint_error"
             and record.__dict__.get("queue_item_id") == "ok"
             and record.__dict__.get("transaction_reference") == "ok"
             for record in caplog.records
@@ -513,7 +520,7 @@ class TestRunnerManagedTransactionPersistence:
 
         assert summary.persistence_errors == 0
         assert queue.completed == ["ok"]
-        assert attempts == ["ok", "ok", "ok"]
+        assert attempts == ["ok", "ok", "ok", "ok", "ok", "ok"]
         assert sleeps == [0.05, 0.1]
 
     def test_persistence_memory_error_propagates(self, monkeypatch) -> None:
@@ -525,7 +532,7 @@ class TestRunnerManagedTransactionPersistence:
         with pytest.raises(MemoryError, match="out of memory"):
             _run([_item("ok")], transaction_db_path="transactions.db")
 
-    def test_persistence_failure_visible_to_after_item_without_changing_queue_outcome(self, monkeypatch) -> None:
+    def test_checkpoint_failure_visible_to_after_item_and_fails_queue_item(self, monkeypatch) -> None:
         def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
             raise RuntimeError("write failed")
 
@@ -539,15 +546,37 @@ class TestRunnerManagedTransactionPersistence:
         )
 
         assert summary.persistence_errors == 1
-        assert summary.completed == 1
-        assert summary.failed == 0
-        assert queue.completed == ["ok"]
+        assert summary.completed == 0
+        assert summary.failed == 1
+        assert queue.completed == []
+        assert queue.failed == ["ok"]
+        assert queue.fail_retries == [True]
         assert isinstance(errors[0], RuntimeError)
         assert str(errors[0]) == "write failed"
 
-    def test_business_failure_stays_terminal_when_persistence_fails(self, monkeypatch) -> None:
+    def test_success_checkpoint_error_fails_without_queue_retry(self, monkeypatch) -> None:
+        def _fail_after_success(transaction: Transaction, db_path: str = "rpacore.db") -> None:
+            if (
+                transaction.history
+                and transaction.history[-1].event == "skill_succeeded"
+            ):
+                raise RuntimeError("write failed")
+
+        monkeypatch.setattr(runner_module, "save_transaction", _fail_after_success)
+
+        summary, queue = _run([_item("ok")], transaction_db_path="transactions.db")
+
+        assert summary.persistence_errors == 1
+        assert summary.completed == 0
+        assert summary.failed == 1
+        assert queue.completed == []
+        assert queue.failed == ["ok"]
+        assert queue.fail_retries == [False]
+
+    def test_business_failure_checkpoint_error_fails_without_queue_retry(self, monkeypatch) -> None:
         def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
-            raise RuntimeError("write failed")
+            if transaction.skills[0].status is Status.FAILED:
+                raise RuntimeError("write failed")
 
         errors: list[Exception | None] = []
         monkeypatch.setattr(runner_module, "save_transaction", _fail_save)
@@ -565,6 +594,33 @@ class TestRunnerManagedTransactionPersistence:
         assert queue.failed == ["bad"]
         assert queue.fail_retries == [False]
         assert isinstance(errors[0], RuntimeError)
+
+    def test_runner_checkpoints_successful_skill_before_later_failure(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        queue = _FakeQueue([_item("checkpoint")])
+
+        def build(item: QueueItem) -> Transaction:
+            return Transaction(
+                reference=item.reference,
+                skills=[_StateSkill("first", 1), _SystemFailSkill("second", 2)],
+            )
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=build,
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=db_path,
+        )
+
+        loaded = list_transactions(db_path)[0]
+        assert summary.failed == 1
+        assert queue.failed == ["checkpoint"]
+        assert loaded.skills[0].status is Status.SUCCESSFUL
+        assert loaded.skills[1].status is Status.FAILED
+        assert loaded.state == {"first": "done"}
 
     def test_default_transaction_db_path_preserves_current_behavior(self, monkeypatch) -> None:
         calls: list[Transaction] = []

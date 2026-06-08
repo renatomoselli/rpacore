@@ -206,20 +206,30 @@ latest schema to the new latest schema.
 
 ## Crash Behavior
 
-RPA Core currently persists transaction data when user wiring, runner wiring, or
-tests explicitly call `save_transaction()`. A normal `Engine.run()` call does
-not yet checkpoint after every successful skill.
+`Engine.run()` accepts an optional strict checkpoint callback:
 
-That means:
+```python
+Engine().run(ctx, checkpoint=lambda tx: save_transaction(tx, db_path))
+```
 
-- a transaction saved after `Engine.run()` completes is durable
-- a transaction saved by the queue runner after engine completion is durable
-- successful skill progress during a process crash is not yet guaranteed unless
-  a save has already happened
+When configured, the engine validates durable transaction state and calls the
+checkpoint after each transaction or skill state transition, including the
+`skill_started` checkpoint before user skill code begins. Checkpoint failures
+propagate and stop execution. They are not converted into successful outcomes.
+
+The queue runner supplies `save_transaction()` as this checkpoint when
+`transaction_db_path` is configured. This means a process that exits after a
+skill succeeds leaves that skill status, durable state, timestamps, and history
+saved before downstream skills begin.
+
+Checkpoint failures prevent queue completion. If the failure happens after a
+successful, skipped, or terminal business-failed skill outcome, the runner marks
+the queue item failed without automatic retry to avoid replaying side effects
+that already occurred. Earlier checkpoint failures remain retryable.
+
+An unavoidable boundary remains: external side effects can happen just before
+the checkpoint that records their success. Skills should still be idempotent
+where practical.
 
 When loading persisted data, any `IN_PROGRESS` transaction or skill is treated
 as interrupted execution and returned as `FAILED`.
-
-Durable per-skill checkpoints are planned separately. Until then,
-`transaction_db_path` is an audit persistence path, not a guarantee that every
-successful in-memory step has survived a process crash.

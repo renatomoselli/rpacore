@@ -30,6 +30,15 @@ _PERSISTENCE_SAVE_ATTEMPTS = 3
 _PERSISTENCE_RETRY_DELAY_SECONDS = 0.05
 
 
+class _CheckpointError(RuntimeError):
+    """Internal wrapper carrying queue retry policy for checkpoint failures."""
+
+    def __init__(self, original: Exception, *, retry: bool) -> None:
+        super().__init__(str(original))
+        self.original = original
+        self.retry = retry
+
+
 @dataclass
 class QueueRunSummary:
     """Counts from a completed run_queue_loop() call."""
@@ -65,7 +74,7 @@ def run_queue_loop(
     - Calls build_transaction(item) to construct a Transaction (user responsibility).
     - Builds a ProcessContext with the item's payload in transaction.state.
     - Runs engine.run(ctx).
-        - Saves the transaction when transaction_db_path is set.
+        - Supplies a strict transaction checkpoint when transaction_db_path is set.
         - Generates a report and dispatches notifiers after engine.run(ctx).
     - Calls queue.complete() if transaction.status is SUCCESSFUL.
     - Calls queue.fail() with retry=False for business-only transaction failures
@@ -105,11 +114,9 @@ def run_queue_loop(
                            queue retry policy. Defaults to False so deterministic business
                            failures are terminal queue outcomes.
         transaction_db_path:
-                           Optional SQLite transaction database path. When set, each
-                           transaction is saved after engine.run(ctx) completes and before
-                           callbacks run. Persistence is best-effort: if the process exits
-                           between engine completion and save, the queue remains the source
-                           of truth and may retry the item.
+                           Optional SQLite transaction database path. When set, the
+                           runner supplies strict checkpoints throughout engine.run(ctx).
+                           Checkpoint failures stop execution and prevent queue completion.
         resource_scope:    Optional context manager entered before queue claims and
                            exited after processing. It may return shared resources
                            shallow-copied into every item context. Cleanup failures
@@ -210,7 +217,6 @@ def _run_items(
         transaction: Transaction | None = None
         ctx: ProcessContext | None = None
         error: Exception | None = None
-        persistence_error: Exception | None = None
         originally_intended_complete = False
         callback_failed = False
 
@@ -242,28 +248,18 @@ def _run_items(
                 resources=dict(shared_resources),
                 credentials=credentials,
             )
-            engine.run(ctx)
+            checkpoint: Callable[[Transaction], None] | None = None
+            if transaction_db_path is not None:
+                checkpoint = _strict_transaction_checkpoint(
+                    db_path=transaction_db_path,
+                    item=item,
+                    worker_id=worker_id,
+                    log=log,
+                    summary=summary,
+                )
+            engine.run(ctx, checkpoint=checkpoint)
             validate_json_object(ctx.transaction.state, path="transaction.state")
             originally_intended_complete = ctx.transaction.status == Status.SUCCESSFUL
-            if transaction_db_path is not None:
-                persistence_error = _save_transaction_with_retries(
-                    ctx.transaction,
-                    db_path=transaction_db_path,
-                )
-                if persistence_error is not None:
-                    summary.persistence_errors += 1
-                    log.error(
-                        "Transaction persistence failed; preserving queue outcome",
-                        extra={
-                            "event": "transaction_persistence_error",
-                            "queue_item_id": item.id,
-                            "queue_reference": item.reference,
-                            "transaction_id": ctx.transaction.id,
-                            "transaction_reference": ctx.transaction.reference,
-                            "worker_id": worker_id,
-                        },
-                        exc_info=(type(persistence_error), persistence_error, persistence_error.__traceback__),
-                    )
         except MemoryError:
             raise
         except Exception as exc:
@@ -289,7 +285,7 @@ def _run_items(
 
         if after_item is not None:
             try:
-                after_item(item, transaction, error if error is not None else persistence_error)
+                after_item(item, transaction, error)
             except MemoryError:
                 raise
             except Exception:
@@ -309,7 +305,9 @@ def _run_items(
                 extra={"event": "queue_item_complete", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
             )
         else:
-            if isinstance(error, (ExecutionValidationError, JsonStateError)):
+            if isinstance(error, _CheckpointError):
+                retry = error.retry
+            elif isinstance(error, (ExecutionValidationError, JsonStateError)):
                 retry = False
             else:
                 retry = (
@@ -338,6 +336,60 @@ def _transaction_has_only_business_failures(transaction: Transaction | None) -> 
         skill.exceptions and isinstance(skill.exceptions[-1], BusinessException)
         for skill in failed
     )
+
+
+def _strict_transaction_checkpoint(
+    *,
+    db_path: str,
+    item: QueueItem,
+    worker_id: str,
+    log: logging.Logger,
+    summary: QueueRunSummary,
+) -> Callable[[Transaction], None]:
+    """Return a checkpoint that raises when transaction persistence fails."""
+
+    def checkpoint(transaction: Transaction) -> None:
+        error = _save_transaction_with_retries(transaction, db_path=db_path)
+        if error is None:
+            return
+        summary.persistence_errors += 1
+        log.error(
+            "Transaction checkpoint failed",
+            extra={
+                "event": "transaction_checkpoint_error",
+                "queue_item_id": item.id,
+                "queue_reference": item.reference,
+                "transaction_id": transaction.id,
+                "transaction_reference": transaction.reference,
+                "worker_id": worker_id,
+            },
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        raise _CheckpointError(
+            error,
+            retry=_checkpoint_failure_allows_queue_retry(transaction),
+        ) from error
+
+    return checkpoint
+
+
+def _checkpoint_failure_allows_queue_retry(transaction: Transaction) -> bool:
+    """Return False once retrying could duplicate completed or terminal skill work."""
+    if not transaction.history:
+        return True
+    last_event = transaction.history[-1].event
+    if last_event in (
+        "skill_succeeded",
+        "skill_skipped",
+    ):
+        return False
+    if last_event == "skill_failed":
+        failed = transaction.failed_skills()
+        return not any(
+            skill.exceptions and isinstance(skill.exceptions[-1], BusinessException)
+            for skill in failed
+        )
+    return True
 
 
 def _save_transaction_with_retries(transaction: Transaction, *, db_path: str) -> Exception | None:

@@ -6,8 +6,9 @@ import logging
 import math
 import time
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Callable, Literal
 
+from rpacore._json_state import validate_json_object
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.logger import get_logger
@@ -65,7 +66,12 @@ class Engine:
         self.logger: logging.Logger = logger if logger is not None else get_logger()
         self.screenshot_dir: str = screenshot_dir
 
-    def run(self, ctx: ProcessContext) -> None:
+    def run(
+        self,
+        ctx: ProcessContext,
+        *,
+        checkpoint: Callable[[Transaction], None] | None = None,
+    ) -> None:
         """Execute all skills in the transaction, retrying retryable failed skills up to max_retries times."""
         transaction = ctx.transaction
         try:
@@ -83,9 +89,10 @@ class Engine:
         transaction.finished_at = None
         transaction.append_history(HistoryEvent.TRANSACTION_STARTED)
         self._log_transaction_started(transaction)
+        self._checkpoint(transaction, checkpoint)
 
         try:
-            self._execute_pass(ctx, blocked=initial_blocked)
+            self._execute_pass(ctx, blocked=initial_blocked, checkpoint=checkpoint)
 
             while transaction.retry_count < self.max_retries:
                 retryable = self._retryable_failed_skills(transaction)
@@ -93,16 +100,27 @@ class Engine:
                     break
                 for skill in retryable:
                     skill.status = Status.PENDING
-                transaction.append_history(HistoryEvent.RETRY_SCHEDULED)
                 self._sleep_before_retry(transaction.retry_count)
                 transaction.retry_count += 1
+                transaction.append_history(HistoryEvent.RETRY_SCHEDULED)
                 # Block only business-failed skills; PENDING skills that never ran should also execute.
-                self._execute_pass(ctx, blocked=self._business_failed_skill_ids(transaction))
+                self._execute_pass(
+                    ctx,
+                    blocked=self._business_failed_skill_ids(transaction),
+                    checkpoint=checkpoint,
+                )
+                self._checkpoint(transaction, checkpoint)
         except MemoryError:
             transaction.status = Status.FAILED
             if transaction.finished_at is None:
                 transaction.finished_at = datetime.now(timezone.utc)
             transaction.append_history(HistoryEvent.TRANSACTION_COMPLETED)
+            try:
+                self._checkpoint(transaction, checkpoint)
+            except MemoryError:
+                raise
+            except Exception:
+                pass
             raise
 
         if all(s.status in (Status.SUCCESSFUL, Status.SKIPPED) for s in transaction.skills):
@@ -112,6 +130,18 @@ class Engine:
         transaction.finished_at = datetime.now(timezone.utc)
         transaction.append_history(HistoryEvent.TRANSACTION_COMPLETED)
         self._log_transaction_completed(transaction)
+        self._checkpoint(transaction, checkpoint)
+
+    def _checkpoint(
+        self,
+        transaction: Transaction,
+        checkpoint: Callable[[Transaction], None] | None,
+    ) -> None:
+        """Validate durable state and run a strict checkpoint when configured."""
+        if checkpoint is None:
+            return
+        validate_json_object(transaction.state, path="transaction.state")
+        checkpoint(transaction)
 
     def _sleep_before_retry(self, completed_retry_passes: int) -> None:
         """Delay before a retry pass when configured."""
@@ -150,6 +180,7 @@ class Engine:
         self,
         ctx: ProcessContext,
         blocked: set[int] | None,
+        checkpoint: Callable[[Transaction], None] | None,
     ) -> None:
         """Run one execution pass.
 
@@ -168,14 +199,9 @@ class Engine:
             skill.status = Status.IN_PROGRESS
             transaction.append_history(HistoryEvent.SKILL_STARTED, skill=skill)
             self._log_skill_started(transaction, skill)
+            self._checkpoint(transaction, checkpoint)
             try:
                 skill.execute(ctx)
-                if skill.status is not Status.SKIPPED:
-                    skill.status = Status.SUCCESSFUL
-                    transaction.append_history(HistoryEvent.SKILL_SUCCEEDED, skill=skill)
-                else:
-                    transaction.append_history(HistoryEvent.SKILL_SKIPPED, skill=skill)
-                self._log_skill_completed(transaction, skill)
             except BusinessException as exc:
                 exc.retry_number = transaction.retry_count
                 skill.status = Status.FAILED
@@ -184,8 +210,9 @@ class Engine:
                 if self.screenshot_dir:
                     exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 self._log_skill_failed(transaction, skill, exc, level="warning")
+                self._checkpoint(transaction, checkpoint)
                 if exc.stops_execution:
-                    self._skip_downstream_pending_skills(transaction, skill)
+                    self._skip_downstream_pending_skills(transaction, skill, checkpoint=checkpoint)
                     break
             except SystemException as exc:
                 exc.retry_number = transaction.retry_count
@@ -195,10 +222,12 @@ class Engine:
                 if self.screenshot_dir:
                     exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 self._log_skill_failed(transaction, skill, exc, level="error")
+                self._checkpoint(transaction, checkpoint)
                 break
             except MemoryError:
                 skill.status = Status.FAILED
                 transaction.append_history(HistoryEvent.SKILL_INTERRUPTED, skill=skill)
+                self._checkpoint(transaction, checkpoint)
                 raise
             except Exception as exc:
                 wrapped = SystemException(
@@ -212,9 +241,24 @@ class Engine:
                 if self.screenshot_dir:
                     wrapped.screenshot_path = capture_screenshot(self.screenshot_dir)
                 self._log_skill_failed(transaction, skill, wrapped, level="error")
+                self._checkpoint(transaction, checkpoint)
                 break
+            else:
+                if skill.status is not Status.SKIPPED:
+                    skill.status = Status.SUCCESSFUL
+                    transaction.append_history(HistoryEvent.SKILL_SUCCEEDED, skill=skill)
+                else:
+                    transaction.append_history(HistoryEvent.SKILL_SKIPPED, skill=skill)
+                self._log_skill_completed(transaction, skill)
+                self._checkpoint(transaction, checkpoint)
 
-    def _skip_downstream_pending_skills(self, transaction: Transaction, failed_skill: Skill) -> None:
+    def _skip_downstream_pending_skills(
+        self,
+        transaction: Transaction,
+        failed_skill: Skill,
+        *,
+        checkpoint: Callable[[Transaction], None] | None,
+    ) -> None:
         """Mark pending skills after a stopping business failure as skipped."""
         should_skip = False
         for skill in transaction.ordered_skills():
@@ -225,6 +269,7 @@ class Engine:
                 skill.status = Status.SKIPPED
                 transaction.append_history(HistoryEvent.SKILL_SKIPPED, skill=skill)
                 self._log_skill_completed(transaction, skill)
+        self._checkpoint(transaction, checkpoint)
 
     def _log_transaction_started(self, transaction: Transaction) -> None:
         self.logger.info(

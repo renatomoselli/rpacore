@@ -1,10 +1,15 @@
 """Tests for rpacore.engine."""
 
+import subprocess
+import sys
+import textwrap
+
 import pytest
 
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
+from rpacore.persistence import load_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import HistoryEvent, Transaction
@@ -408,6 +413,156 @@ class TestEngineStateTransitions:
         assert tx.finished_at is not None
         assert tx.history[-1].event is HistoryEvent.TRANSACTION_COMPLETED
         assert tx.history[-1].status is Status.FAILED
+
+
+class TestEngineCheckpointing:
+    def test_checkpoint_runs_after_each_state_transition(self) -> None:
+        checkpoints: list[list[HistoryEvent]] = []
+
+        class AssertStartedCheckpointSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                assert checkpoints[-1][-1] is HistoryEvent.SKILL_STARTED
+                ctx.state["ran"] = True
+
+        tx = Transaction(reference="T1", skills=[AssertStartedCheckpointSkill("a", 1)])
+
+        Engine().run(
+            _ctx(tx),
+            checkpoint=lambda transaction: checkpoints.append(
+                [entry.event for entry in transaction.history]
+            ),
+        )
+
+        assert [events[-1] for events in checkpoints] == [
+            HistoryEvent.TRANSACTION_STARTED,
+            HistoryEvent.SKILL_STARTED,
+            HistoryEvent.SKILL_SUCCEEDED,
+            HistoryEvent.TRANSACTION_COMPLETED,
+        ]
+
+    def test_checkpoint_failure_stops_before_skill_code_runs(self) -> None:
+        class TrackSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                ctx.state["ran"] = True
+
+        def fail_on_skill_started(transaction: Transaction) -> None:
+            if transaction.history[-1].event is HistoryEvent.SKILL_STARTED:
+                raise RuntimeError("checkpoint failed")
+
+        tx = Transaction(reference="T1", skills=[TrackSkill("a", 1)])
+
+        with pytest.raises(RuntimeError, match="checkpoint failed"):
+            Engine().run(_ctx(tx), checkpoint=fail_on_skill_started)
+
+        assert tx.state == {}
+        assert tx.status is Status.IN_PROGRESS
+        assert tx.skills[0].status is Status.IN_PROGRESS
+
+    def test_checkpoint_validates_durable_state_before_saving(self) -> None:
+        calls = 0
+
+        class BadStateSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                ctx.state["client"] = object()
+
+        def checkpoint(transaction: Transaction) -> None:
+            nonlocal calls
+            calls += 1
+
+        tx = Transaction(reference="T1", skills=[BadStateSkill("a", 1)])
+
+        with pytest.raises(TypeError, match="transaction.state\\['client'\\] expected JSON value"):
+            Engine().run(_ctx(tx), checkpoint=checkpoint)
+
+        assert calls == 2
+        assert tx.skills[0].status is Status.SUCCESSFUL
+
+    def test_memory_error_is_not_masked_by_checkpoint_error(self) -> None:
+        class MemoryFailSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                raise MemoryError("out of memory")
+
+        def fail_checkpoint(transaction: Transaction) -> None:
+            if transaction.history[-1].event is HistoryEvent.TRANSACTION_COMPLETED:
+                raise RuntimeError("checkpoint failed")
+
+        tx = Transaction(reference="T1", skills=[MemoryFailSkill("a", 1)])
+
+        with pytest.raises(MemoryError, match="out of memory"):
+            Engine().run(_ctx(tx), checkpoint=fail_checkpoint)
+
+        assert tx.status is Status.FAILED
+        assert tx.history[-1].event is HistoryEvent.TRANSACTION_COMPLETED
+
+    def test_stopping_business_exception_checkpoints_downstream_skips_as_batch(self) -> None:
+        checkpoints: list[list[Status]] = []
+
+        tx = Transaction(
+            reference="T1",
+            skills=[
+                StoppingBusinessFailSkill("validate", 1),
+                SuccessSkill("write", 2),
+                SuccessSkill("notify", 3),
+            ],
+        )
+
+        def checkpoint(transaction: Transaction) -> None:
+            if transaction.history[-1].event is HistoryEvent.SKILL_SKIPPED:
+                checkpoints.append([skill.status for skill in transaction.skills])
+
+        Engine().run(_ctx(tx), checkpoint=checkpoint)
+
+        assert checkpoints == [[Status.FAILED, Status.SKIPPED, Status.SKIPPED]]
+
+    def test_in_memory_run_still_works_without_checkpoint(self) -> None:
+        tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
+
+        Engine().run(_ctx(tx))
+
+        assert tx.status is Status.SUCCESSFUL
+        assert tx.state == {"a": "done"}
+
+    def test_subprocess_exit_after_successful_skill_leaves_checkpoint(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        script = textwrap.dedent(
+            """
+            import os
+            import sys
+
+            from rpacore.context import ProcessContext
+            from rpacore.engine import Engine
+            from rpacore.persistence import save_transaction
+            from rpacore.skill import Skill
+            from rpacore.transaction import Transaction
+
+            class FirstSkill(Skill):
+                def execute(self, ctx):
+                    ctx.state["first"] = "done"
+
+            class CrashSkill(Skill):
+                def execute(self, ctx):
+                    os._exit(7)
+
+            tx = Transaction(
+                reference="crash",
+                id="crash-tx",
+                skills=[FirstSkill("first", 1), CrashSkill("crash", 2)],
+            )
+            Engine().run(
+                ProcessContext(transaction=tx),
+                checkpoint=lambda transaction: save_transaction(transaction, sys.argv[1]),
+            )
+            """
+        )
+
+        result = subprocess.run([sys.executable, "-c", script, db_path], check=False)
+
+        assert result.returncode == 7
+        loaded = load_transaction("crash-tx", db_path)
+        assert loaded.skills[0].status is Status.SUCCESSFUL
+        assert loaded.skills[1].status is Status.FAILED
+        assert loaded.state == {"first": "done"}
+        assert HistoryEvent.SKILL_SUCCEEDED in [entry.event for entry in loaded.history]
 
 
 class TestEngineDirectSkillExecution:
