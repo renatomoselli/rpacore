@@ -80,14 +80,21 @@ Repeated `save_transaction()` calls do not duplicate history rows.
 
 `resume_transaction()` reloads a persisted transaction and reattaches executable
 skill instances supplied by the caller. Successful skills remain successful.
-Failed skills whose latest exception is a `SystemException` are reset to
-`PENDING` so they can be retried after recovery. Failed skills whose latest
-exception is a `BusinessException` remain `FAILED`; bad input or business-rule
-failures are terminal until user code or durable state is changed explicitly.
-When the resumed transaction is passed to `Engine.run()`, those recovered
-business-failed skills are not re-executed.
-Pending and skipped skills in a non-successful transaction are reset to
-`PENDING`.
+Persisted `IN_PROGRESS` transaction or skill state remains visible after
+`load_transaction()` and is recovered only when `resume_transaction()` is called.
+
+For interrupted transactions, `resume_transaction()` preserves successful and
+skipped skills, resets interrupted or pending work to `PENDING`, and keeps
+durable state from the last successful checkpoint. For ordinary failed
+transactions, failed skills whose latest exception is a `SystemException` are
+reset to `PENDING` so they can be retried after recovery. Failed skills whose
+latest exception is a `BusinessException` remain `FAILED`; bad input or
+business-rule failures are terminal until user code or durable state is changed
+explicitly. When the resumed transaction is passed to `Engine.run()`, those
+recovered business-failed skills are not re-executed.
+
+Repeated resume calls do not append duplicate `transaction_resumed` history
+entries when the latest persisted history entry already records the resume.
 
 ## Transaction Persistence
 
@@ -231,5 +238,5 @@ An unavoidable boundary remains: external side effects can happen just before
 the checkpoint that records their success. Skills should still be idempotent
 where practical.
 
-When loading persisted data, any `IN_PROGRESS` transaction or skill is treated
-as interrupted execution and returned as `FAILED`.
+When loading persisted data, any `IN_PROGRESS` transaction or skill remains
+visible as `IN_PROGRESS` until explicit recovery.

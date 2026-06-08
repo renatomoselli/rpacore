@@ -560,7 +560,7 @@ class TestEngineCheckpointing:
         assert result.returncode == 7
         loaded = load_transaction("crash-tx", db_path)
         assert loaded.skills[0].status is Status.SUCCESSFUL
-        assert loaded.skills[1].status is Status.FAILED
+        assert loaded.skills[1].status is Status.IN_PROGRESS
         assert loaded.state == {"first": "done"}
         assert HistoryEvent.SKILL_SUCCEEDED in [entry.event for entry in loaded.history]
 

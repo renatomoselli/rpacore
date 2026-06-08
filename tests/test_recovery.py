@@ -5,7 +5,7 @@ import pytest
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, SystemException
-from rpacore.persistence import save_transaction
+from rpacore.persistence import load_transaction, save_transaction
 from rpacore.recovery import resume_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
@@ -69,6 +69,161 @@ def test_resume_reruns_only_non_successful_skills(db_path) -> None:
 
     assert counts == {"second": 1, "third": 1}
     assert resumed.status is Status.SUCCESSFUL
+
+
+def test_load_shows_interrupted_state_before_explicit_resume(db_path) -> None:
+    first = Skill("first", 1)
+    first.status = Status.SUCCESSFUL
+    second = Skill("second", 2)
+    second.status = Status.IN_PROGRESS
+    tx = Transaction(
+        reference="REF-001",
+        status=Status.IN_PROGRESS,
+        skills=[first, second],
+        state={"first": "done"},
+    )
+    save_transaction(tx, db_path)
+
+    loaded = load_transaction(tx.id, db_path)
+
+    assert loaded.status is Status.IN_PROGRESS
+    assert [skill.status for skill in loaded.skills] == [
+        Status.SUCCESSFUL,
+        Status.IN_PROGRESS,
+    ]
+    assert loaded.state == {"first": "done"}
+
+
+def test_resume_interrupted_transaction_skips_successful_and_preserves_state(db_path) -> None:
+    counts: dict[str, int] = {}
+    first = Skill("first", 1)
+    first.status = Status.SUCCESSFUL
+    second = Skill("second", 2)
+    second.status = Status.IN_PROGRESS
+    tx = Transaction(
+        reference="REF-001",
+        status=Status.IN_PROGRESS,
+        skills=[first, second],
+        state={"first": "done"},
+    )
+    save_transaction(tx, db_path)
+
+    resumed = resume_transaction(
+        tx.id,
+        [
+            _TrackingSkill("first", 1, counts),
+            _TrackingSkill("second", 2, counts),
+        ],
+        db_path=db_path,
+    )
+
+    assert resumed.status is Status.PENDING
+    assert resumed.state == {"first": "done"}
+    assert [skill.status for skill in resumed.skills] == [
+        Status.SUCCESSFUL,
+        Status.PENDING,
+    ]
+
+    Engine().run(ProcessContext(transaction=resumed))
+
+    assert counts == {"second": 1}
+    assert resumed.state == {"first": "done"}
+    assert resumed.status is Status.SUCCESSFUL
+
+
+def test_resume_interrupted_transaction_preserves_skipped_skills(db_path) -> None:
+    counts: dict[str, int] = {}
+    skipped = Skill("optional", 1)
+    skipped.status = Status.SKIPPED
+    running = Skill("main", 2)
+    running.status = Status.IN_PROGRESS
+    tx = Transaction(
+        reference="REF-001",
+        status=Status.IN_PROGRESS,
+        skills=[skipped, running],
+    )
+    save_transaction(tx, db_path)
+
+    resumed = resume_transaction(
+        tx.id,
+        [
+            _TrackingSkill("optional", 1, counts),
+            _TrackingSkill("main", 2, counts),
+        ],
+        db_path=db_path,
+    )
+
+    assert [skill.status for skill in resumed.skills] == [
+        Status.SKIPPED,
+        Status.PENDING,
+    ]
+
+    Engine().run(ProcessContext(transaction=resumed))
+
+    assert counts == {"main": 1}
+
+
+def test_repeated_resume_does_not_duplicate_resume_history(db_path) -> None:
+    running = Skill("main", 1)
+    running.status = Status.IN_PROGRESS
+    tx = Transaction(
+        reference="REF-001",
+        status=Status.IN_PROGRESS,
+        skills=[running],
+    )
+    save_transaction(tx, db_path)
+
+    first = resume_transaction(
+        tx.id,
+        [_TrackingSkill("main", 1, {})],
+        db_path=db_path,
+    )
+    save_transaction(first, db_path)
+    second = resume_transaction(
+        tx.id,
+        [_TrackingSkill("main", 1, {})],
+        db_path=db_path,
+    )
+
+    assert [entry.event for entry in second.history].count(
+        HistoryEvent.TRANSACTION_RESUMED
+    ) == 1
+
+
+def test_repeated_resume_preserves_skipped_recovery_decision(db_path) -> None:
+    skipped = Skill("optional", 1)
+    skipped.status = Status.SKIPPED
+    running = Skill("main", 2)
+    running.status = Status.IN_PROGRESS
+    tx = Transaction(
+        reference="REF-001",
+        status=Status.IN_PROGRESS,
+        skills=[skipped, running],
+    )
+    save_transaction(tx, db_path)
+
+    first = resume_transaction(
+        tx.id,
+        [
+            _TrackingSkill("optional", 1, {}),
+            _TrackingSkill("main", 2, {}),
+        ],
+        db_path=db_path,
+    )
+    save_transaction(first, db_path)
+    second = resume_transaction(
+        tx.id,
+        [
+            _TrackingSkill("optional", 1, {}),
+            _TrackingSkill("main", 2, {}),
+        ],
+        db_path=db_path,
+    )
+
+    assert [skill.status for skill in second.skills] == [
+        Status.SKIPPED,
+        Status.PENDING,
+    ]
 
 
 def test_resume_does_not_rerun_business_failed_skills(db_path) -> None:

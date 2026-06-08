@@ -343,11 +343,7 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
 
 
 def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transaction:
-    """Load a transaction from the database.
-
-    Crash recovery: any skill with status IN_PROGRESS is reset to FAILED,
-    because an in-progress skill at load time means the process was interrupted.
-    """
+    """Load a transaction from the database without mutating persisted state."""
     conn = _connect(db_path)
     try:
         _ensure_schema(conn)
@@ -369,9 +365,7 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
         skills: list[Skill] = []
         for sr in skill_rows:
             skill = Skill(sr["name"], sr["execution_order"], arguments=json.loads(sr["arguments"]))
-            raw_status = sr["status"]
-            # Crash recovery: IN_PROGRESS at load time means the process was interrupted.
-            skill.status = Status.FAILED if raw_status == Status.IN_PROGRESS else Status(raw_status)
+            skill.status = Status(sr["status"])
 
             exc_rows = conn.execute(
                 "SELECT exception_type, message, action, retry_number, datetime_occurred, "
@@ -402,8 +396,6 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
             skills.append(skill)
 
         tx_status = Status(row["status"])
-        if tx_status == Status.IN_PROGRESS:
-            tx_status = Status.FAILED
 
         history_rows = conn.execute(
             "SELECT sequence, timestamp, event, status, retry_number, "

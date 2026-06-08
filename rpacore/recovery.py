@@ -25,6 +25,12 @@ def resume_transaction(
     should still check transaction status first to avoid unnecessary work.
     """
     transaction = load_transaction(tx_id, db_path)
+    interrupted = _is_interrupted(transaction)
+    already_resumed = (
+        bool(transaction.history)
+        and transaction.history[-1].event is HistoryEvent.TRANSACTION_RESUMED
+    )
+    preserve_recovery_state = interrupted or already_resumed
 
     provided: dict[tuple[str, int], Skill] = {}
     for skill in skills:
@@ -49,13 +55,11 @@ def resume_transaction(
 
         concrete.arguments = dict(loaded_skill.arguments)
         concrete.exceptions = [copy(exc) for exc in loaded_skill.exceptions]
-        concrete.status = loaded_skill.status
-
-        if concrete.status is Status.FAILED and concrete.exceptions:
-            if not isinstance(concrete.exceptions[-1], BusinessException):
-                concrete.status = Status.PENDING
-        elif concrete.status is not Status.SUCCESSFUL:
-            concrete.status = Status.PENDING
+        concrete.status = _resumed_skill_status(
+            loaded_skill.status,
+            concrete.exceptions,
+            preserve_recovery_state=preserve_recovery_state,
+        )
 
         restored.append(concrete)
 
@@ -71,5 +75,31 @@ def resume_transaction(
         transaction.status = Status.PENDING
         transaction.started_at = None
         transaction.finished_at = None
-        transaction.append_history(HistoryEvent.TRANSACTION_RESUMED)
+        if not already_resumed:
+            transaction.append_history(HistoryEvent.TRANSACTION_RESUMED)
     return transaction
+
+
+def _is_interrupted(transaction: Transaction) -> bool:
+    """Return True when persisted state shows in-progress work."""
+    return (
+        transaction.status is Status.IN_PROGRESS
+        or any(skill.status is Status.IN_PROGRESS for skill in transaction.skills)
+    )
+
+
+def _resumed_skill_status(
+    status: Status,
+    exceptions: list[BaseException],
+    *,
+    preserve_recovery_state: bool,
+) -> Status:
+    """Return the skill status to use after explicit resume."""
+    if status is Status.SUCCESSFUL:
+        return Status.SUCCESSFUL
+    if preserve_recovery_state and status is Status.SKIPPED:
+        return Status.SKIPPED
+    if status is Status.FAILED and exceptions:
+        if isinstance(exceptions[-1], BusinessException):
+            return Status.FAILED
+    return Status.PENDING

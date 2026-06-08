@@ -172,6 +172,8 @@ class Engine:
 
     def _reset_skipped_skills(self, transaction: Transaction) -> None:
         """Make skipped work runnable when a failed transaction is explicitly re-run."""
+        if transaction.history and transaction.history[-1].event is HistoryEvent.TRANSACTION_RESUMED:
+            return
         for skill in transaction.skills:
             if skill.status is Status.SKIPPED:
                 skill.status = Status.PENDING

@@ -538,21 +538,21 @@ class TestSaveAndLoad:
 
 
 class TestCrashRecovery:
-    def test_in_progress_skill_loaded_as_failed(self, db_path) -> None:
+    def test_in_progress_skill_loaded_faithfully(self, db_path) -> None:
         skill = Skill("process", 1)
         skill.status = Status.IN_PROGRESS
         tx = make_transaction(skills=[skill])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert loaded.skills[0].status is Status.FAILED
+        assert loaded.skills[0].status is Status.IN_PROGRESS
 
-    def test_in_progress_transaction_loaded_as_failed(self, db_path) -> None:
+    def test_in_progress_transaction_loaded_faithfully(self, db_path) -> None:
         tx = make_transaction(status=Status.IN_PROGRESS)
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert loaded.status is Status.FAILED
+        assert loaded.status is Status.IN_PROGRESS
 
-    def test_successful_skills_not_affected_by_crash_recovery(self, db_path) -> None:
+    def test_successful_skills_not_changed_by_faithful_load(self, db_path) -> None:
         s1 = Skill("login", 1)
         s1.status = Status.SUCCESSFUL
         s2 = Skill("process", 2)
@@ -561,7 +561,7 @@ class TestCrashRecovery:
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
         assert loaded.skills[0].status is Status.SUCCESSFUL
-        assert loaded.skills[1].status is Status.FAILED
+        assert loaded.skills[1].status is Status.IN_PROGRESS
 
 
 class TestResumeScenario:
