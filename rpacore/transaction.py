@@ -56,6 +56,7 @@ class Transaction:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     state: dict[str, object] = field(default_factory=dict)
+    metadata: dict[str, object] = field(default_factory=dict)
     skills: list[Skill] = field(default_factory=list)
     history: list[HistoryEntry] = field(default_factory=list)
 
@@ -63,6 +64,7 @@ class Transaction:
         if self.retry_count < 0:
             raise ValueError(f"retry_count must be >= 0, got {self.retry_count}")
         self.state = dict(self.state)
+        self.metadata = dict(self.metadata)
         self.skills = list(self.skills)
         self.history = list(self.history)
 

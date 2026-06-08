@@ -13,7 +13,7 @@ from rpacore.transaction import HistoryEntry, HistoryEvent, Transaction
 
 _SCHEMA_TABLE = "rpacore_schema_versions"
 _TRANSACTION_SCHEMA_COMPONENT = "transactions"
-_TRANSACTION_SCHEMA_VERSION = 3
+_TRANSACTION_SCHEMA_VERSION = 4
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -153,6 +153,20 @@ def _migrate_transactions_to_v3(conn: sqlite3.Connection) -> None:
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 3)
 
 
+def _migrate_transactions_to_v4(conn: sqlite3.Connection) -> None:
+    """Add exact-match top-level transaction metadata storage."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transaction_metadata (
+            transaction_id TEXT NOT NULL,
+            key            TEXT NOT NULL,
+            value_json     TEXT NOT NULL,
+            PRIMARY KEY (transaction_id, key),
+            FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+        )
+    """)
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 4)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run explicit transaction schema migrations through the latest version."""
     with conn:
@@ -172,6 +186,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 3:
             _migrate_transactions_to_v3(conn)
             current_version = 3
+        if current_version < 4:
+            _migrate_transactions_to_v4(conn)
+            current_version = 4
         if current_version != _TRANSACTION_SCHEMA_VERSION:
             raise RuntimeError(
                 "Unsupported transaction schema version "
@@ -193,6 +210,36 @@ def _load_transaction_state(row: sqlite3.Row) -> dict[str, object]:
             action="repair transaction state in the persistence database",
         ) from exc
     return state
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _metadata_to_storage(
+    metadata: dict[str, object],
+    *,
+    path: str = "transaction.metadata",
+) -> dict[str, str]:
+    validate_json_object(metadata, path=path)
+    return {key: _canonical_json(value) for key, value in metadata.items()}
+
+
+def _load_metadata(transaction_id: str, rows: list[sqlite3.Row]) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    for row in rows:
+        key = row["key"]
+        try:
+            value = json.loads(row["value_json"])
+            validate_json_object({key: value}, path="transaction.metadata")
+        except (json.JSONDecodeError, JsonStateError) as exc:
+            raise SystemException(
+                f"Persisted transaction metadata is invalid for transaction {transaction_id!r} "
+                f"at key {key!r}: {exc}",
+                action="repair transaction metadata in the persistence database",
+            ) from exc
+        metadata[key] = value
+    return metadata
 
 
 def _timestamp_to_storage(value: datetime | None) -> str:
@@ -244,6 +291,7 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
     """
     validate_json_object(transaction.state, path="transaction.state")
     state_json = json.dumps(transaction.state)
+    metadata_json = _metadata_to_storage(transaction.metadata)
 
     conn = _connect(db_path)
     try:
@@ -338,6 +386,13 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
                         entry.skill_execution_order,
                     ),
                 )
+            conn.execute("DELETE FROM transaction_metadata WHERE transaction_id = ?", (transaction.id,))
+            for key, value_json in metadata_json.items():
+                conn.execute(
+                    "INSERT INTO transaction_metadata (transaction_id, key, value_json) "
+                    "VALUES (?, ?, ?)",
+                    (transaction.id, key, value_json),
+                )
     finally:
         conn.close()
 
@@ -404,6 +459,12 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
             (transaction_id,),
         ).fetchall()
         history = _load_history(transaction_id, history_rows)
+        metadata_rows = conn.execute(
+            "SELECT key, value_json FROM transaction_metadata "
+            "WHERE transaction_id = ? ORDER BY key",
+            (transaction_id,),
+        ).fetchall()
+        metadata = _load_metadata(transaction_id, metadata_rows)
 
         return Transaction(
             reference=row["reference"],
@@ -420,6 +481,7 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
                 row["finished_at"], path="transactions.finished_at", transaction_id=transaction_id
             ),
             state=transaction_state,
+            metadata=metadata,
             skills=skills,
             history=history,
         )
@@ -432,6 +494,7 @@ def list_transactions(
     *,
     status: Status | None = None,
     since: datetime | None = None,
+    metadata_filter: dict[str, object] | None = None,
     limit: int = 100,
 ) -> list[Transaction]:
     """Return transactions matching optional filters, newest first.
@@ -440,8 +503,15 @@ def list_transactions(
         db_path: Path to the SQLite database.
         status:  Only return transactions with this status. Returns all if None.
         since:   Only return transactions created at or after this datetime.
+        metadata_filter:
+                  Exact-match filter for top-level transaction metadata values.
         limit:   Maximum number of results. Defaults to 100.
     """
+    metadata_json = (
+        _metadata_to_storage(metadata_filter, path="metadata_filter")
+        if metadata_filter is not None
+        else {}
+    )
     conn = _connect(db_path)
     try:
         _ensure_schema(conn)
@@ -453,6 +523,14 @@ def list_transactions(
         if since is not None:
             query += " AND created_at >= ?"
             params.append(since.isoformat())
+        for key, value_json in sorted(metadata_json.items()):
+            query += (
+                " AND EXISTS ("
+                "SELECT 1 FROM transaction_metadata tm "
+                "WHERE tm.transaction_id = transactions.id "
+                "AND tm.key = ? AND tm.value_json = ?)"
+            )
+            params.extend([key, value_json])
         query += " ORDER BY created_at DESC, id ASC LIMIT ?"
         params.append(limit)
         rows = conn.execute(query, params).fetchall()

@@ -112,6 +112,15 @@ class TestGenerateReport:
 
         assert len(tx.history) == 1
 
+    def test_report_includes_metadata_as_defensive_copy(self):
+        tx = make_transaction()
+        tx.metadata = {"customer": "acme", "nested": {"b": 2, "a": 1}}
+
+        report = generate_report(tx)
+        report.metadata.clear()
+
+        assert tx.metadata == {"customer": "acme", "nested": {"b": 2, "a": 1}}
+
     def test_system_exception_from_earlier_retry_excluded(self):
         skill = make_skill("s1", 1, Status.FAILED)
         skill.exceptions = [sys_("old", retry=0), sys_("current", retry=1)]
@@ -295,6 +304,16 @@ class TestRenderText:
 
         assert "Created:     unknown" in text
 
+    def test_metadata_is_shown(self):
+        tx = make_transaction()
+        tx.metadata = {"customer": "acme", "nested": {"b": 2, "a": 1}}
+
+        text = render_text(generate_report(tx))
+
+        assert "Metadata:" in text
+        assert '  customer: "acme"' in text
+        assert '  nested: {"a": 1, "b": 2}' in text
+
 
 # ---------------------------------------------------------------------------
 # TestRenderHTML
@@ -388,6 +407,16 @@ class TestRenderHTML:
         html = render_html(generate_report(tx))
 
         assert "Finished: unknown" in html
+
+    def test_metadata_is_shown_and_escaped(self):
+        tx = make_transaction()
+        tx.metadata = {"customer": "<acme>", "nested": {"b": 2, "a": 1}}
+
+        html = render_html(generate_report(tx))
+
+        assert "<h3>Metadata</h3>" in html
+        assert "&lt;acme&gt;" in html
+        assert "{&quot;a&quot;: 1, &quot;b&quot;: 2}" in html
 
 
 # ---------------------------------------------------------------------------

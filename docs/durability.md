@@ -33,6 +33,19 @@ runtime objects toward `ProcessContext.resources` or durable artifact paths.
 sessions, handles, and open files. Resources are never persisted with
 transactions and are not included in reports or notifications.
 
+`Transaction.metadata` is a JSON-safe, transaction-owned mapping for durable
+tags and descriptors used outside skill execution. Metadata is persisted with
+the transaction, but it is not exposed through `ProcessContext.state` and should
+not be used as mutable workflow state. `save_transaction()` validates metadata
+with the same JSON-safe value rules as transaction state, and validation errors
+include the offending `transaction.metadata[...]` path.
+
+SQLite stores top-level metadata entries in a dedicated table as canonical JSON
+values. `list_transactions(..., metadata_filter={...})` supports deterministic
+exact-match filters on those top-level entries, including list and object values.
+The filter is intentionally limited: it does not provide nested path queries,
+partial matches, or SQLite JSON-extension behavior.
+
 Queue resource lifecycle:
 
 - queue item payload populates `ctx.state`
@@ -153,7 +166,7 @@ The current transaction persistence component is recorded as:
 
 ```text
 component = "transactions"
-version   = 3
+version   = 4
 ```
 
 The SQLite queue records its own component version:

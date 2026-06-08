@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import string
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -47,6 +48,7 @@ class TransactionReport:
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    metadata: dict[str, object] = field(default_factory=dict)
     history: list[HistoryEntry] = field(default_factory=list)
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -89,12 +91,17 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         created_at=transaction.created_at,
         started_at=transaction.started_at,
         finished_at=transaction.finished_at,
+        metadata=dict(transaction.metadata),
         history=list(transaction.history),
     )
 
 
 def _format_dt(value: datetime | None) -> str:
     return "unknown" if value is None else value.isoformat()
+
+
+def _format_json_value(value: object) -> str:
+    return json.dumps(value, sort_keys=True)
 
 
 def render_text(report: TransactionReport) -> str:
@@ -120,6 +127,10 @@ def render_text(report: TransactionReport) -> str:
                 lines.append(f"             action: {exc.action}")
             if exc.screenshot_path:
                 lines.append(f"             screenshot: {exc.screenshot_path}")
+    if report.metadata:
+        lines.extend(["", "Metadata:"])
+        for key in sorted(report.metadata):
+            lines.append(f"  {key}: {_format_json_value(report.metadata[key])}")
     if report.history:
         lines.extend(["", "History:"])
         for entry in report.history:
@@ -149,6 +160,7 @@ h2{margin-bottom:.25rem}
 .in-progress{border-color:#2196f3}
 .exc{margin:.25rem 0 .25rem 1.5rem;font-size:.9em}
 .biz{color:#e65100}.sys{color:#b71c1c}
+.metadata{margin-top:1rem}.metadata li{margin:.25rem 0}
 .history{margin-top:1rem}.history li{margin:.25rem 0}
 </style>
 </head>
@@ -158,6 +170,7 @@ h2{margin-bottom:.25rem}
 <p>Created: $created_at &nbsp; Started: $started_at &nbsp; Finished: $finished_at</p>
 <p>ID: <code>$transaction_id</code></p>
 $skills_html
+$metadata_html
 $history_html
 </body>
 </html>"""
@@ -190,6 +203,23 @@ $history_items
 _HISTORY_ITEM_TEMPLATE = string.Template(
     """\
     <li><code>#$sequence</code> $timestamp $event status=$status retry=$retry_number$skill</li>"""
+)
+
+
+_METADATA_TEMPLATE = string.Template(
+    """\
+<section class="metadata">
+  <h3>Metadata</h3>
+  <ul>
+$metadata_items
+  </ul>
+</section>"""
+)
+
+
+_METADATA_ITEM_TEMPLATE = string.Template(
+    """\
+    <li><code>$key</code>: $value</li>"""
 )
 
 
@@ -260,6 +290,16 @@ def render_html(report: TransactionReport) -> str:
                 )
             )
         history_html = _HISTORY_TEMPLATE.substitute(history_items="\n".join(items))
+    metadata_html = ""
+    if report.metadata:
+        items = [
+            _METADATA_ITEM_TEMPLATE.substitute(
+                key=_esc(key),
+                value=_esc(_format_json_value(report.metadata[key])),
+            )
+            for key in sorted(report.metadata)
+        ]
+        metadata_html = _METADATA_TEMPLATE.substitute(metadata_items="\n".join(items))
     return _HTML_TEMPLATE.substitute(
         reference=_esc(report.reference),
         status=report.status,
@@ -270,5 +310,6 @@ def render_html(report: TransactionReport) -> str:
         finished_at=_esc(_format_dt(report.finished_at)),
         transaction_id=_esc(report.transaction_id),
         skills_html="\n".join(skills_parts),
+        metadata_html=metadata_html,
         history_html=history_html,
     )

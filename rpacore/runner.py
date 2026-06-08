@@ -23,7 +23,7 @@ from rpacore.persistence import save_transaction
 from rpacore.queue import QueueItem, QueueProvider
 from rpacore.report import generate_report
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEvent, Transaction
 
 
 _PERSISTENCE_SAVE_ATTEMPTS = 3
@@ -379,11 +379,11 @@ def _checkpoint_failure_allows_queue_retry(transaction: Transaction) -> bool:
         return True
     last_event = transaction.history[-1].event
     if last_event in (
-        "skill_succeeded",
-        "skill_skipped",
+        HistoryEvent.SKILL_SUCCEEDED,
+        HistoryEvent.SKILL_SKIPPED,
     ):
         return False
-    if last_event == "skill_failed":
+    if last_event == HistoryEvent.SKILL_FAILED:
         failed = transaction.failed_skills()
         return not any(
             skill.exceptions and isinstance(skill.exceptions[-1], BusinessException)
