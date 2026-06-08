@@ -28,7 +28,7 @@ from rpacore.report import SkillReport, TransactionReport, generate_report, rend
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEntry, HistoryEvent, Transaction
 
 __all__ = [
     "build_notifiers",
@@ -44,6 +44,8 @@ __all__ = [
     "ExecutionValidationError",
     "generate_report",
     "get_logger",
+    "HistoryEntry",
+    "HistoryEvent",
     "KeyringCredentialProvider",
     "Notifier",
     "list_transactions",

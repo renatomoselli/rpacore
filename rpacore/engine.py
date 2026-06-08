@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from datetime import datetime, timezone
 from typing import Literal
 
 from rpacore.context import ProcessContext
@@ -13,7 +14,7 @@ from rpacore.logger import get_logger
 from rpacore.screenshot import capture_screenshot
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEvent, Transaction
 
 
 class Engine:
@@ -71,33 +72,45 @@ class Engine:
             transaction.validate_for_execution()
         except ExecutionValidationError:
             transaction.status = Status.FAILED
+            transaction.finished_at = datetime.now(timezone.utc)
+            transaction.append_history(HistoryEvent.TRANSACTION_COMPLETED)
             raise
-        if transaction.status is Status.FAILED:
-            self._reset_skipped_skills(transaction)
+        initial_blocked = self._initial_blocked_skill_ids(transaction)
+        self._reset_skipped_skills(transaction)
         transaction.status = Status.IN_PROGRESS
+        if transaction.started_at is None:
+            transaction.started_at = datetime.now(timezone.utc)
+        transaction.finished_at = None
+        transaction.append_history(HistoryEvent.TRANSACTION_STARTED)
         self._log_transaction_started(transaction)
 
-        self._execute_pass(ctx, blocked=None)
+        try:
+            self._execute_pass(ctx, blocked=initial_blocked)
 
-        while transaction.retry_count < self.max_retries:
-            retryable = self._retryable_failed_skills(transaction)
-            if not retryable:
-                break
-            for skill in retryable:
-                skill.status = Status.PENDING
-            self._sleep_before_retry(transaction.retry_count)
-            transaction.retry_count += 1
-            # Block only business-failed skills; PENDING skills that never ran should also execute.
-            business_failed = {
-                id(s) for s in transaction.failed_skills()
-                if s.exceptions and isinstance(s.exceptions[-1], BusinessException)
-            }
-            self._execute_pass(ctx, blocked=business_failed)
+            while transaction.retry_count < self.max_retries:
+                retryable = self._retryable_failed_skills(transaction)
+                if not retryable:
+                    break
+                for skill in retryable:
+                    skill.status = Status.PENDING
+                transaction.append_history(HistoryEvent.RETRY_SCHEDULED)
+                self._sleep_before_retry(transaction.retry_count)
+                transaction.retry_count += 1
+                # Block only business-failed skills; PENDING skills that never ran should also execute.
+                self._execute_pass(ctx, blocked=self._business_failed_skill_ids(transaction))
+        except MemoryError:
+            transaction.status = Status.FAILED
+            if transaction.finished_at is None:
+                transaction.finished_at = datetime.now(timezone.utc)
+            transaction.append_history(HistoryEvent.TRANSACTION_COMPLETED)
+            raise
 
         if all(s.status in (Status.SUCCESSFUL, Status.SKIPPED) for s in transaction.skills):
             transaction.status = Status.SUCCESSFUL
         else:
             transaction.status = Status.FAILED
+        transaction.finished_at = datetime.now(timezone.utc)
+        transaction.append_history(HistoryEvent.TRANSACTION_COMPLETED)
         self._log_transaction_completed(transaction)
 
     def _sleep_before_retry(self, completed_retry_passes: int) -> None:
@@ -113,6 +126,19 @@ class Engine:
             s for s in transaction.failed_skills()
             if s.exceptions and isinstance(s.exceptions[-1], SystemException)
         ]
+
+    def _business_failed_skill_ids(self, transaction: Transaction) -> set[int]:
+        """Return failed skills that must not be re-executed."""
+        return {
+            id(s) for s in transaction.failed_skills()
+            if s.exceptions and isinstance(s.exceptions[-1], BusinessException)
+        }
+
+    def _initial_blocked_skill_ids(self, transaction: Transaction) -> set[int] | None:
+        """Return initial-pass blocks for recovered transactions."""
+        if transaction.history and transaction.history[-1].event is HistoryEvent.TRANSACTION_RESUMED:
+            return self._business_failed_skill_ids(transaction)
+        return None
 
     def _reset_skipped_skills(self, transaction: Transaction) -> None:
         """Make skipped work runnable when a failed transaction is explicitly re-run."""
@@ -140,16 +166,21 @@ class Engine:
                 continue
 
             skill.status = Status.IN_PROGRESS
+            transaction.append_history(HistoryEvent.SKILL_STARTED, skill=skill)
             self._log_skill_started(transaction, skill)
             try:
                 skill.execute(ctx)
                 if skill.status is not Status.SKIPPED:
                     skill.status = Status.SUCCESSFUL
+                    transaction.append_history(HistoryEvent.SKILL_SUCCEEDED, skill=skill)
+                else:
+                    transaction.append_history(HistoryEvent.SKILL_SKIPPED, skill=skill)
                 self._log_skill_completed(transaction, skill)
             except BusinessException as exc:
                 exc.retry_number = transaction.retry_count
                 skill.status = Status.FAILED
                 skill.exceptions.append(exc)
+                transaction.append_history(HistoryEvent.SKILL_FAILED, skill=skill)
                 if self.screenshot_dir:
                     exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 self._log_skill_failed(transaction, skill, exc, level="warning")
@@ -160,11 +191,14 @@ class Engine:
                 exc.retry_number = transaction.retry_count
                 skill.status = Status.FAILED
                 skill.exceptions.append(exc)
+                transaction.append_history(HistoryEvent.SKILL_FAILED, skill=skill)
                 if self.screenshot_dir:
                     exc.screenshot_path = capture_screenshot(self.screenshot_dir)
                 self._log_skill_failed(transaction, skill, exc, level="error")
                 break
             except MemoryError:
+                skill.status = Status.FAILED
+                transaction.append_history(HistoryEvent.SKILL_INTERRUPTED, skill=skill)
                 raise
             except Exception as exc:
                 wrapped = SystemException(
@@ -174,6 +208,7 @@ class Engine:
                 )
                 skill.status = Status.FAILED
                 skill.exceptions.append(wrapped)
+                transaction.append_history(HistoryEvent.SKILL_FAILED, skill=skill)
                 if self.screenshot_dir:
                     wrapped.screenshot_path = capture_screenshot(self.screenshot_dir)
                 self._log_skill_failed(transaction, skill, wrapped, level="error")
@@ -188,6 +223,8 @@ class Engine:
                 continue
             if should_skip and skill.status is Status.PENDING:
                 skill.status = Status.SKIPPED
+                transaction.append_history(HistoryEvent.SKILL_SKIPPED, skill=skill)
+                self._log_skill_completed(transaction, skill)
 
     def _log_transaction_started(self, transaction: Transaction) -> None:
         self.logger.info(

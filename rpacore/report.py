@@ -12,7 +12,7 @@ from rpacore.status import Status
 
 if TYPE_CHECKING:
     from rpacore.skill import Skill
-    from rpacore.transaction import Transaction
+    from rpacore.transaction import HistoryEntry, Transaction
 
 
 _ICONS: dict[Status, str] = {
@@ -44,6 +44,10 @@ class TransactionReport:
     status: Status
     retry_count: int
     skills: list[SkillReport]
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    history: list[HistoryEntry] = field(default_factory=list)
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -82,7 +86,15 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         status=transaction.status,
         retry_count=transaction.retry_count,
         skills=skill_reports,
+        created_at=transaction.created_at,
+        started_at=transaction.started_at,
+        finished_at=transaction.finished_at,
+        history=list(transaction.history),
     )
+
+
+def _format_dt(value: datetime | None) -> str:
+    return "unknown" if value is None else value.isoformat()
 
 
 def render_text(report: TransactionReport) -> str:
@@ -90,6 +102,9 @@ def render_text(report: TransactionReport) -> str:
     lines = [
         f"Transaction: {report.reference} ({report.transaction_id})",
         f"Status:      {report.status}  Retries: {report.retry_count}",
+        f"Created:     {_format_dt(report.created_at)}",
+        f"Started:     {_format_dt(report.started_at)}",
+        f"Finished:    {_format_dt(report.finished_at)}",
         f"Generated:   {report.generated_at.isoformat()}",
         "",
     ]
@@ -105,6 +120,16 @@ def render_text(report: TransactionReport) -> str:
                 lines.append(f"             action: {exc.action}")
             if exc.screenshot_path:
                 lines.append(f"             screenshot: {exc.screenshot_path}")
+    if report.history:
+        lines.extend(["", "History:"])
+        for entry in report.history:
+            skill = ""
+            if entry.skill_name:
+                skill = f" skill={entry.skill_name} order={entry.skill_execution_order}"
+            lines.append(
+                f"  #{entry.sequence} {entry.timestamp.isoformat()} "
+                f"{entry.event} status={entry.status} retry={entry.retry_number}{skill}"
+            )
     return "\n".join(lines)
 
 
@@ -124,13 +149,16 @@ h2{margin-bottom:.25rem}
 .in-progress{border-color:#2196f3}
 .exc{margin:.25rem 0 .25rem 1.5rem;font-size:.9em}
 .biz{color:#e65100}.sys{color:#b71c1c}
+.history{margin-top:1rem}.history li{margin:.25rem 0}
 </style>
 </head>
 <body>
 <h2>$reference</h2>
 <p>Status: <strong>$status</strong> &nbsp; Retries: $retry_count &nbsp; Generated: $generated_at</p>
+<p>Created: $created_at &nbsp; Started: $started_at &nbsp; Finished: $finished_at</p>
 <p>ID: <code>$transaction_id</code></p>
 $skills_html
+$history_html
 </body>
 </html>"""
 )
@@ -146,6 +174,22 @@ _SKILL_TEMPLATE = string.Template(
 _EXC_TEMPLATE = string.Template(
     """\
 <div class="exc $exc_class"><strong>[$kind]</strong> retry=$retry_number: $message$action_html$screenshot_html</div>"""
+)
+
+
+_HISTORY_TEMPLATE = string.Template(
+    """\
+<section class="history">
+  <h3>History</h3>
+  <ol>
+$history_items
+  </ol>
+</section>"""
+)
+
+_HISTORY_ITEM_TEMPLATE = string.Template(
+    """\
+    <li><code>#$sequence</code> $timestamp $event status=$status retry=$retry_number$skill</li>"""
 )
 
 
@@ -195,11 +239,36 @@ def render_html(report: TransactionReport) -> str:
                 exceptions_html="\n  ".join(exc_parts),
             )
         )
+    history_html = ""
+    if report.history:
+        items: list[str] = []
+        for entry in report.history:
+            skill = ""
+            if entry.skill_name:
+                skill = (
+                    f" skill={_esc(entry.skill_name)}"
+                    f" order={entry.skill_execution_order}"
+                )
+            items.append(
+                _HISTORY_ITEM_TEMPLATE.substitute(
+                    sequence=entry.sequence,
+                    timestamp=_esc(entry.timestamp.isoformat()),
+                    event=_esc(str(entry.event)),
+                    status=_esc(str(entry.status)),
+                    retry_number=entry.retry_number,
+                    skill=skill,
+                )
+            )
+        history_html = _HISTORY_TEMPLATE.substitute(history_items="\n".join(items))
     return _HTML_TEMPLATE.substitute(
         reference=_esc(report.reference),
         status=report.status,
         retry_count=report.retry_count,
         generated_at=_esc(report.generated_at.isoformat()),
+        created_at=_esc(_format_dt(report.created_at)),
+        started_at=_esc(_format_dt(report.started_at)),
+        finished_at=_esc(_format_dt(report.finished_at)),
         transaction_id=_esc(report.transaction_id),
         skills_html="\n".join(skills_parts),
+        history_html=history_html,
     )

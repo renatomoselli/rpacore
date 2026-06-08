@@ -2,18 +2,18 @@
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 
 from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore.exceptions import BusinessException, SystemException
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEntry, HistoryEvent, Transaction
 
 
 _SCHEMA_TABLE = "rpacore_schema_versions"
 _TRANSACTION_SCHEMA_COMPONENT = "transactions"
-_TRANSACTION_SCHEMA_VERSION = 2
+_TRANSACTION_SCHEMA_VERSION = 3
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -78,10 +78,6 @@ def _migrate_transactions_to_v1(conn: sqlite3.Connection) -> None:
         )
     """)
     _ensure_column(conn, "transactions", "created_at", "created_at TEXT NOT NULL DEFAULT ''")
-    conn.execute(
-        "UPDATE transactions SET created_at = ? WHERE created_at = ''",
-        (datetime.now(timezone.utc).isoformat(),),
-    )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS skills (
             id              TEXT PRIMARY KEY,
@@ -122,6 +118,41 @@ def _migrate_transactions_to_v2(conn: sqlite3.Connection) -> None:
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 2)
 
 
+def _migrate_transactions_to_v3(conn: sqlite3.Connection) -> None:
+    """Add truthful transaction timestamps and append-only history storage."""
+    _ensure_column(conn, "transactions", "started_at", "started_at TEXT")
+    _ensure_column(conn, "transactions", "finished_at", "finished_at TEXT")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transaction_history (
+            transaction_id        TEXT NOT NULL,
+            sequence              INTEGER NOT NULL,
+            timestamp             TEXT NOT NULL,
+            event                 TEXT NOT NULL CHECK (
+                event IN (
+                    'transaction_started',
+                    'skill_started',
+                    'skill_succeeded',
+                    'skill_failed',
+                    'skill_skipped',
+                    'skill_interrupted',
+                    'retry_scheduled',
+                    'transaction_resumed',
+                    'transaction_completed'
+                )
+            ),
+            status                TEXT NOT NULL CHECK (
+                status IN ('pending', 'in_progress', 'successful', 'failed', 'skipped')
+            ),
+            retry_number          INTEGER NOT NULL,
+            skill_name            TEXT NOT NULL DEFAULT '',
+            skill_execution_order INTEGER,
+            PRIMARY KEY (transaction_id, sequence),
+            FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+        )
+    """)
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 3)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run explicit transaction schema migrations through the latest version."""
     with conn:
@@ -138,6 +169,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 2:
             _migrate_transactions_to_v2(conn)
             current_version = 2
+        if current_version < 3:
+            _migrate_transactions_to_v3(conn)
+            current_version = 3
         if current_version != _TRANSACTION_SCHEMA_VERSION:
             raise RuntimeError(
                 "Unsupported transaction schema version "
@@ -161,6 +195,47 @@ def _load_transaction_state(row: sqlite3.Row) -> dict[str, object]:
     return state
 
 
+def _timestamp_to_storage(value: datetime | None) -> str:
+    return "" if value is None else value.isoformat()
+
+
+def _timestamp_from_storage(value: str | None, *, path: str, transaction_id: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise SystemException(
+            f"Persisted transaction timestamp is invalid for transaction {transaction_id!r} "
+            f"at {path}: {value!r}",
+            action="repair transaction timestamps in the persistence database",
+        ) from exc
+
+
+def _load_history(transaction_id: str, rows: list[sqlite3.Row]) -> list[HistoryEntry]:
+    history: list[HistoryEntry] = []
+    for row in rows:
+        try:
+            history.append(
+                HistoryEntry(
+                    sequence=row["sequence"],
+                    timestamp=datetime.fromisoformat(row["timestamp"]),
+                    event=HistoryEvent(row["event"]),
+                    status=Status(row["status"]),
+                    retry_number=row["retry_number"],
+                    skill_name=row["skill_name"],
+                    skill_execution_order=row["skill_execution_order"],
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise SystemException(
+                f"Persisted transaction history is invalid for transaction {transaction_id!r} "
+                f"at sequence {row['sequence']!r}: {exc}",
+                action="repair transaction history in the persistence database",
+            ) from exc
+    return history
+
+
 def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> None:
     """Persist a transaction and all its skills and exceptions.
 
@@ -173,33 +248,41 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
     conn = _connect(db_path)
     try:
         _ensure_schema(conn)
-        now_iso = datetime.now(timezone.utc).isoformat()
         with conn:
             # INSERT OR IGNORE creates the row when needed; the UPDATE below
             # preserves an existing created_at unless a legacy row needs backfill.
+            created_at = _timestamp_to_storage(transaction.created_at)
+            started_at = _timestamp_to_storage(transaction.started_at)
+            finished_at = _timestamp_to_storage(transaction.finished_at)
+
             conn.execute(
                 "INSERT OR IGNORE INTO transactions "
-                "(id, reference, status, retry_count, created_at, state) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, reference, status, retry_count, created_at, started_at, finished_at, state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     transaction.id,
                     transaction.reference,
                     transaction.status,
                     transaction.retry_count,
-                    now_iso,
+                    created_at,
+                    started_at or None,
+                    finished_at or None,
                     state_json,
                 ),
             )
             conn.execute(
                 "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
                 "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END, "
+                "started_at = ?, finished_at = ?, "
                 "state = ? "
                 "WHERE id = ?",
                 (
                     transaction.reference,
                     transaction.status,
                     transaction.retry_count,
-                    now_iso,
+                    created_at,
+                    started_at or None,
+                    finished_at or None,
                     state_json,
                     transaction.id,
                 ),
@@ -238,6 +321,23 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
                             1 if exc.stops_execution else 0,
                         ),
                     )
+            for entry in transaction.history:
+                conn.execute(
+                    "INSERT OR IGNORE INTO transaction_history "
+                    "(transaction_id, sequence, timestamp, event, status, retry_number, "
+                    "skill_name, skill_execution_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        transaction.id,
+                        entry.sequence,
+                        entry.timestamp.isoformat(),
+                        entry.event,
+                        entry.status,
+                        entry.retry_number,
+                        entry.skill_name,
+                        entry.skill_execution_order,
+                    ),
+                )
     finally:
         conn.close()
 
@@ -252,7 +352,8 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
     try:
         _ensure_schema(conn)
         row = conn.execute(
-            "SELECT id, reference, status, retry_count, state FROM transactions WHERE id = ?",
+            "SELECT id, reference, status, retry_count, created_at, started_at, finished_at, state "
+            "FROM transactions WHERE id = ?",
             (transaction_id,),
         ).fetchone()
         if row is None:
@@ -304,13 +405,31 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
         if tx_status == Status.IN_PROGRESS:
             tx_status = Status.FAILED
 
+        history_rows = conn.execute(
+            "SELECT sequence, timestamp, event, status, retry_number, "
+            "skill_name, skill_execution_order FROM transaction_history "
+            "WHERE transaction_id = ? ORDER BY sequence",
+            (transaction_id,),
+        ).fetchall()
+        history = _load_history(transaction_id, history_rows)
+
         return Transaction(
             reference=row["reference"],
             id=row["id"],
             status=tx_status,
             retry_count=row["retry_count"],
+            created_at=_timestamp_from_storage(
+                row["created_at"], path="transactions.created_at", transaction_id=transaction_id
+            ),
+            started_at=_timestamp_from_storage(
+                row["started_at"], path="transactions.started_at", transaction_id=transaction_id
+            ),
+            finished_at=_timestamp_from_storage(
+                row["finished_at"], path="transactions.finished_at", transaction_id=transaction_id
+            ),
             state=transaction_state,
             skills=skills,
+            history=history,
         )
     finally:
         conn.close()

@@ -45,6 +45,50 @@ Queue resource lifecycle:
 - resource setup failures prevent queue claims
 - resource cleanup failures propagate after already-decided queue outcomes
 
+## Timestamps and History
+
+`Transaction.created_at` is set when a new transaction object is constructed.
+It records local object creation, not a durable checkpoint. Legacy persisted
+transactions that predate this field expose `created_at=None` when the original
+creation time is unknown.
+
+`Transaction.started_at` records the current execution window start.
+`Transaction.finished_at` records terminal completion and is cleared, along
+with `started_at`, when a non-successful transaction is explicitly resumed.
+
+`Transaction.history` is an append-only audit trail persisted separately from
+logs. Each `HistoryEntry` has a transaction-local `sequence`, UTC `timestamp`,
+closed `HistoryEvent`, resulting `status`, `retry_number`, and optional skill
+identity.
+
+The v0.1.0 history vocabulary is closed:
+
+- `transaction_started`
+- `skill_started`
+- `skill_succeeded`
+- `skill_failed`
+- `skill_skipped`
+- `skill_interrupted`
+- `retry_scheduled`
+- `transaction_resumed`
+- `transaction_completed`
+
+History entries are persisted audit records, not an in-process event bus.
+Repeated `save_transaction()` calls do not duplicate history rows.
+
+## Resume Behavior
+
+`resume_transaction()` reloads a persisted transaction and reattaches executable
+skill instances supplied by the caller. Successful skills remain successful.
+Failed skills whose latest exception is a `SystemException` are reset to
+`PENDING` so they can be retried after recovery. Failed skills whose latest
+exception is a `BusinessException` remain `FAILED`; bad input or business-rule
+failures are terminal until user code or durable state is changed explicitly.
+When the resumed transaction is passed to `Engine.run()`, those recovered
+business-failed skills are not re-executed.
+Pending and skipped skills in a non-successful transaction are reset to
+`PENDING`.
+
 ## Transaction Persistence
 
 Transaction history is written through:
@@ -102,7 +146,7 @@ The current transaction persistence component is recorded as:
 
 ```text
 component = "transactions"
-version   = 2
+version   = 3
 ```
 
 The SQLite queue records its own component version:
@@ -119,7 +163,7 @@ independent.
 ## Migrations
 
 Transaction schema migrations are explicit and sequential. The current latest
-transaction schema is version 2.
+transaction schema is version 3.
 
 Version 1 stores:
 
@@ -137,16 +181,25 @@ This migration is additive and forward-only. Rolling back to version 1 code
 means the older code can coexist with the extra `transactions.state` column, but
 the schema version remains recorded as version 2.
 
+Version 3 adds:
+
+- transaction `started_at`
+- transaction `finished_at`
+- append-only `transaction_history`
+
 Private-development databases created before component schema versions are still
-readable. When opened, they are migrated to transaction schema version 2 by
+readable. When opened, they are migrated to transaction schema version 3 by
 adding missing columns and recording the component version.
 
 Migration defaults must not invent execution history. Current legacy defaults
 are deliberately limited:
 
-- missing `transactions.created_at` is backfilled so list filtering can work
+- missing `transactions.created_at` remains explicitly unknown
 - missing `exceptions.stops_execution` defaults to `false`
 - missing `transactions.state` defaults to an empty object
+- missing `transactions.started_at` and `transactions.finished_at` remain
+  explicitly unknown
+- missing history defaults to no history entries
 
 Future persisted models must add fixture-based migration tests from the previous
 latest schema to the new latest schema.

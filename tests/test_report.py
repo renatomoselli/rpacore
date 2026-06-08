@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from rpacore.exceptions import BusinessException, SystemException
-from rpacore.persistence import list_transactions, save_transaction
+from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.report import (
     SkillReport,
     TransactionReport,
@@ -17,7 +17,7 @@ from rpacore.report import (
 )
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEvent, Transaction
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +89,28 @@ class TestGenerateReport:
 
         assert len(report.skills[0].exceptions) == 1
         assert str(report.skills[0].exceptions[0]) == "last"
+
+    def test_report_includes_timestamps_and_history(self):
+        tx = make_transaction()
+        tx.started_at = tx.created_at
+        tx.finished_at = tx.created_at
+        tx.append_history(HistoryEvent.TRANSACTION_STARTED)
+
+        report = generate_report(tx)
+
+        assert report.created_at == tx.created_at
+        assert report.started_at == tx.started_at
+        assert report.finished_at == tx.finished_at
+        assert report.history == tx.history
+
+    def test_report_history_is_a_defensive_copy(self):
+        tx = make_transaction()
+        tx.append_history(HistoryEvent.TRANSACTION_STARTED)
+
+        report = generate_report(tx)
+        report.history.clear()
+
+        assert len(tx.history) == 1
 
     def test_system_exception_from_earlier_retry_excluded(self):
         skill = make_skill("s1", 1, Status.FAILED)
@@ -244,6 +266,35 @@ class TestRenderText:
         assert "write_output" in text
         assert "skipped" in text
 
+    def test_timestamps_and_history_are_shown(self):
+        tx = make_transaction()
+        tx.started_at = tx.created_at
+        tx.finished_at = tx.created_at
+        tx.append_history(HistoryEvent.TRANSACTION_STARTED)
+
+        text = render_text(generate_report(tx))
+
+        assert "Created:" in text
+        assert "Started:" in text
+        assert "Finished:" in text
+        assert "History:" in text
+        assert "transaction_started" in text
+
+    def test_empty_history_is_not_shown(self):
+        tx = make_transaction()
+
+        text = render_text(generate_report(tx))
+
+        assert "History:" not in text
+
+    def test_unknown_timestamp_is_shown(self):
+        tx = make_transaction()
+        tx.created_at = None
+
+        text = render_text(generate_report(tx))
+
+        assert "Created:     unknown" in text
+
 
 # ---------------------------------------------------------------------------
 # TestRenderHTML
@@ -308,6 +359,35 @@ class TestRenderHTML:
         html = render_html(generate_report(tx))
 
         assert "stop=true" in html
+
+    def test_timestamps_and_history_are_shown(self):
+        tx = make_transaction()
+        tx.started_at = tx.created_at
+        tx.finished_at = tx.created_at
+        tx.append_history(HistoryEvent.TRANSACTION_STARTED)
+
+        html = render_html(generate_report(tx))
+
+        assert "Created:" in html
+        assert "Started:" in html
+        assert "Finished:" in html
+        assert "History" in html
+        assert "transaction_started" in html
+
+    def test_empty_history_is_not_shown(self):
+        tx = make_transaction()
+
+        html = render_html(generate_report(tx))
+
+        assert 'class="history"' not in html
+
+    def test_unknown_timestamp_is_shown(self):
+        tx = make_transaction()
+        tx.finished_at = None
+
+        html = render_html(generate_report(tx))
+
+        assert "Finished: unknown" in html
 
 
 # ---------------------------------------------------------------------------
@@ -400,9 +480,8 @@ class TestListTransactions:
         assert len(result) == 1
         assert result[0].reference == "after-fail"
 
-    def test_legacy_row_gets_created_at_backfilled(self, tmp_path):
-        """Rows migrated from a pre-created_at schema (created_at='') get a real
-        timestamp on the next save_transaction() call, so since= queries find them."""
+    def test_legacy_row_with_unknown_created_at_is_not_backfilled(self, tmp_path):
+        """Rows migrated from a pre-created_at schema keep unknown created_at."""
         import sqlite3
 
         db = str(tmp_path / "rpacore.db")
@@ -444,13 +523,10 @@ class TestListTransactions:
 
         # Now call save_transaction() — this should backfill created_at.
         cutoff = datetime.now(timezone.utc)
-        tx = Transaction(reference="legacy-ref")
-        tx.id = legacy_id
-        tx.status = Status.SUCCESSFUL
+        tx = load_transaction(legacy_id, db)
+        assert tx.created_at is None
         save_transaction(tx, db)
 
         # The row should now be findable via since= filter.
         result = list_transactions(db, since=cutoff)
-        assert any(t.id == legacy_id for t in result), (
-            "Legacy row with created_at='' was not backfilled; since= filter missed it"
-        )
+        assert all(t.id != legacy_id for t in result)

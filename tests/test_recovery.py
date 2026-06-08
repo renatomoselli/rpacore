@@ -4,12 +4,12 @@ import pytest
 
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
-from rpacore.exceptions import SystemException
+from rpacore.exceptions import BusinessException, SystemException
 from rpacore.persistence import save_transaction
 from rpacore.recovery import resume_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEvent, Transaction
 
 
 @pytest.fixture
@@ -55,6 +55,9 @@ def test_resume_reruns_only_non_successful_skills(db_path) -> None:
     )
 
     assert resumed.status is Status.PENDING
+    assert resumed.started_at is None
+    assert resumed.finished_at is None
+    assert resumed.history[-1].event is HistoryEvent.TRANSACTION_RESUMED
     assert [skill.status for skill in resumed.skills] == [
         Status.SUCCESSFUL,
         Status.PENDING,
@@ -68,12 +71,49 @@ def test_resume_reruns_only_non_successful_skills(db_path) -> None:
     assert resumed.status is Status.SUCCESSFUL
 
 
+def test_resume_does_not_rerun_business_failed_skills(db_path) -> None:
+    counts: dict[str, int] = {}
+
+    failed = Skill("failed", 1)
+    failed.status = Status.FAILED
+    failed.exceptions.append(BusinessException("bad data", action="failed"))
+    next_skill = Skill("next", 2)
+    next_skill.status = Status.PENDING
+
+    tx = Transaction(
+        reference="REF-001",
+        status=Status.FAILED,
+        skills=[failed, next_skill],
+    )
+    save_transaction(tx, db_path)
+
+    resumed = resume_transaction(
+        tx.id,
+        [
+            _TrackingSkill("failed", 1, counts),
+            _TrackingSkill("next", 2, counts),
+        ],
+        db_path=db_path,
+    )
+
+    assert resumed.skills[0].status is Status.FAILED
+    assert resumed.skills[1].status is Status.PENDING
+
+    Engine().run(ProcessContext(transaction=resumed))
+
+    assert counts == {"next": 1}
+    assert resumed.skills[0].status is Status.FAILED
+    assert resumed.status is Status.FAILED
+
+
 def test_resume_successful_transaction_is_effective_no_op(db_path) -> None:
     counts: dict[str, int] = {}
 
     skill = Skill("done", 1)
     skill.status = Status.SUCCESSFUL
     tx = Transaction(reference="REF-001", status=Status.SUCCESSFUL, skills=[skill])
+    tx.started_at = tx.created_at
+    tx.finished_at = tx.created_at
     save_transaction(tx, db_path)
 
     resumed = resume_transaction(
@@ -84,6 +124,8 @@ def test_resume_successful_transaction_is_effective_no_op(db_path) -> None:
 
     assert resumed.status is Status.SUCCESSFUL
     assert resumed.skills[0].status is Status.SUCCESSFUL
+    assert resumed.started_at == tx.started_at
+    assert resumed.finished_at == tx.finished_at
 
     Engine().run(ProcessContext(transaction=resumed))
 

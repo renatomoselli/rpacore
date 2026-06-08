@@ -4,10 +4,39 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import StrEnum
 
 from rpacore.exceptions import ExecutionValidationError
 from rpacore.skill import Skill
 from rpacore.status import Status
+
+
+class HistoryEvent(StrEnum):
+    """Closed v0.1.0 vocabulary for durable transaction history."""
+
+    TRANSACTION_STARTED = "transaction_started"
+    SKILL_STARTED = "skill_started"
+    SKILL_SUCCEEDED = "skill_succeeded"
+    SKILL_FAILED = "skill_failed"
+    SKILL_SKIPPED = "skill_skipped"
+    SKILL_INTERRUPTED = "skill_interrupted"
+    RETRY_SCHEDULED = "retry_scheduled"
+    TRANSACTION_RESUMED = "transaction_resumed"
+    TRANSACTION_COMPLETED = "transaction_completed"
+
+
+@dataclass(frozen=True)
+class HistoryEntry:
+    """An immutable durable audit entry for a transaction state transition."""
+
+    sequence: int
+    timestamp: datetime
+    event: HistoryEvent
+    status: Status
+    retry_number: int
+    skill_name: str = ""
+    skill_execution_order: int | None = None
 
 
 @dataclass
@@ -23,14 +52,19 @@ class Transaction:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     status: Status = Status.PENDING
     retry_count: int = 0
+    created_at: datetime | None = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
     state: dict[str, object] = field(default_factory=dict)
     skills: list[Skill] = field(default_factory=list)
+    history: list[HistoryEntry] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.retry_count < 0:
             raise ValueError(f"retry_count must be >= 0, got {self.retry_count}")
         self.state = dict(self.state)
         self.skills = list(self.skills)
+        self.history = list(self.history)
 
     def ordered_skills(self) -> list[Skill]:
         """Return skills sorted by execution_order."""
@@ -39,6 +73,28 @@ class Transaction:
     def failed_skills(self) -> list[Skill]:
         """Return skills with status FAILED."""
         return [s for s in self.skills if s.status == Status.FAILED]
+
+    def append_history(
+        self,
+        event: HistoryEvent,
+        *,
+        status: Status | None = None,
+        retry_number: int | None = None,
+        skill: Skill | None = None,
+        timestamp: datetime | None = None,
+    ) -> HistoryEntry:
+        """Append and return a transaction-local durable history entry."""
+        entry = HistoryEntry(
+            sequence=len(self.history) + 1,
+            timestamp=timestamp or datetime.now(timezone.utc),
+            event=event,
+            status=status if status is not None else self.status,
+            retry_number=retry_number if retry_number is not None else self.retry_count,
+            skill_name="" if skill is None else skill.name,
+            skill_execution_order=None if skill is None else skill.execution_order,
+        )
+        self.history.append(entry)
+        return entry
 
     def validate_for_execution(self) -> None:
         """Validate transaction wiring before Engine starts skill execution."""

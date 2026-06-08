@@ -7,7 +7,7 @@ from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEvent, Transaction
 
 
 def _ctx(tx: Transaction) -> ProcessContext:
@@ -48,6 +48,22 @@ class TestEngineHappyPath:
         Engine().run(_ctx(tx))
         assert tx.status is Status.SUCCESSFUL
         assert all(s.status is Status.SUCCESSFUL for s in tx.skills)
+
+    def test_successful_run_records_timestamps_and_history(self) -> None:
+        tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
+
+        Engine().run(_ctx(tx))
+
+        assert tx.created_at is not None
+        assert tx.started_at is not None
+        assert tx.finished_at is not None
+        assert [entry.event for entry in tx.history] == [
+            HistoryEvent.TRANSACTION_STARTED,
+            HistoryEvent.SKILL_STARTED,
+            HistoryEvent.SKILL_SUCCEEDED,
+            HistoryEvent.TRANSACTION_COMPLETED,
+        ]
+        assert [entry.sequence for entry in tx.history] == [1, 2, 3, 4]
 
     def test_context_shared_between_skills(self) -> None:
         tx = Transaction(
@@ -139,6 +155,13 @@ class TestEngineBusinessException:
 
         assert tx.skills[0].status is Status.FAILED
         assert tx.skills[1].status is Status.SKIPPED
+        assert [entry.event for entry in tx.history] == [
+            HistoryEvent.TRANSACTION_STARTED,
+            HistoryEvent.SKILL_STARTED,
+            HistoryEvent.SKILL_FAILED,
+            HistoryEvent.SKILL_SKIPPED,
+            HistoryEvent.TRANSACTION_COMPLETED,
+        ]
 
     def test_stopping_business_exception_marks_transaction_failed(self) -> None:
         tx = Transaction(
@@ -289,7 +312,32 @@ class TestEngineStateTransitions:
         Engine().run(_ctx(tx))
         assert captured == [Status.IN_PROGRESS]
 
-    def test_skipped_skills_not_executed(self) -> None:
+    def test_initial_blocked_skill_ids_returns_none_for_non_resumed_transaction(self) -> None:
+        tx = Transaction(reference="T1")
+
+        result = Engine()._initial_blocked_skill_ids(tx)
+
+        assert result is None
+
+    def test_initial_blocked_skill_ids_returns_business_failures_for_resumed_transaction(self) -> None:
+        business_failed = Skill("business", 1)
+        business_failed.status = Status.FAILED
+        business_failed.exceptions.append(BusinessException("bad data", action="business"))
+        system_failed = Skill("system", 2)
+        system_failed.status = Status.FAILED
+        system_failed.exceptions.append(SystemException("timeout", action="system"))
+        tx = Transaction(
+            reference="T1",
+            status=Status.PENDING,
+            skills=[business_failed, system_failed],
+        )
+        tx.append_history(HistoryEvent.TRANSACTION_RESUMED)
+
+        result = Engine()._initial_blocked_skill_ids(tx)
+
+        assert result == {id(business_failed)}
+
+    def test_preexisting_skipped_skills_are_reset_before_run(self) -> None:
         order: list[str] = []
 
         class TrackSkill(Skill):
@@ -303,8 +351,8 @@ class TestEngineStateTransitions:
 
         tx = Transaction(reference="T1", skills=[s1, s2, s3])
         Engine().run(_ctx(tx))
-        assert order == ["a", "c"]
-        assert s2.status is Status.SKIPPED
+        assert order == ["a", "b", "c"]
+        assert s2.status is Status.SUCCESSFUL
 
     def test_successful_skills_not_re_executed(self) -> None:
         order: list[str] = []
@@ -327,6 +375,7 @@ class TestEngineStateTransitions:
         tx = Transaction(reference="T1", skills=[s1])
         Engine().run(_ctx(tx))
         assert tx.status is Status.SUCCESSFUL
+        assert s1.status is Status.SUCCESSFUL
 
     def test_skill_can_mark_itself_skipped_during_execute(self) -> None:
         s1 = SkipSkill("optional", 1)
@@ -356,6 +405,9 @@ class TestEngineStateTransitions:
 
         assert effects == []
         assert tx.status is Status.FAILED
+        assert tx.finished_at is not None
+        assert tx.history[-1].event is HistoryEvent.TRANSACTION_COMPLETED
+        assert tx.history[-1].status is Status.FAILED
 
 
 class TestEngineDirectSkillExecution:
@@ -386,7 +438,16 @@ class TestEngineDirectSkillExecution:
             Engine().run(_ctx(tx))
 
         assert skill.exceptions == []
-        assert skill.status is Status.IN_PROGRESS
+        assert skill.status is Status.FAILED
+        assert tx.status is Status.FAILED
+        assert tx.finished_at is not None
+        assert [entry.event for entry in tx.history] == [
+            HistoryEvent.TRANSACTION_STARTED,
+            HistoryEvent.SKILL_STARTED,
+            HistoryEvent.SKILL_INTERRUPTED,
+            HistoryEvent.TRANSACTION_COMPLETED,
+        ]
+        assert tx.history[-1].status is Status.FAILED
 
     def test_screenshot_memory_error_preserves_business_failure_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _fail_screenshot(directory: str) -> str:
@@ -399,9 +460,13 @@ class TestEngineDirectSkillExecution:
         with pytest.raises(MemoryError, match="out of memory"):
             Engine(screenshot_dir="screenshots").run(_ctx(tx))
 
+        assert tx.status is Status.FAILED
+        assert tx.finished_at is not None
         assert skill.status is Status.FAILED
         assert len(skill.exceptions) == 1
         assert isinstance(skill.exceptions[0], BusinessException)
+        assert tx.history[-1].event is HistoryEvent.TRANSACTION_COMPLETED
+        assert tx.history[-1].status is Status.FAILED
 
 
 class TestEngineRetry:
@@ -471,6 +536,7 @@ class TestEngineRetry:
         assert tx.status is Status.SUCCESSFUL
         assert tx.retry_count == 1
         assert len(attempts) == 2
+        assert HistoryEvent.RETRY_SCHEDULED in [entry.event for entry in tx.history]
 
     def test_retry_count_increments_per_pass(self) -> None:
         tx = Transaction(

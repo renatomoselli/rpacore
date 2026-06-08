@@ -26,6 +26,10 @@ class TestPackageVersion:
         assert isinstance(rpacore.__version__, str)
         assert rpacore.__version__
 
+    def test_history_types_are_reexported(self) -> None:
+        assert rpacore.HistoryEntry.__name__ == "HistoryEntry"
+        assert rpacore.HistoryEvent.TRANSACTION_STARTED == "transaction_started"
+
 
 class TestCli:
     def test_version_command_prints_version(self, capsys) -> None:

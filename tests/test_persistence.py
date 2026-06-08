@@ -10,7 +10,7 @@ from rpacore.exceptions import BusinessException, SystemException
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEvent, Transaction
 
 
 @pytest.fixture
@@ -130,6 +130,21 @@ def create_v1_db(db_path: str) -> str:
     return transaction_id
 
 
+def create_v2_db(db_path: str) -> str:
+    transaction_id = create_v1_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("ALTER TABLE transactions ADD COLUMN state TEXT NOT NULL DEFAULT '{}'")
+        conn.execute(
+            "UPDATE rpacore_schema_versions SET version = ? WHERE component = ?",
+            (2, "transactions"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return transaction_id
+
+
 class TestSaveAndLoad:
     def test_roundtrip_empty_transaction(self, db_path) -> None:
         tx = make_transaction()
@@ -158,6 +173,42 @@ class TestSaveAndLoad:
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
         assert loaded.state == {"invoice": {"id": 42}, "tags": ["new", "vip"]}
+
+    def test_roundtrip_preserves_transaction_timestamps(self, db_path) -> None:
+        tx = make_transaction()
+        tx.started_at = tx.created_at
+        tx.finished_at = tx.created_at
+
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+
+        assert loaded.created_at == tx.created_at
+        assert loaded.started_at == tx.started_at
+        assert loaded.finished_at == tx.finished_at
+
+    def test_roundtrip_preserves_history_order(self, db_path) -> None:
+        tx = make_transaction()
+        tx.append_history(HistoryEvent.TRANSACTION_STARTED)
+        tx.append_history(HistoryEvent.TRANSACTION_COMPLETED)
+
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+
+        assert [entry.sequence for entry in loaded.history] == [1, 2]
+        assert [entry.event for entry in loaded.history] == [
+            HistoryEvent.TRANSACTION_STARTED,
+            HistoryEvent.TRANSACTION_COMPLETED,
+        ]
+
+    def test_repeated_saves_do_not_duplicate_history(self, db_path) -> None:
+        tx = make_transaction()
+        tx.append_history(HistoryEvent.TRANSACTION_STARTED)
+
+        save_transaction(tx, db_path)
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+
+        assert [entry.sequence for entry in loaded.history] == [1]
 
     def test_save_rejects_non_json_safe_transaction_state(self, db_path) -> None:
         tx = make_transaction()
@@ -226,6 +277,85 @@ class TestSaveAndLoad:
             load_transaction(tx.id, db_path)
 
         assert "transaction.state expected JSON object" in str(exc_info.value)
+
+    def test_load_rejects_corrupt_transaction_timestamp(self, db_path) -> None:
+        tx = make_transaction()
+        save_transaction(tx, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("UPDATE transactions SET started_at = ? WHERE id = ?", ("not-a-date", tx.id))
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(SystemException) as exc_info:
+            load_transaction(tx.id, db_path)
+
+        assert "Persisted transaction timestamp is invalid" in str(exc_info.value)
+        assert exc_info.value.action == "repair transaction timestamps in the persistence database"
+
+    def test_load_rejects_corrupt_transaction_history(self, db_path) -> None:
+        tx = make_transaction()
+        save_transaction(tx, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("PRAGMA ignore_check_constraints = ON")
+            conn.execute(
+                "INSERT INTO transaction_history "
+                "(transaction_id, sequence, timestamp, event, status, retry_number, skill_name, skill_execution_order) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (tx.id, 1, "not-a-date", "transaction_started", "pending", 0, "", None),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(SystemException) as exc_info:
+            load_transaction(tx.id, db_path)
+
+        assert "Persisted transaction history is invalid" in str(exc_info.value)
+        assert exc_info.value.action == "repair transaction history in the persistence database"
+
+    def test_history_event_and_status_are_schema_constrained(self, db_path) -> None:
+        tx = make_transaction()
+        save_transaction(tx, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO transaction_history "
+                    "(transaction_id, sequence, timestamp, event, status, retry_number, skill_name, skill_execution_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        tx.id,
+                        1,
+                        tx.created_at.isoformat() if tx.created_at is not None else "",
+                        "bad_event",
+                        "pending",
+                        0,
+                        "",
+                        None,
+                    ),
+                )
+            conn.rollback()
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO transaction_history "
+                    "(transaction_id, sequence, timestamp, event, status, retry_number, skill_name, skill_execution_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        tx.id,
+                        1,
+                        tx.created_at.isoformat() if tx.created_at is not None else "",
+                        "transaction_started",
+                        "bad_status",
+                        0,
+                        "",
+                        None,
+                    ),
+                )
+        finally:
+            conn.close()
 
     def test_roundtrip_preserves_skills(self, db_path) -> None:
         s1 = Skill("login", 1)
@@ -480,7 +610,11 @@ class TestSchemaMigration:
         assert loaded.reference == "legacy-ref"
         assert loaded.status is Status.FAILED
         assert loaded.retry_count == 2
+        assert loaded.created_at is None
+        assert loaded.started_at is None
+        assert loaded.finished_at is None
         assert loaded.state == {}
+        assert loaded.history == []
         assert len(loaded.skills) == 1
         assert loaded.skills[0].name == "validate"
         assert loaded.skills[0].status is Status.FAILED
@@ -527,6 +661,22 @@ class TestSchemaMigration:
             conn.close()
         assert "state" in columns
 
+    def test_v1_schema_gets_timestamp_columns_and_history_table(self, db_path) -> None:
+        create_v1_db(db_path)
+
+        list_transactions(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(transactions)")}
+            history_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transaction_history'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert {"started_at", "finished_at"}.issubset(columns)
+        assert history_exists is not None
+
     def test_v1_schema_loads_with_empty_state(self, db_path) -> None:
         transaction_id = create_v1_db(db_path)
 
@@ -534,13 +684,13 @@ class TestSchemaMigration:
 
         assert loaded.state == {}
 
-    def test_legacy_schema_backfills_created_at_for_since_filter(self, db_path) -> None:
-        transaction_id = create_legacy_db(db_path)
+    def test_legacy_schema_unknown_created_at_is_not_invented_for_since_filter(self, db_path) -> None:
+        create_legacy_db(db_path)
         cutoff = datetime.now(timezone.utc)
 
         result = list_transactions(db_path, since=cutoff)
 
-        assert [tx.id for tx in result] == [transaction_id]
+        assert result == []
 
     def test_legacy_schema_migration_is_idempotent(self, db_path) -> None:
         transaction_id = create_legacy_db(db_path)
@@ -550,6 +700,29 @@ class TestSchemaMigration:
 
         assert [tx.id for tx in first] == [transaction_id]
         assert [tx.id for tx in second] == [transaction_id]
+
+    def test_v2_schema_migration_to_v3_is_idempotent(self, db_path) -> None:
+        transaction_id = create_v2_db(db_path)
+
+        first = list_transactions(db_path)
+        second = list_transactions(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            transaction_columns = [
+                row[1] for row in conn.execute("PRAGMA table_info(transactions)")
+            ]
+            history_tables = conn.execute(
+                "SELECT count(*) FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'transaction_history'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert [tx.id for tx in first] == [transaction_id]
+        assert [tx.id for tx in second] == [transaction_id]
+        assert transaction_columns.count("started_at") == 1
+        assert transaction_columns.count("finished_at") == 1
+        assert history_tables == 1
 
     def test_component_schema_version_is_recorded_after_migration(self, db_path) -> None:
         create_legacy_db(db_path)
@@ -563,7 +736,7 @@ class TestSchemaMigration:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert version == 2
+        assert version == 3
 
     def test_transaction_and_queue_schema_versions_can_share_database(self, db_path) -> None:
         from rpacore.queue import QueueItem, SqliteQueue
@@ -580,7 +753,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 1), ("transactions", 2)]
+        assert rows == [("queue", 1), ("transactions", 3)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)
@@ -591,13 +764,13 @@ class TestSchemaMigration:
             )
             conn.execute(
                 "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
-                ("transactions", 3),
+                ("transactions", 4),
             )
             conn.commit()
         finally:
             conn.close()
 
-        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 3"):
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 4"):
             list_transactions(db_path)
 
     def test_unrelated_schema_errors_are_not_swallowed(self, db_path) -> None:

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from copy import copy
 
+from rpacore.exceptions import BusinessException
 from rpacore.persistence import load_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEvent, Transaction
 
 
 def resume_transaction(
@@ -50,7 +51,10 @@ def resume_transaction(
         concrete.exceptions = [copy(exc) for exc in loaded_skill.exceptions]
         concrete.status = loaded_skill.status
 
-        if concrete.status is not Status.SUCCESSFUL:
+        if concrete.status is Status.FAILED and concrete.exceptions:
+            if not isinstance(concrete.exceptions[-1], BusinessException):
+                concrete.status = Status.PENDING
+        elif concrete.status is not Status.SUCCESSFUL:
             concrete.status = Status.PENDING
 
         restored.append(concrete)
@@ -65,4 +69,7 @@ def resume_transaction(
     transaction.skills = restored
     if transaction.status is not Status.SUCCESSFUL:
         transaction.status = Status.PENDING
+        transaction.started_at = None
+        transaction.finished_at = None
+        transaction.append_history(HistoryEvent.TRANSACTION_RESUMED)
     return transaction

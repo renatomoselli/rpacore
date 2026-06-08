@@ -33,6 +33,10 @@
 ## Development Expectations
 
 - Build in small increments. Each commit introduces one clear concept.
+- Keep documentation in lockstep with framework behavior. When touching a
+  documented area, update the related doc in the same change; when touching an
+  undocumented public or runtime behavior, add focused documentation or record
+  why it remains intentionally internal.
 - Run the test suite before considering work complete.
 
 For broader context, see [docs/project-context.md](docs/project-context.md).

@@ -41,3 +41,4 @@ htmlcov/
 # SQLite databases (created at runtime)
 *.db
 .continue
+.pi

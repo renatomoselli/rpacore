@@ -1,13 +1,15 @@
 """Tests for rpacore.transaction."""
 
+import dataclasses
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 
 from rpacore.exceptions import ExecutionValidationError
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEntry, HistoryEvent, Transaction
 
 
 class TestTransactionFreshState:
@@ -43,6 +45,20 @@ class TestTransactionFreshState:
         tx = Transaction(reference="INV-001")
         assert tx.state == {}
 
+    def test_created_at_defaults_to_utc_timestamp(self) -> None:
+        tx = Transaction(reference="INV-001")
+        assert tx.created_at is not None
+        assert tx.created_at.tzinfo is not None
+
+    def test_started_and_finished_default_to_unknown(self) -> None:
+        tx = Transaction(reference="INV-001")
+        assert tx.started_at is None
+        assert tx.finished_at is None
+
+    def test_history_defaults_to_empty_list(self) -> None:
+        tx = Transaction(reference="INV-001")
+        assert tx.history == []
+
     def test_skills_not_shared_between_instances(self) -> None:
         a = Transaction(reference="A")
         b = Transaction(reference="B")
@@ -54,6 +70,12 @@ class TestTransactionFreshState:
         b = Transaction(reference="B")
         a.state["invoice"] = 42
         assert b.state == {}
+
+    def test_history_not_shared_between_instances(self) -> None:
+        a = Transaction(reference="A")
+        b = Transaction(reference="B")
+        a.append_history(HistoryEvent.TRANSACTION_STARTED)
+        assert b.history == []
 
     def test_negative_retry_count_raises(self) -> None:
         with pytest.raises(ValueError, match="retry_count must be >= 0"):
@@ -82,6 +104,43 @@ class TestTransactionCustomValues:
         tx = Transaction(reference="INV-001", state=state)
         tx.state["status"] = "ready"
         assert state == {"invoice": 42}
+
+    def test_append_history_uses_monotonic_transaction_sequence(self) -> None:
+        tx = Transaction(reference="INV-001")
+        first = tx.append_history(HistoryEvent.TRANSACTION_STARTED)
+        second = tx.append_history(HistoryEvent.TRANSACTION_COMPLETED)
+
+        assert [entry.sequence for entry in tx.history] == [1, 2]
+        assert first.event is HistoryEvent.TRANSACTION_STARTED
+        assert second.event is HistoryEvent.TRANSACTION_COMPLETED
+        assert first.status is Status.PENDING
+
+    def test_append_history_uses_explicit_timestamp(self) -> None:
+        tx = Transaction(reference="INV-001")
+        fixed_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        entry = tx.append_history(HistoryEvent.TRANSACTION_STARTED, timestamp=fixed_time)
+
+        assert entry.timestamp is fixed_time
+
+    def test_append_history_uses_explicit_status(self) -> None:
+        tx = Transaction(reference="INV-001")
+
+        entry = tx.append_history(HistoryEvent.TRANSACTION_STARTED, status=Status.FAILED)
+
+        assert entry.status is Status.FAILED
+
+    def test_history_entry_is_immutable(self) -> None:
+        entry = HistoryEntry(
+            sequence=1,
+            timestamp=datetime.now(timezone.utc),
+            event=HistoryEvent.TRANSACTION_STARTED,
+            status=Status.PENDING,
+            retry_number=0,
+        )
+
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            entry.sequence = 2  # type: ignore[misc]
 
     def test_custom_skills(self) -> None:
         skills = [Skill("a", 1), Skill("b", 2)]
