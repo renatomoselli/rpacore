@@ -70,6 +70,30 @@ class TestProcessContextStateSharing:
         assert "client" in ctx.resources
         assert ctx.transaction is tx
 
+    def test_add_artifact_appends_to_transaction_and_returns_artifact(self) -> None:
+        tx = Transaction(reference="T1")
+        ctx = ProcessContext(transaction=tx)
+
+        artifact = ctx.add_artifact(
+            "invoice",
+            "missing/invoice.pdf",
+            kind="pdf",
+            metadata={"invoice_id": 42},
+        )
+
+        assert tx.artifacts == [artifact]
+        assert artifact.name == "invoice"
+        assert artifact.path == "missing/invoice.pdf"
+        assert artifact.kind == "pdf"
+        assert artifact.metadata == {"invoice_id": 42}
+
+    def test_add_artifact_empty_metadata_by_default(self) -> None:
+        ctx = ProcessContext(transaction=Transaction(reference="T1"))
+
+        artifact = ctx.add_artifact("invoice", "missing/invoice.pdf")
+
+        assert artifact.metadata == {}
+
 
 class TestProcessContextStateGuards:
     def test_require_state_returns_value_unchanged(self) -> None:

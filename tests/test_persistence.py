@@ -10,7 +10,7 @@ from rpacore.exceptions import BusinessException, SystemException
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import HistoryEvent, Transaction
+from rpacore.transaction import Artifact, HistoryEvent, Transaction
 
 
 @pytest.fixture
@@ -191,6 +191,31 @@ def create_v3_db(db_path: str) -> str:
     return transaction_id
 
 
+def create_v4_db(db_path: str) -> str:
+    transaction_id = create_v3_db(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE transaction_metadata (
+                transaction_id TEXT NOT NULL,
+                key            TEXT NOT NULL,
+                value_json     TEXT NOT NULL,
+                PRIMARY KEY (transaction_id, key),
+                FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            "UPDATE rpacore_schema_versions SET version = ? WHERE component = ?",
+            (4, "transactions"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return transaction_id
+
+
 class TestSaveAndLoad:
     def test_roundtrip_empty_transaction(self, db_path) -> None:
         tx = make_transaction()
@@ -259,6 +284,78 @@ class TestSaveAndLoad:
         finally:
             conn.close()
         assert row[0] == '{"a":1,"b":2}'
+
+    def test_roundtrip_preserves_transaction_artifacts(self, db_path) -> None:
+        artifact = Artifact(
+            id="artifact-001",
+            name="invoice pdf",
+            path="/missing/invoice.pdf",
+            kind="pdf",
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            metadata={"invoice_id": 42, "tags": ["generated"]},
+        )
+        tx = make_transaction(artifacts=[artifact])
+
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+
+        assert len(loaded.artifacts) == 1
+        loaded_artifact = loaded.artifacts[0]
+        assert loaded_artifact.id == "artifact-001"
+        assert loaded_artifact.name == "invoice pdf"
+        assert loaded_artifact.path == "/missing/invoice.pdf"
+        assert loaded_artifact.kind == "pdf"
+        assert loaded_artifact.created_at == artifact.created_at
+        assert loaded_artifact.metadata == {"invoice_id": 42, "tags": ["generated"]}
+
+    def test_roundtrip_preserves_artifact_order(self, db_path) -> None:
+        created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        tx = make_transaction(
+            artifacts=[
+                Artifact(id="artifact-b", name="second-sort", path="b.txt", created_at=created_at),
+                Artifact(id="artifact-a", name="first-sort", path="a.txt", created_at=created_at),
+            ]
+        )
+
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+
+        assert [artifact.id for artifact in loaded.artifacts] == [
+            "artifact-b",
+            "artifact-a",
+        ]
+
+    def test_roundtrip_preserves_empty_transaction_artifacts(self, db_path) -> None:
+        tx = make_transaction()
+
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+
+        assert loaded.artifacts == []
+
+    def test_artifact_metadata_is_stored_as_canonical_json(self, db_path) -> None:
+        tx = make_transaction(
+            artifacts=[
+                Artifact(
+                    id="artifact-001",
+                    name="invoice",
+                    path="/missing/invoice.pdf",
+                    metadata={"nested": {"b": 2, "a": 1}},
+                )
+            ]
+        )
+
+        save_transaction(tx, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT metadata FROM transaction_artifacts WHERE transaction_id = ? AND id = ?",
+                (tx.id, "artifact-001"),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row[0] == '{"nested":{"a":1,"b":2}}'
 
     def test_roundtrip_preserves_transaction_timestamps(self, db_path) -> None:
         tx = make_transaction()
@@ -356,6 +453,24 @@ class TestSaveAndLoad:
 
         assert "metadata_filter['client'] expected JSON value" in str(exc_info.value)
 
+    def test_save_rejects_non_json_safe_artifact_metadata(self, db_path) -> None:
+        tx = make_transaction(
+            artifacts=[
+                Artifact(
+                    name="invoice",
+                    path="/missing/invoice.pdf",
+                    metadata={"client": object()},
+                )
+            ]
+        )
+
+        with pytest.raises(TypeError) as exc_info:
+            save_transaction(tx, db_path)
+
+        assert "transaction.artifacts[0].metadata['client'] expected JSON value" in str(
+            exc_info.value
+        )
+
     def test_load_rejects_corrupt_transaction_state_json(self, db_path) -> None:
         tx = make_transaction()
         save_transaction(tx, db_path)
@@ -445,6 +560,51 @@ class TestSaveAndLoad:
             exc_info.value
         )
         assert exc_info.value.action == "repair transaction metadata in the persistence database"
+
+    def test_load_rejects_corrupt_transaction_artifact_metadata(self, db_path) -> None:
+        tx = make_transaction(
+            artifacts=[Artifact(id="artifact-001", name="invoice", path="/missing/invoice.pdf")]
+        )
+        save_transaction(tx, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE transaction_artifacts SET metadata = ? WHERE transaction_id = ? AND id = ?",
+                ("not-json", tx.id, "artifact-001"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(SystemException) as exc_info:
+            load_transaction(tx.id, db_path)
+
+        assert "Persisted transaction artifact metadata is invalid" in str(exc_info.value)
+        assert (
+            exc_info.value.action
+            == "repair transaction artifact metadata in the persistence database"
+        )
+
+    def test_load_rejects_corrupt_transaction_artifact_timestamp(self, db_path) -> None:
+        tx = make_transaction(
+            artifacts=[Artifact(id="artifact-001", name="invoice", path="/missing/invoice.pdf")]
+        )
+        save_transaction(tx, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE transaction_artifacts SET created_at = ? WHERE transaction_id = ? AND id = ?",
+                ("not-a-date", tx.id, "artifact-001"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(SystemException) as exc_info:
+            load_transaction(tx.id, db_path)
+
+        assert "Persisted transaction artifact timestamp is invalid" in str(exc_info.value)
+        assert exc_info.value.action == "repair transaction artifacts in the persistence database"
 
     def test_history_event_and_status_are_schema_constrained(self, db_path) -> None:
         tx = make_transaction()
@@ -857,6 +1017,20 @@ class TestSchemaMigration:
 
         assert result == []
 
+    def test_v4_schema_gets_artifact_table(self, db_path) -> None:
+        create_v4_db(db_path)
+
+        list_transactions(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            artifact_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'transaction_artifacts'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert artifact_exists is not None
+
     def test_v1_schema_loads_with_empty_state(self, db_path) -> None:
         transaction_id = create_v1_db(db_path)
 
@@ -900,6 +1074,10 @@ class TestSchemaMigration:
                 "SELECT count(*) FROM sqlite_master "
                 "WHERE type = 'table' AND name = 'transaction_metadata'"
             ).fetchone()[0]
+            artifact_tables = conn.execute(
+                "SELECT count(*) FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'transaction_artifacts'"
+            ).fetchone()[0]
         finally:
             conn.close()
         assert [tx.id for tx in first] == [transaction_id]
@@ -908,6 +1086,7 @@ class TestSchemaMigration:
         assert transaction_columns.count("finished_at") == 1
         assert history_tables == 1
         assert metadata_tables == 1
+        assert artifact_tables == 1
 
     def test_component_schema_version_is_recorded_after_migration(self, db_path) -> None:
         create_legacy_db(db_path)
@@ -921,7 +1100,7 @@ class TestSchemaMigration:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert version == 4
+        assert version == 5
 
     def test_transaction_and_queue_schema_versions_can_share_database(self, db_path) -> None:
         from rpacore.queue import QueueItem, SqliteQueue
@@ -938,7 +1117,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 1), ("transactions", 4)]
+        assert rows == [("queue", 1), ("transactions", 5)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)
@@ -949,13 +1128,13 @@ class TestSchemaMigration:
             )
             conn.execute(
                 "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
-                ("transactions", 5),
+                ("transactions", 6),
             )
             conn.commit()
         finally:
             conn.close()
 
-        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 5"):
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 6"):
             list_transactions(db_path)
 
     def test_unrelated_schema_errors_are_not_swallowed(self, db_path) -> None:

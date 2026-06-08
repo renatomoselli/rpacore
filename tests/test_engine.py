@@ -623,6 +623,67 @@ class TestEngineDirectSkillExecution:
         assert tx.history[-1].event is HistoryEvent.TRANSACTION_COMPLETED
         assert tx.history[-1].status is Status.FAILED
 
+    def test_captured_screenshot_is_registered_as_artifact(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _capture_screenshot(directory: str) -> str:
+            return "screenshots/shot.png"
+
+        skill = BusinessFailSkill("validate", 1)
+        tx = Transaction(reference="T1", skills=[skill])
+        monkeypatch.setattr("rpacore.engine.capture_screenshot", _capture_screenshot)
+
+        Engine(screenshot_dir="screenshots").run(_ctx(tx))
+
+        assert skill.exceptions[0].screenshot_path == "screenshots/shot.png"
+        assert len(tx.artifacts) == 1
+        artifact = tx.artifacts[0]
+        assert artifact.name == "validate screenshot"
+        assert artifact.path == "screenshots/shot.png"
+        assert artifact.kind == "screenshot"
+        assert artifact.metadata == {
+            "skill_name": "validate",
+            "skill_execution_order": 1,
+        }
+
+    def test_system_exception_screenshot_is_registered_as_artifact(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _capture_screenshot(directory: str) -> str:
+            return "screenshots/system.png"
+
+        skill = SystemFailSkill("connect", 1)
+        tx = Transaction(reference="T1", skills=[skill])
+        monkeypatch.setattr("rpacore.engine.capture_screenshot", _capture_screenshot)
+
+        Engine(screenshot_dir="screenshots").run(_ctx(tx))
+
+        assert skill.exceptions[0].screenshot_path == "screenshots/system.png"
+        assert [(artifact.kind, artifact.path) for artifact in tx.artifacts] == [
+            ("screenshot", "screenshots/system.png")
+        ]
+
+    def test_generic_exception_screenshot_is_registered_as_artifact(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _capture_screenshot(directory: str) -> str:
+            return "screenshots/generic.png"
+
+        class GenericFailSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                raise RuntimeError("boom")
+
+        skill = GenericFailSkill("generic", 1)
+        tx = Transaction(reference="T1", skills=[skill])
+        monkeypatch.setattr("rpacore.engine.capture_screenshot", _capture_screenshot)
+
+        Engine(screenshot_dir="screenshots").run(_ctx(tx))
+
+        assert skill.exceptions[0].screenshot_path == "screenshots/generic.png"
+        assert [(artifact.kind, artifact.path) for artifact in tx.artifacts] == [
+            ("screenshot", "screenshots/generic.png")
+        ]
+
 
 class TestEngineRetry:
     def test_default_max_retries_is_zero(self) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from rpacore.exceptions import BusinessException, SystemException
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.report import (
+    ArtifactReport,
     SkillReport,
     TransactionReport,
     generate_report,
@@ -17,7 +19,7 @@ from rpacore.report import (
 )
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import HistoryEvent, Transaction
+from rpacore.transaction import Artifact, HistoryEvent, Transaction
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +122,30 @@ class TestGenerateReport:
         report.metadata.clear()
 
         assert tx.metadata == {"customer": "acme", "nested": {"b": 2, "a": 1}}
+
+    def test_report_includes_artifacts_as_defensive_copy(self):
+        tx = make_transaction()
+        tx.artifacts = [
+            Artifact(
+                id="artifact-001",
+                name="invoice",
+                path="/missing/invoice.pdf",
+                kind="pdf",
+                metadata={"invoice_id": 42},
+            )
+        ]
+
+        report = generate_report(tx)
+        report.artifacts[0].metadata.clear()
+
+        assert isinstance(report.artifacts[0], ArtifactReport)
+        assert tx.artifacts[0].metadata == {"invoice_id": 42}
+
+    def test_artifact_report_fields_match_artifact_model(self):
+        artifact_fields = {field.name for field in dataclasses.fields(Artifact)}
+        report_fields = {field.name for field in dataclasses.fields(ArtifactReport)}
+
+        assert report_fields == artifact_fields
 
     def test_system_exception_from_earlier_retry_excluded(self):
         skill = make_skill("s1", 1, Status.FAILED)
@@ -314,6 +340,23 @@ class TestRenderText:
         assert '  customer: "acme"' in text
         assert '  nested: {"a": 1, "b": 2}' in text
 
+    def test_artifacts_are_shown_without_requiring_files(self):
+        tx = make_transaction()
+        tx.artifacts = [
+            Artifact(
+                name="invoice",
+                path="/missing/invoice.pdf",
+                kind="pdf",
+                metadata={"invoice_id": 42},
+            )
+        ]
+
+        text = render_text(generate_report(tx))
+
+        assert "Artifacts:" in text
+        assert "invoice kind=pdf path=/missing/invoice.pdf" in text
+        assert "    invoice_id: 42" in text
+
 
 # ---------------------------------------------------------------------------
 # TestRenderHTML
@@ -417,6 +460,24 @@ class TestRenderHTML:
         assert "<h3>Metadata</h3>" in html
         assert "&lt;acme&gt;" in html
         assert "{&quot;a&quot;: 1, &quot;b&quot;: 2}" in html
+
+    def test_artifacts_are_shown_and_escaped(self):
+        tx = make_transaction()
+        tx.artifacts = [
+            Artifact(
+                name="<invoice>",
+                path="/missing/invoice.pdf",
+                kind="pdf",
+                metadata={"source": "<skill>"},
+            )
+        ]
+
+        html = render_html(generate_report(tx))
+
+        assert "<h3>Artifacts</h3>" in html
+        assert "&lt;invoice&gt;" in html
+        assert "/missing/invoice.pdf" in html
+        assert "&lt;skill&gt;" in html
 
 
 # ---------------------------------------------------------------------------

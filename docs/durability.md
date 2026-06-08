@@ -46,6 +46,24 @@ exact-match filters on those top-level entries, including list and object values
 The filter is intentionally limited: it does not provide nested path queries,
 partial matches, or SQLite JSON-extension behavior.
 
+`Transaction.artifacts` records generated or captured file paths as durable audit
+records. Skills register artifacts with
+`ProcessContext.add_artifact(name, path, kind="", metadata=None)`. Each artifact
+has a stable id, name, path, free-form kind, UTC creation timestamp, and
+JSON-safe metadata. Artifact files are not read, hashed, uploaded, or required by
+default; missing files do not prevent save, load, reporting, or notification.
+Framework-captured screenshots are registered as screenshot artifacts while the
+exception `screenshot_path` remains intact.
+
+Artifacts are part of transaction recovery because they are loaded with the
+transaction. They remain attached to the durable transaction that recorded them,
+including interrupted or `IN_PROGRESS` transactions left behind by a failed
+checkpoint. RPA Core does not clean up those records automatically; Task 52 adds
+the queue-to-transaction binding needed to make such stranded transaction records
+discoverable from queue retries. Transaction schema migrations are forward-only;
+older code must reject a newer artifact schema version rather than silently
+ignoring artifact rows.
+
 Queue resource lifecycle:
 
 - queue item payload populates `ctx.state`
@@ -166,7 +184,7 @@ The current transaction persistence component is recorded as:
 
 ```text
 component = "transactions"
-version   = 4
+version   = 5
 ```
 
 The SQLite queue records its own component version:

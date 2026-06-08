@@ -24,15 +24,17 @@ from rpacore.paths import resolve_config_path, resolve_config_paths
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
 from rpacore.recovery import resume_transaction
-from rpacore.report import SkillReport, TransactionReport, generate_report, render_html, render_text
+from rpacore.report import ArtifactReport, SkillReport, TransactionReport, generate_report, render_html, render_text
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import HistoryEntry, HistoryEvent, Transaction
+from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
 
 __all__ = [
     "build_notifiers",
     "build_credential_provider",
+    "Artifact",
+    "ArtifactReport",
     "BusinessException",
     "configure_logger",
     "CredentialNotFoundError",

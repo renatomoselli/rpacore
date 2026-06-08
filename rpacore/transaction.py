@@ -40,6 +40,21 @@ class HistoryEntry:
 
 
 @dataclass
+class Artifact:
+    """A durable audit record for a generated or captured file path."""
+
+    name: str
+    path: str
+    kind: str = ""
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.metadata = dict(self.metadata or {})
+
+
+@dataclass
 class Transaction:
     """A transaction groups skills into a single executable unit.
 
@@ -57,6 +72,7 @@ class Transaction:
     finished_at: datetime | None = None
     state: dict[str, object] = field(default_factory=dict)
     metadata: dict[str, object] = field(default_factory=dict)
+    artifacts: list[Artifact] = field(default_factory=list)
     skills: list[Skill] = field(default_factory=list)
     history: list[HistoryEntry] = field(default_factory=list)
 
@@ -65,6 +81,7 @@ class Transaction:
             raise ValueError(f"retry_count must be >= 0, got {self.retry_count}")
         self.state = dict(self.state)
         self.metadata = dict(self.metadata)
+        self.artifacts = list(self.artifacts)
         self.skills = list(self.skills)
         self.history = list(self.history)
 

@@ -37,6 +37,18 @@ class SkillReport:
 
 
 @dataclass
+class ArtifactReport:
+    """Reporting view of a transaction artifact."""
+
+    id: str
+    name: str
+    path: str
+    kind: str
+    created_at: datetime
+    metadata: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass
 class TransactionReport:
     """Reporting view of a completed transaction."""
 
@@ -49,6 +61,7 @@ class TransactionReport:
     started_at: datetime | None = None
     finished_at: datetime | None = None
     metadata: dict[str, object] = field(default_factory=dict)
+    artifacts: list[ArtifactReport] = field(default_factory=list)
     history: list[HistoryEntry] = field(default_factory=list)
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -82,6 +95,17 @@ def generate_report(transaction: Transaction) -> TransactionReport:
                 exceptions=filtered,
             )
         )
+    artifact_reports = [
+        ArtifactReport(
+            id=artifact.id,
+            name=artifact.name,
+            path=artifact.path,
+            kind=artifact.kind,
+            created_at=artifact.created_at,
+            metadata=dict(artifact.metadata),
+        )
+        for artifact in transaction.artifacts
+    ]
     return TransactionReport(
         transaction_id=transaction.id,
         reference=transaction.reference,
@@ -92,6 +116,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         started_at=transaction.started_at,
         finished_at=transaction.finished_at,
         metadata=dict(transaction.metadata),
+        artifacts=artifact_reports,
         history=list(transaction.history),
     )
 
@@ -131,6 +156,16 @@ def render_text(report: TransactionReport) -> str:
         lines.extend(["", "Metadata:"])
         for key in sorted(report.metadata):
             lines.append(f"  {key}: {_format_json_value(report.metadata[key])}")
+    if report.artifacts:
+        lines.extend(["", "Artifacts:"])
+        for artifact in report.artifacts:
+            kind = f" kind={artifact.kind}" if artifact.kind else ""
+            lines.append(
+                f"  {artifact.name}{kind} path={artifact.path} "
+                f"created={artifact.created_at.isoformat()}"
+            )
+            for key in sorted(artifact.metadata):
+                lines.append(f"    {key}: {_format_json_value(artifact.metadata[key])}")
     if report.history:
         lines.extend(["", "History:"])
         for entry in report.history:
@@ -161,6 +196,7 @@ h2{margin-bottom:.25rem}
 .exc{margin:.25rem 0 .25rem 1.5rem;font-size:.9em}
 .biz{color:#e65100}.sys{color:#b71c1c}
 .metadata{margin-top:1rem}.metadata li{margin:.25rem 0}
+.artifacts{margin-top:1rem}.artifacts li{margin:.25rem 0}
 .history{margin-top:1rem}.history li{margin:.25rem 0}
 </style>
 </head>
@@ -171,6 +207,7 @@ h2{margin-bottom:.25rem}
 <p>ID: <code>$transaction_id</code></p>
 $skills_html
 $metadata_html
+$artifacts_html
 $history_html
 </body>
 </html>"""
@@ -220,6 +257,23 @@ $metadata_items
 _METADATA_ITEM_TEMPLATE = string.Template(
     """\
     <li><code>$key</code>: $value</li>"""
+)
+
+
+_ARTIFACTS_TEMPLATE = string.Template(
+    """\
+<section class="artifacts">
+  <h3>Artifacts</h3>
+  <ul>
+$artifact_items
+  </ul>
+</section>"""
+)
+
+
+_ARTIFACT_ITEM_TEMPLATE = string.Template(
+    """\
+    <li><strong>$name</strong>$kind path=<code>$path</code> created=$created_at$metadata</li>"""
 )
 
 
@@ -300,6 +354,28 @@ def render_html(report: TransactionReport) -> str:
             for key in sorted(report.metadata)
         ]
         metadata_html = _METADATA_TEMPLATE.substitute(metadata_items="\n".join(items))
+    artifacts_html = ""
+    if report.artifacts:
+        items = []
+        for artifact in report.artifacts:
+            kind = f" kind={_esc(artifact.kind)}" if artifact.kind else ""
+            metadata = ""
+            if artifact.metadata:
+                metadata_items = [
+                    f"{_esc(key)}={_esc(_format_json_value(artifact.metadata[key]))}"
+                    for key in sorted(artifact.metadata)
+                ]
+                metadata = f" metadata={'; '.join(metadata_items)}"
+            items.append(
+                _ARTIFACT_ITEM_TEMPLATE.substitute(
+                    name=_esc(artifact.name),
+                    kind=kind,
+                    path=_esc(artifact.path),
+                    created_at=_esc(artifact.created_at.isoformat()),
+                    metadata=metadata,
+                )
+            )
+        artifacts_html = _ARTIFACTS_TEMPLATE.substitute(artifact_items="\n".join(items))
     return _HTML_TEMPLATE.substitute(
         reference=_esc(report.reference),
         status=report.status,
@@ -311,5 +387,6 @@ def render_html(report: TransactionReport) -> str:
         transaction_id=_esc(report.transaction_id),
         skills_html="\n".join(skills_parts),
         metadata_html=metadata_html,
+        artifacts_html=artifacts_html,
         history_html=history_html,
     )

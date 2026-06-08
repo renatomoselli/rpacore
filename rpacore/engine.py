@@ -211,6 +211,7 @@ class Engine:
                 transaction.append_history(HistoryEvent.SKILL_FAILED, skill=skill)
                 if self.screenshot_dir:
                     exc.screenshot_path = capture_screenshot(self.screenshot_dir)
+                    self._register_screenshot_artifact(ctx, skill, exc.screenshot_path)
                 self._log_skill_failed(transaction, skill, exc, level="warning")
                 self._checkpoint(transaction, checkpoint)
                 if exc.stops_execution:
@@ -223,6 +224,7 @@ class Engine:
                 transaction.append_history(HistoryEvent.SKILL_FAILED, skill=skill)
                 if self.screenshot_dir:
                     exc.screenshot_path = capture_screenshot(self.screenshot_dir)
+                    self._register_screenshot_artifact(ctx, skill, exc.screenshot_path)
                 self._log_skill_failed(transaction, skill, exc, level="error")
                 self._checkpoint(transaction, checkpoint)
                 break
@@ -242,6 +244,7 @@ class Engine:
                 transaction.append_history(HistoryEvent.SKILL_FAILED, skill=skill)
                 if self.screenshot_dir:
                     wrapped.screenshot_path = capture_screenshot(self.screenshot_dir)
+                    self._register_screenshot_artifact(ctx, skill, wrapped.screenshot_path)
                 self._log_skill_failed(transaction, skill, wrapped, level="error")
                 self._checkpoint(transaction, checkpoint)
                 break
@@ -253,6 +256,25 @@ class Engine:
                     transaction.append_history(HistoryEvent.SKILL_SKIPPED, skill=skill)
                 self._log_skill_completed(transaction, skill)
                 self._checkpoint(transaction, checkpoint)
+
+    def _register_screenshot_artifact(
+        self,
+        ctx: ProcessContext,
+        skill: Skill,
+        screenshot_path: str,
+    ) -> None:
+        """Register a captured screenshot path without inspecting file contents."""
+        if not screenshot_path:
+            return
+        ctx.add_artifact(
+            f"{skill.name} screenshot",
+            screenshot_path,
+            kind="screenshot",
+            metadata={
+                "skill_name": skill.name,
+                "skill_execution_order": skill.execution_order,
+            },
+        )
 
     def _skip_downstream_pending_skills(
         self,

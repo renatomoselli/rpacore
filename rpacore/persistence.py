@@ -8,12 +8,12 @@ from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore.exceptions import BusinessException, SystemException
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import HistoryEntry, HistoryEvent, Transaction
+from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
 
 
 _SCHEMA_TABLE = "rpacore_schema_versions"
 _TRANSACTION_SCHEMA_COMPONENT = "transactions"
-_TRANSACTION_SCHEMA_VERSION = 4
+_TRANSACTION_SCHEMA_VERSION = 5
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -167,6 +167,26 @@ def _migrate_transactions_to_v4(conn: sqlite3.Connection) -> None:
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 4)
 
 
+def _migrate_transactions_to_v5(conn: sqlite3.Connection) -> None:
+    """Add dedicated artifact audit storage."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transaction_artifacts (
+            transaction_id TEXT NOT NULL,
+            sequence       INTEGER NOT NULL,
+            id             TEXT NOT NULL,
+            name           TEXT NOT NULL,
+            path           TEXT NOT NULL,
+            kind           TEXT NOT NULL DEFAULT '',
+            created_at     TEXT NOT NULL,
+            metadata       TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (transaction_id, id),
+            UNIQUE (transaction_id, sequence),
+            FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+        )
+    """)
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 5)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run explicit transaction schema migrations through the latest version."""
     with conn:
@@ -189,6 +209,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 4:
             _migrate_transactions_to_v4(conn)
             current_version = 4
+        if current_version < 5:
+            _migrate_transactions_to_v5(conn)
+            current_version = 5
         if current_version != _TRANSACTION_SCHEMA_VERSION:
             raise RuntimeError(
                 "Unsupported transaction schema version "
@@ -242,6 +265,58 @@ def _load_metadata(transaction_id: str, rows: list[sqlite3.Row]) -> dict[str, ob
     return metadata
 
 
+def _artifact_metadata_to_storage(artifact: Artifact, index: int) -> str:
+    path = f"transaction.artifacts[{index}].metadata"
+    validate_json_object(artifact.metadata, path=path)
+    return _canonical_json(artifact.metadata)
+
+
+def _load_artifact_metadata(
+    transaction_id: str,
+    artifact_id: str,
+    raw_metadata: str,
+) -> dict[str, object]:
+    try:
+        metadata = json.loads(raw_metadata)
+        validate_json_object(metadata, path="artifact.metadata")
+    except (json.JSONDecodeError, JsonStateError) as exc:
+        raise SystemException(
+            f"Persisted transaction artifact metadata is invalid for transaction "
+            f"{transaction_id!r} artifact {artifact_id!r}: {exc}",
+            action="repair transaction artifact metadata in the persistence database",
+        ) from exc
+    return metadata
+
+
+def _load_artifacts(transaction_id: str, rows: list[sqlite3.Row]) -> list[Artifact]:
+    artifacts: list[Artifact] = []
+    for row in rows:
+        artifact_id = row["id"]
+        try:
+            created_at = datetime.fromisoformat(row["created_at"])
+        except ValueError as exc:
+            raise SystemException(
+                f"Persisted transaction artifact timestamp is invalid for transaction "
+                f"{transaction_id!r} artifact {artifact_id!r}: {row['created_at']!r}",
+                action="repair transaction artifacts in the persistence database",
+            ) from exc
+        artifacts.append(
+            Artifact(
+                id=artifact_id,
+                name=row["name"],
+                path=row["path"],
+                kind=row["kind"],
+                created_at=created_at,
+                metadata=_load_artifact_metadata(
+                    transaction_id,
+                    artifact_id,
+                    row["metadata"],
+                ),
+            )
+        )
+    return artifacts
+
+
 def _timestamp_to_storage(value: datetime | None) -> str:
     return "" if value is None else value.isoformat()
 
@@ -292,6 +367,18 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
     validate_json_object(transaction.state, path="transaction.state")
     state_json = json.dumps(transaction.state)
     metadata_json = _metadata_to_storage(transaction.metadata)
+    artifact_rows = [
+        (
+            artifact.id,
+            index + 1,
+            artifact.name,
+            artifact.path,
+            artifact.kind,
+            artifact.created_at.isoformat(),
+            _artifact_metadata_to_storage(artifact, index),
+        )
+        for index, artifact in enumerate(transaction.artifacts)
+    ]
 
     conn = _connect(db_path)
     try:
@@ -393,6 +480,23 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
                     "VALUES (?, ?, ?)",
                     (transaction.id, key, value_json),
                 )
+            conn.execute("DELETE FROM transaction_artifacts WHERE transaction_id = ?", (transaction.id,))
+            for artifact_id, sequence, name, path, kind, created_at, artifact_metadata in artifact_rows:
+                conn.execute(
+                    "INSERT INTO transaction_artifacts "
+                    "(transaction_id, sequence, id, name, path, kind, created_at, metadata) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        transaction.id,
+                        sequence,
+                        artifact_id,
+                        name,
+                        path,
+                        kind,
+                        created_at,
+                        artifact_metadata,
+                    ),
+                )
     finally:
         conn.close()
 
@@ -465,6 +569,12 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
             (transaction_id,),
         ).fetchall()
         metadata = _load_metadata(transaction_id, metadata_rows)
+        artifact_rows = conn.execute(
+            "SELECT id, name, path, kind, created_at, metadata FROM transaction_artifacts "
+            "WHERE transaction_id = ? ORDER BY sequence",
+            (transaction_id,),
+        ).fetchall()
+        artifacts = _load_artifacts(transaction_id, artifact_rows)
 
         return Transaction(
             reference=row["reference"],
@@ -482,6 +592,7 @@ def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transa
             ),
             state=transaction_state,
             metadata=metadata,
+            artifacts=artifacts,
             skills=skills,
             history=history,
         )

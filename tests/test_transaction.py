@@ -9,7 +9,7 @@ import pytest
 from rpacore.exceptions import ExecutionValidationError
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import HistoryEntry, HistoryEvent, Transaction
+from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
 
 
 class TestTransactionFreshState:
@@ -59,6 +59,14 @@ class TestTransactionFreshState:
         tx = Transaction(reference="INV-001")
         assert tx.history == []
 
+    def test_metadata_defaults_to_empty_dict(self) -> None:
+        tx = Transaction(reference="INV-001")
+        assert tx.metadata == {}
+
+    def test_artifacts_defaults_to_empty_list(self) -> None:
+        tx = Transaction(reference="INV-001")
+        assert tx.artifacts == []
+
     def test_skills_not_shared_between_instances(self) -> None:
         a = Transaction(reference="A")
         b = Transaction(reference="B")
@@ -76,6 +84,12 @@ class TestTransactionFreshState:
         b = Transaction(reference="B")
         a.append_history(HistoryEvent.TRANSACTION_STARTED)
         assert b.history == []
+
+    def test_artifacts_not_shared_between_instances(self) -> None:
+        a = Transaction(reference="A")
+        b = Transaction(reference="B")
+        a.artifacts.append(Artifact(name="invoice", path="missing.pdf"))
+        assert b.artifacts == []
 
     def test_negative_retry_count_raises(self) -> None:
         with pytest.raises(ValueError, match="retry_count must be >= 0"):
@@ -104,6 +118,34 @@ class TestTransactionCustomValues:
         tx = Transaction(reference="INV-001", state=state)
         tx.state["status"] = "ready"
         assert state == {"invoice": 42}
+
+    def test_custom_artifacts_does_not_keep_list_reference(self) -> None:
+        artifacts = [Artifact(name="invoice", path="invoice.pdf")]
+        tx = Transaction(reference="INV-001", artifacts=artifacts)
+
+        artifacts.append(Artifact(name="receipt", path="receipt.pdf"))
+
+        assert len(tx.artifacts) == 1
+
+    def test_artifact_id_is_auto_generated_uuid(self) -> None:
+        artifact = Artifact(name="invoice", path="invoice.pdf")
+
+        parsed = uuid.UUID(artifact.id)
+
+        assert str(parsed) == artifact.id
+
+    def test_artifact_metadata_does_not_keep_reference(self) -> None:
+        metadata = {"source": "skill"}
+
+        artifact = Artifact(name="invoice", path="invoice.pdf", metadata=metadata)
+        artifact.metadata["status"] = "created"
+
+        assert metadata == {"source": "skill"}
+
+    def test_artifact_metadata_accepts_none_as_empty_mapping(self) -> None:
+        artifact = Artifact(name="invoice", path="invoice.pdf", metadata=None)  # type: ignore[arg-type]
+
+        assert artifact.metadata == {}
 
     def test_append_history_uses_monotonic_transaction_sequence(self) -> None:
         tx = Transaction(reference="INV-001")

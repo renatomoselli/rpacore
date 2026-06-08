@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from rpacore.config_validation import ExpectedType, require_config as validate_required
 from rpacore.credentials import CredentialProvider, EnvCredentialProvider
 from rpacore.exceptions import SystemException
-from rpacore.transaction import Transaction
+from rpacore.transaction import Artifact, Transaction
 
 
 @dataclass
@@ -31,6 +31,24 @@ class ProcessContext:
     def state(self) -> dict[str, object]:
         """Return the transaction's durable JSON-safe state mapping."""
         return self.transaction.state
+
+    def add_artifact(
+        self,
+        name: str,
+        path: str,
+        *,
+        kind: str = "",
+        metadata: dict[str, object] | None = None,
+    ) -> Artifact:
+        """Register a generated file path as a durable transaction artifact."""
+        artifact = Artifact(
+            name=name,
+            path=path,
+            kind=kind,
+            metadata={} if metadata is None else metadata,
+        )
+        self.transaction.artifacts.append(artifact)
+        return artifact
 
     def require_state(
         self,
