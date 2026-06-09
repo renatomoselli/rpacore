@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
 import pytest
@@ -15,7 +17,7 @@ from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.persistence import list_transactions, load_transaction
-from rpacore.queue import QueueItem
+from rpacore.queue import QueueItem, QueueStatus, SqliteQueue
 import rpacore.runner as runner_module
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.skill import Skill
@@ -36,6 +38,7 @@ class _FakeQueue:
         self.failed: list[str] = []
         self.fail_retries: list[bool] = []
         self.bindings: list[tuple[str, str, str]] = []
+        self.renewals: list[tuple[str, str]] = []
 
     def next_item(self, worker_id: str = "") -> QueueItem | None:
         return self._items.pop(0) if self._items else None
@@ -45,6 +48,9 @@ class _FakeQueue:
 
     def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
         self.bindings.append((item_id, transaction_id, claimed_by))
+
+    def renew_lease(self, item_id: str, *, claimed_by: str) -> None:
+        self.renewals.append((item_id, claimed_by))
 
     def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None:
         self.failed.append(item_id)
@@ -696,6 +702,71 @@ class TestRunnerManagedTransactionPersistence:
         assert errors
         assert "could not bind transaction" in str(errors[0])
 
+    def test_initial_transaction_persistence_failure_retries_without_binding(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        errors: list[Exception | None] = []
+
+        def _fail_initial_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
+            raise RuntimeError("initial save failed")
+
+        monkeypatch.setattr(runner_module, "save_transaction", _fail_initial_save)
+
+        summary, queue = _run(
+            [_item("initial-save-fail")],
+            transaction_db_path=db_path,
+            after_item=lambda item, tx, err: errors.append(err),
+        )
+
+        assert summary.failed == 1
+        assert summary.persistence_errors == 1
+        assert queue.failed == ["initial-save-fail"]
+        assert queue.fail_retries == [True]
+        assert queue.bindings == []
+        assert list_transactions(db_path) == []
+        assert errors
+        assert "initial save failed" in str(errors[0])
+
+    def test_bind_transaction_retries_transient_sqlite_lock(self, monkeypatch, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        sleeps: list[float] = []
+
+        class LockedThenBindingQueue(_FakeQueue):
+            def __init__(self, items: list[QueueItem]) -> None:
+                super().__init__(items)
+                self.attempts = 0
+
+            def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
+                self.attempts += 1
+                if self.attempts < 3:
+                    raise sqlite3.OperationalError("database is locked")
+                super().bind_transaction(item_id, transaction_id, claimed_by=claimed_by)
+
+        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
+        queue = LockedThenBindingQueue([_item("bind-lock")])
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_SuccessSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=db_path,
+        )
+
+        assert summary.completed == 1
+        assert summary.failed == 0
+        assert queue.attempts == 3
+        assert queue.bindings
+        assert sleeps == [0.05, 0.1]
+
     def test_persisted_queue_retry_resumes_same_transaction_and_skips_successful_skills(
         self,
         tmp_path,
@@ -956,6 +1027,116 @@ class TestRunnerManagedTransactionPersistence:
         assert len(warning_extras) == 1
         assert warning_extras[0]["event"] == "queue_payload_state_collision"
         assert warning_extras[0]["state_keys"] == ["invoice_id"]
+
+
+# ---------------------------------------------------------------------------
+# queue lease heartbeat
+# ---------------------------------------------------------------------------
+
+class TestQueueLeaseHeartbeat:
+    def test_long_running_sqlite_item_keeps_lease(self, monkeypatch, tmp_path) -> None:
+        db_path = str(tmp_path / "queue.db")
+        queue = SqliteQueue({"db_path": db_path, "lease_timeout": 1, "max_retries": 0})
+        queue.add(QueueItem(reference="slow", payload={}))
+        monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 0.05)
+
+        class _SlowSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                time.sleep(1.2)
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_SlowSkill("slow", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="worker-a",
+        )
+
+        stored = queue.list_items()[0]
+        assert summary.completed == 1
+        assert stored.status is QueueStatus.SUCCESSFUL
+        assert queue.next_item("worker-b") is None
+
+    def test_lease_loss_during_running_skill_prevents_final_transition(
+        self,
+        monkeypatch,
+        tmp_path,
+        caplog,
+    ) -> None:
+        db_path = str(tmp_path / "queue.db")
+        queue = SqliteQueue({"db_path": db_path, "lease_timeout": 30, "max_retries": 0})
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        first = QueueItem(id="a-first", reference="first", payload={}, created_at=base)
+        second = QueueItem(
+            id="b-second",
+            reference="second",
+            payload={},
+            created_at=base + timedelta(seconds=1),
+        )
+        queue.add(first)
+        queue.add(second)
+        monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 0.01)
+        started = threading.Event()
+        release = threading.Event()
+        summaries: list[QueueRunSummary] = []
+        errors: list[BaseException] = []
+
+        class _BlockingSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                started.set()
+                assert release.wait(timeout=2)
+
+        def _run_worker() -> None:
+            try:
+                summaries.append(
+                    run_queue_loop(
+                        queue=queue,
+                        engine=Engine(),
+                        build_transaction=lambda item: Transaction(
+                            reference=item.reference,
+                            skills=[_BlockingSkill("block", 1)],
+                        ),
+                        config={},
+                        credentials=_CREDS,
+                        worker_id="worker-a",
+                        logger=logging.getLogger("test.runner.lease"),
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=_run_worker)
+        with caplog.at_level(logging.ERROR, logger="test.runner.lease"):
+            worker.start()
+            assert started.wait(timeout=2)
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "UPDATE queue_items SET claimed_by = ?, claimed_at = ? WHERE id = ?",
+                    ("worker-b", "2026-01-01T00:00:00+00:00", first.id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            time.sleep(0.05)
+            release.set()
+            worker.join(timeout=2)
+
+        assert not worker.is_alive()
+        assert errors == []
+        assert summaries == [QueueRunSummary(processed=1, failed=1)]
+        stored_first = queue.get_item(first.id)
+        stored_second = queue.get_item(second.id)
+        assert stored_first is not None
+        assert stored_first.status is QueueStatus.IN_PROGRESS
+        assert stored_first.claimed_by == "worker-b"
+        assert stored_second is not None
+        assert stored_second.status is QueueStatus.PENDING
+        assert any(record.__dict__.get("event") == "queue_item_lease_lost" for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------

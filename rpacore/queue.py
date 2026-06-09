@@ -21,6 +21,10 @@ class QueueStatus(StrEnum):
     FAILED = "failed"
 
 
+class QueueLeaseLostError(RuntimeError):
+    """Raised when a worker no longer owns an in-progress queue item lease."""
+
+
 @dataclass
 class QueueItem:
     """A single work item in the queue."""
@@ -43,12 +47,13 @@ class QueueProvider(Protocol):
     def add(self, item: QueueItem) -> None: ...
     def next_item(self, worker_id: str = "") -> QueueItem | None: ...
     def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None: ...
+    def renew_lease(self, item_id: str, *, claimed_by: str) -> None: ...
     def complete(self, item_id: str, *, claimed_by: str | None = None) -> None: ...
     def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None: ...
 
 
 _DEFAULT_DB_PATH = "queue.db"
-_DEFAULT_CLAIM_TIMEOUT = 30
+_DEFAULT_LEASE_TIMEOUT = 30
 _DEFAULT_MAX_RETRIES = 3
 _SCHEMA_TABLE = "rpacore_schema_versions"
 _QUEUE_SCHEMA_COMPONENT = "queue"
@@ -195,7 +200,7 @@ class SqliteQueue:
     Multi-worker safe: uses BEGIN IMMEDIATE to atomically claim items so
     two workers cannot claim the same item simultaneously.
 
-    Stale reclaim: items left IN_PROGRESS longer than claim_timeout seconds
+    Stale reclaim: items left IN_PROGRESS longer than lease_timeout seconds
     are treated as abandoned and returned to PENDING on the next next_item() call.
 
     Retry: fail() increments retry_count. With retry=True it resets to PENDING
@@ -204,7 +209,7 @@ class SqliteQueue:
 
     Config keys (all from the [queue] section of config.toml):
         db_path        (str)  Path to the SQLite file. Default: "queue.db"
-        claim_timeout  (int)  Seconds before an IN_PROGRESS item is reclaimed. Default: 30
+        lease_timeout  (int)  Seconds before an IN_PROGRESS item is reclaimed. Default: 30
         max_retries    (int)  Max times an item may be retried on fail. Default: 3
     """
 
@@ -212,22 +217,22 @@ class SqliteQueue:
         cfg: dict[str, object] = config or {}
 
         db_path = cfg.get("db_path", _DEFAULT_DB_PATH)
-        claim_timeout = cfg.get("claim_timeout", _DEFAULT_CLAIM_TIMEOUT)
+        lease_timeout = cfg.get("lease_timeout", _DEFAULT_LEASE_TIMEOUT)
         max_retries = cfg.get("max_retries", _DEFAULT_MAX_RETRIES)
 
         if not isinstance(db_path, str):
             raise type_error("queue.db_path", "str", db_path)
-        if isinstance(claim_timeout, bool) or not isinstance(claim_timeout, int):
-            raise type_error("queue.claim_timeout", "int", claim_timeout)
+        if isinstance(lease_timeout, bool) or not isinstance(lease_timeout, int):
+            raise type_error("queue.lease_timeout", "int", lease_timeout)
         if isinstance(max_retries, bool) or not isinstance(max_retries, int):
             raise type_error("queue.max_retries", "int", max_retries)
-        if claim_timeout <= 0:
-            raise value_error("queue.claim_timeout", "int > 0", claim_timeout)
+        if lease_timeout <= 0:
+            raise value_error("queue.lease_timeout", "int > 0", lease_timeout)
         if max_retries < 0:
             raise value_error("queue.max_retries", "int >= 0", max_retries)
 
         self.db_path: str = db_path
-        self.claim_timeout: int = claim_timeout
+        self.lease_timeout: int = lease_timeout
         self.max_retries: int = max_retries
 
         conn = _connect(self.db_path)
@@ -345,7 +350,7 @@ class SqliteQueue:
     def next_item(self, worker_id: str = "") -> QueueItem | None:
         """Atomically claim and return the oldest PENDING item, or None if empty.
 
-        Also reclaims stale IN_PROGRESS items (older than claim_timeout seconds)
+        Also reclaims stale IN_PROGRESS items (older than lease_timeout seconds)
         back to PENDING before selecting.
         """
         if not worker_id:
@@ -366,7 +371,7 @@ class SqliteQueue:
                 "WHERE status = 'in_progress' "
                 "AND claimed_at IS NOT NULL "
                 "AND (CAST(strftime('%s', ?) AS INTEGER) - CAST(strftime('%s', claimed_at) AS INTEGER)) > ?",
-                (now.isoformat(), self.claim_timeout),
+                (now.isoformat(), self.lease_timeout),
             )
             conn.execute("COMMIT")
             transaction_started = False
@@ -421,7 +426,26 @@ class SqliteQueue:
                     (transaction_id, item_id, claimed_by),
                 )
                 if result.rowcount != 1:
-                    raise RuntimeError(
+                    raise QueueLeaseLostError(
+                        f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
+                    )
+        finally:
+            conn.close()
+
+    def renew_lease(self, item_id: str, *, claimed_by: str) -> None:
+        """Extend the currently claimed queue item lease for its owner."""
+        now = datetime.now(timezone.utc)
+        conn = _connect(self.db_path)
+        try:
+            with conn:
+                _ensure_schema(conn)
+                result = conn.execute(
+                    "UPDATE queue_items SET claimed_at = ? "
+                    "WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
+                    (now.isoformat(), item_id, claimed_by),
+                )
+                if result.rowcount != 1:
+                    raise QueueLeaseLostError(
                         f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                     )
         finally:

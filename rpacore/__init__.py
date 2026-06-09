@@ -22,7 +22,7 @@ from rpacore.logger import configure_logger, get_logger
 from rpacore.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifiers, dispatch
 from rpacore.paths import resolve_config_path, resolve_config_paths
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
-from rpacore.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
+from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider, QueueStatus, SqliteQueue
 from rpacore.recovery import resume_transaction
 from rpacore.report import ArtifactReport, SkillReport, TransactionReport, generate_report, render_html, render_text
 from rpacore.runner import QueueRunSummary, run_queue_loop
@@ -56,6 +56,7 @@ __all__ = [
     "optional_config",
     "ProcessContext",
     "QueueItem",
+    "QueueLeaseLostError",
     "QueueProvider",
     "QueueRunSummary",
     "QueueStatus",

@@ -14,7 +14,7 @@ import pytest
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, SystemException
-from rpacore.queue import QueueItem, QueueProvider, QueueStatus, SqliteQueue
+from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider, QueueStatus, SqliteQueue
 from rpacore.runner import run_queue_loop
 from rpacore.skill import Skill
 from rpacore.transaction import Transaction
@@ -40,12 +40,12 @@ def make_item(reference: str = "ref", payload: dict | None = None) -> QueueItem:
 class TestSqliteQueueConfig:
     def test_default_config(self, tmp_path):
         q = make_queue(tmp_path)
-        assert q.claim_timeout == 30
+        assert q.lease_timeout == 30
         assert q.max_retries == 3
 
     def test_custom_config(self, tmp_path):
-        q = make_queue(tmp_path, claim_timeout=60, max_retries=5)
-        assert q.claim_timeout == 60
+        q = make_queue(tmp_path, lease_timeout=60, max_retries=5)
+        assert q.lease_timeout == 60
         assert q.max_retries == 5
 
     def test_bad_db_path_type(self):
@@ -54,19 +54,19 @@ class TestSqliteQueueConfig:
 
         assert str(exc_info.value) == "queue.db_path expected str; got int value=123"
 
-    def test_bad_claim_timeout_type(self, tmp_path):
+    def test_bad_lease_timeout_type(self, tmp_path):
         db = str(tmp_path / "q.db")
         with pytest.raises(TypeError) as exc_info:
-            SqliteQueue({"db_path": db, "claim_timeout": "30"})
+            SqliteQueue({"db_path": db, "lease_timeout": "30"})
 
         assert str(exc_info.value) == (
-            "queue.claim_timeout expected int; got str value='30'"
+            "queue.lease_timeout expected int; got str value='30'"
         )
 
-    def test_claim_timeout_bool_rejected(self, tmp_path):
+    def test_lease_timeout_bool_rejected(self, tmp_path):
         db = str(tmp_path / "q.db")
-        with pytest.raises(TypeError, match="claim_timeout"):
-            SqliteQueue({"db_path": db, "claim_timeout": True})
+        with pytest.raises(TypeError, match="lease_timeout"):
+            SqliteQueue({"db_path": db, "lease_timeout": True})
 
     def test_bad_max_retries_type(self, tmp_path):
         db = str(tmp_path / "q.db")
@@ -82,13 +82,13 @@ class TestSqliteQueueConfig:
         with pytest.raises(TypeError, match="max_retries"):
             SqliteQueue({"db_path": db, "max_retries": False})
 
-    def test_claim_timeout_zero(self, tmp_path):
+    def test_lease_timeout_zero(self, tmp_path):
         db = str(tmp_path / "q.db")
         with pytest.raises(ValueError) as exc_info:
-            SqliteQueue({"db_path": db, "claim_timeout": 0})
+            SqliteQueue({"db_path": db, "lease_timeout": 0})
 
         assert str(exc_info.value) == (
-            "queue.claim_timeout expected int > 0; got int value=0"
+            "queue.lease_timeout expected int > 0; got int value=0"
         )
 
     def test_max_retries_negative(self, tmp_path):
@@ -352,12 +352,17 @@ class TestSqliteQueueIntrospection:
 
     def test_add_once_allows_terminal_reference_by_default(self, tmp_path):
         q = make_queue(tmp_path)
-        q.add(make_item("invoice-1"))
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        first = make_item("invoice-1")
+        first.created_at = base
+        second = make_item("invoice-1")
+        second.created_at = base + timedelta(seconds=1)
+        q.add(first)
         claimed = q.next_item("worker")
         assert claimed is not None
         q.complete(claimed.id, claimed_by="worker")
 
-        assert q.add_once(make_item("invoice-1")) is True
+        assert q.add_once(second) is True
 
         items = q.list_items()
         assert [item.status for item in items] == [
@@ -441,12 +446,104 @@ class TestSqliteQueueIntrospection:
         item = q.next_item("worker")
         assert item is not None
 
-        with pytest.raises(RuntimeError, match="no longer claimed"):
+        with pytest.raises(QueueLeaseLostError, match="no longer claimed"):
             q.bind_transaction(item.id, "tx-001", claimed_by="other-worker")
 
         stored = q.get_item(item.id)
         assert stored is not None
         assert stored.transaction_id == ""
+
+    def test_existing_v1_queue_schema_migrates_transaction_id_column(self, tmp_path):
+        db_path = str(tmp_path / "queue.db")
+        created_at = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE rpacore_schema_versions (
+                    component TEXT PRIMARY KEY,
+                    version   INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE queue_items (
+                    id           TEXT PRIMARY KEY,
+                    reference    TEXT NOT NULL,
+                    payload      TEXT NOT NULL DEFAULT '{}',
+                    status       TEXT NOT NULL DEFAULT 'pending',
+                    retry_count  INTEGER NOT NULL DEFAULT 0,
+                    created_at   TEXT NOT NULL,
+                    claimed_by   TEXT NOT NULL DEFAULT '',
+                    claimed_at   TEXT
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
+                ("queue", 1),
+            )
+            conn.execute(
+                "INSERT INTO queue_items "
+                "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("old", "old-ref", "{}", "pending", 0, created_at, "", None),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        q = SqliteQueue({"db_path": db_path})
+
+        conn = sqlite3.connect(db_path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(queue_items)").fetchall()}
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions WHERE component = 'queue'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        stored = q.get_item("old")
+        assert "transaction_id" in columns
+        assert version == 2
+        assert stored is not None
+        assert stored.transaction_id == ""
+
+    def test_renew_lease_updates_claimed_at_for_claim_owner(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("renew"))
+        item = q.next_item("worker")
+        assert item is not None
+        assert item.claimed_at is not None
+
+        conn = sqlite3.connect(q.db_path)
+        try:
+            stale = datetime.now(timezone.utc) - timedelta(seconds=10)
+            conn.execute(
+                "UPDATE queue_items SET claimed_at = ? WHERE id = ?",
+                (stale.isoformat(), item.id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        q.renew_lease(item.id, claimed_by="worker")
+
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.claimed_at is not None
+        assert stored.claimed_at > stale
+
+    def test_renew_lease_requires_claim_owner(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("renew"))
+        item = q.next_item("worker")
+        assert item is not None
+
+        with pytest.raises(QueueLeaseLostError, match="no longer claimed"):
+            q.renew_lease(item.id, claimed_by="other-worker")
 
     def test_add_recreates_schema_if_database_file_is_deleted_after_init(self, tmp_path):
         q = make_queue(tmp_path)
@@ -526,7 +623,7 @@ class TestSqliteQueueAtomicClaim:
 
 class TestSqliteQueueStaleReclaim:
     def test_stale_item_is_reclaimed(self, tmp_path):
-        q = make_queue(tmp_path, claim_timeout=1)
+        q = make_queue(tmp_path, lease_timeout=1)
         q.add(make_item("stale"))
         item = q.next_item("worker-a")
         assert item is not None
@@ -547,7 +644,7 @@ class TestSqliteQueueStaleReclaim:
         assert reclaimed.claimed_by == "worker-b"
 
     def test_complete_rejects_stale_original_claim(self, tmp_path):
-        q = make_queue(tmp_path, claim_timeout=1)
+        q = make_queue(tmp_path, lease_timeout=1)
         q.add(make_item("stale-complete"))
         item = q.next_item("worker-a")
         assert item is not None
@@ -573,7 +670,7 @@ class TestSqliteQueueStaleReclaim:
         assert stored.claimed_by == "worker-b"
 
     def test_fail_rejects_stale_original_claim(self, tmp_path):
-        q = make_queue(tmp_path, claim_timeout=1)
+        q = make_queue(tmp_path, lease_timeout=1)
         q.add(make_item("stale-fail"))
         item = q.next_item("worker-a")
         assert item is not None

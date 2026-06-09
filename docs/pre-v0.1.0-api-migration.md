@@ -55,7 +55,7 @@ Rows marked `done` have been implemented in this repository.
 | done | `ProcessContext.optional_data()` | Renamed to `optional_state()` for durable transaction state. Resource access is explicit through `resources`. | pre-`v0.1.0` |
 | done | Runner `on_start` return values entered durable item data | Replaced by `resource_scope`, a paired setup/cleanup resource contract. Queue payload populates `ProcessContext.state`; resource scope yield values populate `ProcessContext.resources`. | pre-`v0.1.0` |
 | done | Runner `on_start` lifecycle hook | Removed. Use `resource_scope`, a context manager entered once before queue claims and exited once after processing. Migration example: `on_start=lambda config: {"client": client}` becomes `resource_scope=client_resources(config)`, where `client_resources()` returns a context manager yielding `{"client": client}`. | pre-`v0.1.0` |
-| pending | Queue `claim_timeout` | Rename to `lease_timeout` when queue leases are made explicit. Migration example: `claim_timeout = 30` becomes `lease_timeout = 30`. | pre-`v0.1.0` |
+| done | Queue `claim_timeout` | Renamed to `lease_timeout` when queue leases were made explicit. Migration example: `claim_timeout = 30` becomes `lease_timeout = 30`. | pre-`v0.1.0` |
 
 ## External Example Notes
 
@@ -68,4 +68,3 @@ release-adoption pass. Known example updates likely include:
 - move runtime clients, sessions, and handles to `ctx.resources`
 - replace `require_data` / `optional_data` calls
 - replace `on_start` setup with `resource_scope`
-- rename queue `claim_timeout` to `lease_timeout`

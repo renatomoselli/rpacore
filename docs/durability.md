@@ -92,6 +92,36 @@ runner fails the item loudly instead of creating a replacement transaction. When
 transaction persistence is not configured, queue retries rebuild work from the
 beginning because no durable transaction binding exists.
 
+Initial transaction persistence and queue binding touch separate SQLite write
+domains. The runner persists the pending transaction first, then binds the queue
+item to that id with bounded retry for transient SQLite `locked` or `busy`
+errors. If binding still fails, the runner attempts to delete the unbound
+pending transaction before failing the queue item. If both binding and cleanup
+fail, the transaction row can remain in the transaction database without a queue
+item reference; this is logged as `transaction_initial_cleanup_error` with the
+queue item and transaction identifiers.
+
+Queue claims are leases, not ownership forever. `SqliteQueue` uses
+`lease_timeout` to decide when an `IN_PROGRESS` item is abandoned and may be
+claimed by another worker. While an item is running, `run_queue_loop()` starts
+one runner-owned heartbeat thread that only calls `queue.renew_lease()`; it does
+not run skill code or user callbacks. The heartbeat starts immediately after
+claim and remains active through processing, reporting, callbacks, and the final
+queue transition.
+
+The renewal interval is shorter than `lease_timeout`; for `SqliteQueue` the
+runner uses one third of the lease timeout, bounded between 0.1 and 10 seconds.
+Transient SQLite `locked` or `busy` renewal errors are retried briefly before
+they are treated as renewal failures.
+
+If renewal proves the worker no longer owns the item, the runner records a
+`QueueLeaseLostError`, logs the item and worker identifiers, skips the final
+`complete()` or `fail()` call, and claims no further work. A skill already
+executing when the lease is lost cannot be safely terminated by RPA Core and may
+finish external side effects before the next checkpoint or final transition
+observes the loss. Queue delivery is therefore at least once; skills should be
+idempotent when they perform external side effects.
+
 ## Timestamps and History
 
 `Transaction.created_at` is set when a new transaction object is constructed.
@@ -176,7 +206,7 @@ Queue persistence remains under the queue section:
 ```toml
 [queue]
 db_path = "queue.db"
-claim_timeout = 30
+lease_timeout = 30
 max_retries = 3
 ```
 
@@ -207,7 +237,7 @@ The SQLite queue records its own component version:
 
 ```text
 component = "queue"
-version   = 1
+version   = 2
 ```
 
 This lets transaction and queue tables safely coexist in one SQLite file if a
@@ -217,7 +247,7 @@ independent.
 ## Migrations
 
 Transaction schema migrations are explicit and sequential. The current latest
-transaction schema is version 3.
+transaction schema is version 5.
 
 Version 1 stores:
 
@@ -241,8 +271,16 @@ Version 3 adds:
 - transaction `finished_at`
 - append-only `transaction_history`
 
+Version 4 adds:
+
+- transaction metadata
+
+Version 5 adds:
+
+- transaction artifacts
+
 Private-development databases created before component schema versions are still
-readable. When opened, they are migrated to transaction schema version 3 by
+readable. When opened, they are migrated to transaction schema version 5 by
 adding missing columns and recording the component version.
 
 Migration defaults must not invent execution history. Current legacy defaults
@@ -254,6 +292,8 @@ are deliberately limited:
 - missing `transactions.started_at` and `transactions.finished_at` remain
   explicitly unknown
 - missing history defaults to no history entries
+- missing metadata defaults to an empty object
+- missing artifacts default to an empty list
 
 Future persisted models must add fixture-based migration tests from the previous
 latest schema to the new latest schema.
