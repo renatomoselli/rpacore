@@ -76,6 +76,22 @@ Queue resource lifecycle:
 - resource setup failures prevent queue claims
 - resource cleanup failures propagate after already-decided queue outcomes
 
+When `run_queue_loop()` is configured with `transaction_db_path`, queue items
+also retain a durable `transaction_id` binding. On the first claim, the runner
+builds the transaction, validates and seeds queue payload into transaction state,
+strictly persists the pending transaction, binds that transaction id to the
+claimed queue item, and only then begins skill execution. The binding is guarded
+by the queue claim owner, so a worker that no longer owns the claim cannot attach
+a transaction.
+
+On a later queue retry, a bound item resumes the same persisted transaction with
+fresh executable skill instances from `build_transaction(item)`. Persisted state
+is authoritative on retry; queue payload is not applied a second time. If the
+bound transaction is missing or cannot be matched to the supplied skills, the
+runner fails the item loudly instead of creating a replacement transaction. When
+transaction persistence is not configured, queue retries rebuild work from the
+beginning because no durable transaction binding exists.
+
 ## Timestamps and History
 
 `Transaction.created_at` is set when a new transaction object is constructed.

@@ -15,12 +15,13 @@ from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore._validation import type_error
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialProvider
-from rpacore.exceptions import BusinessException, ExecutionValidationError
+from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.engine import Engine
 from rpacore.logger import get_logger
 from rpacore.notify import Notifier, dispatch
 from rpacore.persistence import save_transaction
 from rpacore.queue import QueueItem, QueueProvider
+from rpacore.recovery import resume_transaction
 from rpacore.report import generate_report
 from rpacore.status import Status
 from rpacore.transaction import HistoryEvent, Transaction
@@ -37,6 +38,10 @@ class _CheckpointError(RuntimeError):
         super().__init__(str(original))
         self.original = original
         self.retry = retry
+
+
+class _DurableTransactionBindingError(RuntimeError):
+    """Raised when a persisted queue transaction binding cannot be honored."""
 
 
 @dataclass
@@ -225,23 +230,15 @@ def _run_items(
             extra={"event": "queue_item_start", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
         )
         try:
-            transaction = build_transaction(item)
-            validate_json_object(item.payload, path="queue item payload")
-            state_collisions = sorted(set(transaction.state).intersection(item.payload))
-            if state_collisions:
-                log.warning(
-                    "Queue item payload overwrote pre-existing transaction state keys",
-                    extra={
-                        "event": "queue_payload_state_collision",
-                        "queue_item_id": item.id,
-                        "queue_reference": item.reference,
-                        "transaction_id": transaction.id,
-                        "transaction_reference": transaction.reference,
-                        "state_keys": state_collisions,
-                        "worker_id": worker_id,
-                    },
-                )
-            transaction.state = {**transaction.state, **item.payload}
+            transaction = _transaction_for_queue_item(
+                queue,
+                item,
+                build_transaction,
+                transaction_db_path=transaction_db_path,
+                worker_id=worker_id,
+                log=log,
+                summary=summary,
+            )
             ctx = ProcessContext(
                 transaction=transaction,
                 config=config,
@@ -307,6 +304,8 @@ def _run_items(
         else:
             if isinstance(error, _CheckpointError):
                 retry = error.retry
+            elif isinstance(error, _DurableTransactionBindingError):
+                retry = False
             elif isinstance(error, (ExecutionValidationError, JsonStateError)):
                 retry = False
             else:
@@ -325,6 +324,106 @@ def _run_items(
                 )
 
     return summary
+
+
+def _transaction_for_queue_item(
+    queue: QueueProvider,
+    item: QueueItem,
+    build_transaction: Callable[[QueueItem], Transaction],
+    *,
+    transaction_db_path: str | None,
+    worker_id: str,
+    log: logging.Logger,
+    summary: QueueRunSummary,
+) -> Transaction:
+    if transaction_db_path is None:
+        transaction = build_transaction(item)
+        _seed_transaction_state_from_payload(transaction, item, worker_id=worker_id, log=log)
+        return transaction
+
+    if item.transaction_id:
+        try:
+            candidate = build_transaction(item)
+            return resume_transaction(
+                item.transaction_id,
+                candidate.skills,
+                db_path=transaction_db_path,
+            )
+        except (KeyError, sqlite3.Error, SystemException, ValueError) as exc:
+            raise _DurableTransactionBindingError(
+                f"Queue item {item.id!r} is bound to transaction "
+                f"{item.transaction_id!r}, but it cannot be resumed: {exc}"
+            ) from exc
+
+    transaction = build_transaction(item)
+    _seed_transaction_state_from_payload(transaction, item, worker_id=worker_id, log=log)
+    error = _save_transaction_with_retries(transaction, db_path=transaction_db_path)
+    if error is not None:
+        summary.persistence_errors += 1
+        log.error(
+            "Initial transaction persistence failed",
+            extra={
+                "event": "transaction_initial_persistence_error",
+                "queue_item_id": item.id,
+                "queue_reference": item.reference,
+                "transaction_id": transaction.id,
+                "transaction_reference": transaction.reference,
+                "worker_id": worker_id,
+            },
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        raise _CheckpointError(error, retry=True) from error
+    try:
+        queue.bind_transaction(item.id, transaction.id, claimed_by=item.claimed_by)
+    except Exception as exc:
+        cleanup_error = _delete_transaction_with_retries(
+            transaction.id,
+            db_path=transaction_db_path,
+        )
+        if cleanup_error is not None:
+            summary.persistence_errors += 1
+            log.error(
+                "Initial transaction cleanup failed after queue binding error",
+                extra={
+                    "event": "transaction_initial_cleanup_error",
+                    "queue_item_id": item.id,
+                    "queue_reference": item.reference,
+                    "transaction_id": transaction.id,
+                    "transaction_reference": transaction.reference,
+                    "worker_id": worker_id,
+                },
+                exc_info=(type(cleanup_error), cleanup_error, cleanup_error.__traceback__),
+            )
+        raise _DurableTransactionBindingError(
+            f"Queue item {item.id!r} could not bind transaction {transaction.id!r}: {exc}"
+        ) from exc
+    item.transaction_id = transaction.id
+    return transaction
+
+
+def _seed_transaction_state_from_payload(
+    transaction: Transaction,
+    item: QueueItem,
+    *,
+    worker_id: str,
+    log: logging.Logger,
+) -> None:
+    validate_json_object(item.payload, path="queue item payload")
+    state_collisions = sorted(set(transaction.state).intersection(item.payload))
+    if state_collisions:
+        log.warning(
+            "Queue item payload overwrote pre-existing transaction state keys",
+            extra={
+                "event": "queue_payload_state_collision",
+                "queue_item_id": item.id,
+                "queue_reference": item.reference,
+                "transaction_id": transaction.id,
+                "transaction_reference": transaction.reference,
+                "state_keys": state_collisions,
+                "worker_id": worker_id,
+            },
+        )
+    transaction.state = {**transaction.state, **item.payload}
 
 
 def _transaction_has_only_business_failures(transaction: Transaction | None) -> bool:
@@ -407,3 +506,40 @@ def _save_transaction_with_retries(transaction: Transaction, *, db_path: str) ->
         except Exception as exc:
             return exc
     return None
+
+
+def _delete_transaction_with_retries(transaction_id: str, *, db_path: str) -> Exception | None:
+    """Delete a not-yet-bound transaction, retrying short-lived SQLite lock failures."""
+    for attempt in range(_PERSISTENCE_SAVE_ATTEMPTS):
+        try:
+            _delete_transaction(transaction_id, db_path=db_path)
+            return None
+        except sqlite3.OperationalError as exc:
+            if attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1:
+                return exc
+            time.sleep(_PERSISTENCE_RETRY_DELAY_SECONDS * (2 ** attempt))
+        except MemoryError:
+            raise
+        except Exception as exc:
+            return exc
+    return None
+
+
+def _delete_transaction(transaction_id: str, *, db_path: str) -> None:
+    """Remove a pending transaction record created before queue binding."""
+    conn = sqlite3.connect(db_path, timeout=1)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        with conn:
+            conn.execute(
+                "DELETE FROM exceptions WHERE skill_id IN "
+                "(SELECT id FROM skills WHERE transaction_id = ?)",
+                (transaction_id,),
+            )
+            conn.execute("DELETE FROM skills WHERE transaction_id = ?", (transaction_id,))
+            conn.execute("DELETE FROM transaction_history WHERE transaction_id = ?", (transaction_id,))
+            conn.execute("DELETE FROM transaction_metadata WHERE transaction_id = ?", (transaction_id,))
+            conn.execute("DELETE FROM transaction_artifacts WHERE transaction_id = ?", (transaction_id,))
+            conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+    finally:
+        conn.close()

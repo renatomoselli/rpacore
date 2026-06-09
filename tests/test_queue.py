@@ -421,7 +421,32 @@ class TestSqliteQueueIntrospection:
         finally:
             conn.close()
 
-        assert version == 1
+        assert version == 2
+
+    def test_bind_transaction_persists_claim_owned_transaction_id(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("bind"))
+        item = q.next_item("worker")
+        assert item is not None
+
+        q.bind_transaction(item.id, "tx-001", claimed_by="worker")
+
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.transaction_id == "tx-001"
+
+    def test_bind_transaction_requires_claim_owner(self, tmp_path):
+        q = make_queue(tmp_path)
+        q.add(make_item("bind"))
+        item = q.next_item("worker")
+        assert item is not None
+
+        with pytest.raises(RuntimeError, match="no longer claimed"):
+            q.bind_transaction(item.id, "tx-001", claimed_by="other-worker")
+
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.transaction_id == ""
 
     def test_add_recreates_schema_if_database_file_is_deleted_after_init(self, tmp_path):
         q = make_queue(tmp_path)

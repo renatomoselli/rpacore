@@ -33,6 +33,7 @@ class QueueItem:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     claimed_by: str = ""
     claimed_at: datetime | None = None
+    transaction_id: str = ""
 
 
 @runtime_checkable
@@ -41,6 +42,7 @@ class QueueProvider(Protocol):
 
     def add(self, item: QueueItem) -> None: ...
     def next_item(self, worker_id: str = "") -> QueueItem | None: ...
+    def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None: ...
     def complete(self, item_id: str, *, claimed_by: str | None = None) -> None: ...
     def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None: ...
 
@@ -50,7 +52,7 @@ _DEFAULT_CLAIM_TIMEOUT = 30
 _DEFAULT_MAX_RETRIES = 3
 _SCHEMA_TABLE = "rpacore_schema_versions"
 _QUEUE_SCHEMA_COMPONENT = "queue"
-_QUEUE_SCHEMA_VERSION = 1
+_QUEUE_SCHEMA_VERSION = 2
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -59,6 +61,16 @@ def _connect(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row["name"] for row in rows}
+
+
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    if column_name not in _table_columns(conn, table_name):
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
@@ -77,9 +89,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             retry_count  INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL,
             claimed_by   TEXT NOT NULL DEFAULT '',
-            claimed_at   TEXT
+            claimed_at   TEXT,
+            transaction_id TEXT NOT NULL DEFAULT ''
         )
     """)
+    _ensure_column(conn, "queue_items", "transaction_id", "transaction_id TEXT NOT NULL DEFAULT ''")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_queue_items_created_at_id "
         "ON queue_items (created_at ASC, id ASC)"
@@ -120,6 +134,7 @@ def _row_to_item(row: sqlite3.Row, *, payload: dict[str, object] | None = None) 
         created_at=datetime.fromisoformat(row["created_at"]),
         claimed_by=row["claimed_by"],
         claimed_at=claimed_at,
+        transaction_id=row["transaction_id"],
     )
 
 
@@ -158,8 +173,8 @@ def _insert_item(conn: sqlite3.Connection, item: QueueItem) -> None:
     validate_json_object(item.payload, path="queue item payload")
     conn.execute(
         "INSERT INTO queue_items "
-        "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at, transaction_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             item.id,
             item.reference,
@@ -169,6 +184,7 @@ def _insert_item(conn: sqlite3.Connection, item: QueueItem) -> None:
             item.created_at.isoformat(),
             item.claimed_by,
             item.claimed_at.isoformat() if item.claimed_at else None,
+            item.transaction_id,
         ),
     )
 
@@ -390,6 +406,24 @@ class SqliteQueue:
             if transaction_started:
                 conn.execute("ROLLBACK")
             raise
+        finally:
+            conn.close()
+
+    def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
+        """Bind a persisted transaction id to the currently claimed queue item."""
+        conn = _connect(self.db_path)
+        try:
+            with conn:
+                _ensure_schema(conn)
+                result = conn.execute(
+                    "UPDATE queue_items SET transaction_id = ? "
+                    "WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
+                    (transaction_id, item_id, claimed_by),
+                )
+                if result.rowcount != 1:
+                    raise RuntimeError(
+                        f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
+                    )
         finally:
             conn.close()
 

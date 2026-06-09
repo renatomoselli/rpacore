@@ -1117,7 +1117,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 1), ("transactions", 5)]
+        assert rows == [("queue", 2), ("transactions", 5)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)

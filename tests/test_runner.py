@@ -35,12 +35,16 @@ class _FakeQueue:
         self.completed: list[str] = []
         self.failed: list[str] = []
         self.fail_retries: list[bool] = []
+        self.bindings: list[tuple[str, str, str]] = []
 
     def next_item(self, worker_id: str = "") -> QueueItem | None:
         return self._items.pop(0) if self._items else None
 
     def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
         self.completed.append(item_id)
+
+    def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
+        self.bindings.append((item_id, transaction_id, claimed_by))
 
     def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None:
         self.failed.append(item_id)
@@ -483,7 +487,8 @@ class TestRunnerManagedTransactionPersistence:
 
     def test_checkpoint_failure_is_counted_logged_and_prevents_completion(self, monkeypatch, caplog) -> None:
         def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
-            raise RuntimeError("sqlite locked")
+            if transaction.history:
+                raise RuntimeError("sqlite locked")
 
         monkeypatch.setattr(runner_module, "save_transaction", _fail_save)
         logger = logging.getLogger("test.runner.persistence")
@@ -520,7 +525,7 @@ class TestRunnerManagedTransactionPersistence:
 
         assert summary.persistence_errors == 0
         assert queue.completed == ["ok"]
-        assert attempts == ["ok", "ok", "ok", "ok", "ok", "ok"]
+        assert attempts == ["ok", "ok", "ok", "ok", "ok", "ok", "ok"]
         assert sleeps == [0.05, 0.1]
 
     def test_persistence_memory_error_propagates(self, monkeypatch) -> None:
@@ -534,7 +539,8 @@ class TestRunnerManagedTransactionPersistence:
 
     def test_checkpoint_failure_visible_to_after_item_and_fails_queue_item(self, monkeypatch) -> None:
         def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
-            raise RuntimeError("write failed")
+            if transaction.history:
+                raise RuntimeError("write failed")
 
         errors: list[Exception | None] = []
         monkeypatch.setattr(runner_module, "save_transaction", _fail_save)
@@ -621,6 +627,208 @@ class TestRunnerManagedTransactionPersistence:
         assert loaded.skills[0].status is Status.SUCCESSFUL
         assert loaded.skills[1].status is Status.FAILED
         assert loaded.state == {"first": "done"}
+
+    def test_initial_transaction_is_persisted_and_bound_before_skill_execution(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        events: list[str] = []
+
+        class BindingQueue(_FakeQueue):
+            def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
+                loaded = load_transaction(transaction_id, db_path)
+                assert loaded.status is Status.PENDING
+                assert loaded.history == []
+                events.append("bind")
+                super().bind_transaction(item_id, transaction_id, claimed_by=claimed_by)
+
+        class RecordingSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                events.append("execute")
+
+        item = _item("ordered")
+        queue = BindingQueue([item])
+
+        run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda queue_item: Transaction(
+                reference=queue_item.reference,
+                skills=[RecordingSkill("record", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=db_path,
+        )
+
+        assert events == ["bind", "execute"]
+        assert queue.bindings[0][1] == item.transaction_id
+
+    def test_bind_failure_removes_initial_transaction_and_fails_without_retry(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        errors: list[Exception | None] = []
+
+        class FailingBindQueue(_FakeQueue):
+            def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
+                raise RuntimeError("lost claim")
+
+        queue = FailingBindQueue([_item("bind-fail")])
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_SuccessSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=db_path,
+            after_item=lambda item, tx, err: errors.append(err),
+        )
+
+        assert summary.failed == 1
+        assert summary.completed == 0
+        assert summary.persistence_errors == 0
+        assert queue.failed == ["bind-fail"]
+        assert queue.fail_retries == [False]
+        assert list_transactions(db_path) == []
+        assert errors
+        assert "could not bind transaction" in str(errors[0])
+
+    def test_persisted_queue_retry_resumes_same_transaction_and_skips_successful_skills(
+        self,
+        tmp_path,
+    ) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        item = _item("retry")
+        queue = _FakeQueue([item, item])
+        counts: dict[str, int] = {"first": 0, "second": 0}
+        build_calls = 0
+
+        class FirstSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                counts["first"] += 1
+                ctx.state["first"] = "done"
+
+        class FailsOnceSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                counts["second"] += 1
+                if counts["second"] == 1:
+                    raise SystemException("temporary", action=self.name)
+
+        def build(queue_item: QueueItem) -> Transaction:
+            nonlocal build_calls
+            build_calls += 1
+            return Transaction(
+                reference=queue_item.reference,
+                skills=[FirstSkill("first", 1), FailsOnceSkill("second", 2)],
+            )
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=build,
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=db_path,
+        )
+
+        transactions = list_transactions(db_path)
+        assert summary.processed == 2
+        assert summary.failed == 1
+        assert summary.completed == 1
+        assert build_calls == 2
+        assert len(transactions) == 1
+        assert transactions[0].id == item.transaction_id
+        assert transactions[0].status is Status.SUCCESSFUL
+        assert counts == {"first": 1, "second": 2}
+        assert queue.fail_retries == [True]
+        assert queue.completed == ["retry"]
+
+    def test_bound_queue_retry_does_not_reapply_payload_state(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        item = _item("payload")
+        item.payload = {"invoice": "payload"}
+        queue = _FakeQueue([item, item])
+        attempts = 0
+
+        class DurableStateSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                ctx.state["invoice"] = "durable"
+
+        class FailsOnceSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise SystemException("temporary", action=self.name)
+
+        def build(queue_item: QueueItem) -> Transaction:
+            return Transaction(
+                reference=queue_item.reference,
+                skills=[DurableStateSkill("state", 1), FailsOnceSkill("retry", 2)],
+            )
+
+        run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=build,
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=db_path,
+        )
+
+        loaded = load_transaction(item.transaction_id, db_path)
+        assert loaded.state["invoice"] == "durable"
+
+    def test_missing_bound_transaction_fails_loudly_without_replacement(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        item = _item("missing")
+        item.transaction_id = "missing-transaction"
+        errors: list[Exception | None] = []
+
+        summary, queue = _run(
+            [item],
+            transaction_db_path=db_path,
+            after_item=lambda item, tx, err: errors.append(err),
+        )
+
+        assert summary.failed == 1
+        assert queue.failed == ["missing"]
+        assert queue.fail_retries == [False]
+        assert list_transactions(db_path) == []
+        assert errors
+        assert "missing-transaction" in str(errors[0])
+
+    def test_bound_transaction_sqlite_resume_error_fails_without_retry(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        item = _item("sqlite-resume")
+        item.transaction_id = "tx-bound"
+        errors: list[Exception | None] = []
+
+        def _fail_resume(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(runner_module, "resume_transaction", _fail_resume)
+
+        summary, queue = _run(
+            [item],
+            transaction_db_path=db_path,
+            after_item=lambda item, tx, err: errors.append(err),
+        )
+
+        assert summary.failed == 1
+        assert queue.failed == ["sqlite-resume"]
+        assert queue.fail_retries == [False]
+        assert errors
+        assert "tx-bound" in str(errors[0])
 
     def test_default_transaction_db_path_preserves_current_behavior(self, monkeypatch) -> None:
         calls: list[Transaction] = []
