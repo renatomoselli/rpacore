@@ -470,7 +470,7 @@ class SqliteQueue:
                         (item_id, claimed_by),
                     )
                     if result.rowcount != 1:
-                        raise RuntimeError(
+                        raise QueueLeaseLostError(
                             f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                         )
         finally:
@@ -494,7 +494,7 @@ class SqliteQueue:
                     ).fetchone()
                 if row is None:
                     if claimed_by is not None:
-                        raise RuntimeError(
+                        raise QueueLeaseLostError(
                             f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                         )
                     return
@@ -526,7 +526,7 @@ class SqliteQueue:
                             (new_count, item_id, claimed_by),
                         )
                 if claimed_by is not None and result.rowcount != 1:
-                    raise RuntimeError(
+                    raise QueueLeaseLostError(
                         f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                     )
         finally:

@@ -515,9 +515,10 @@ class TestRunnerManagedTransactionPersistence:
             for record in caplog.records
         )
 
-    def test_transient_sqlite_persistence_failure_is_retried(self, monkeypatch) -> None:
+    def test_transient_sqlite_persistence_failure_is_retried(self, monkeypatch, caplog) -> None:
         attempts: list[str] = []
         sleeps: list[float] = []
+        logger = logging.getLogger("test.runner.sqlite.retry")
 
         def _save_after_two_failures(transaction: Transaction, db_path: str = "rpacore.db") -> None:
             attempts.append(transaction.reference)
@@ -527,12 +528,204 @@ class TestRunnerManagedTransactionPersistence:
         monkeypatch.setattr(runner_module, "save_transaction", _save_after_two_failures)
         monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
 
-        summary, queue = _run([_item("ok")], transaction_db_path="transactions.db")
+        with caplog.at_level(logging.WARNING, logger=logger.name):
+            summary, queue = _run(
+                [_item("ok")],
+                transaction_db_path="transactions.db",
+                logger=logger,
+            )
 
         assert summary.persistence_errors == 0
         assert queue.completed == ["ok"]
         assert attempts == ["ok", "ok", "ok", "ok", "ok", "ok", "ok"]
         assert sleeps == [0.05, 0.1]
+        assert [
+            record.__dict__.get("retry_delay_seconds")
+            for record in caplog.records
+            if record.__dict__.get("event") == "transaction_initial_persistence_retry"
+        ] == [0.05, 0.1]
+
+    def test_non_transient_sqlite_persistence_failure_is_not_retried(self, monkeypatch) -> None:
+        attempts: list[str] = []
+        sleeps: list[float] = []
+
+        def _fail_with_non_transient_operational_error(
+            transaction: Transaction,
+            db_path: str = "rpacore.db",
+        ) -> None:
+            attempts.append(transaction.reference)
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(runner_module, "save_transaction", _fail_with_non_transient_operational_error)
+        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
+
+        summary, queue = _run([_item("ok")], transaction_db_path="transactions.db")
+
+        assert summary.persistence_errors == 1
+        assert queue.failed == ["ok"]
+        assert queue.fail_retries == [True]
+        assert attempts == ["ok"]
+        assert sleeps == []
+
+    def test_complete_transition_retries_transient_sqlite_lock(self, monkeypatch) -> None:
+        sleeps: list[float] = []
+
+        class LockedCompleteQueue(_FakeQueue):
+            def __init__(self, items: list[QueueItem]) -> None:
+                super().__init__(items)
+                self.complete_attempts = 0
+
+            def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
+                self.complete_attempts += 1
+                if self.complete_attempts < 3:
+                    raise sqlite3.OperationalError("database is locked")
+                super().complete(item_id, claimed_by=claimed_by)
+
+        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
+        queue = LockedCompleteQueue([_item("ok")])
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_SuccessSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+        )
+
+        assert summary.completed == 1
+        assert queue.complete_attempts == 3
+        assert queue.completed == ["ok"]
+        assert sleeps == [0.05, 0.1]
+
+    def test_fail_transition_retries_transient_sqlite_lock(self, monkeypatch) -> None:
+        sleeps: list[float] = []
+
+        class LockedFailQueue(_FakeQueue):
+            def __init__(self, items: list[QueueItem]) -> None:
+                super().__init__(items)
+                self.fail_attempts = 0
+
+            def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None:
+                self.fail_attempts += 1
+                if self.fail_attempts < 3:
+                    raise sqlite3.OperationalError("database is busy")
+                super().fail(item_id, retry=retry, claimed_by=claimed_by)
+
+        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
+        queue = LockedFailQueue([_item("bad")])
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_SystemFailSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+        )
+
+        assert summary.failed == 1
+        assert queue.fail_attempts == 3
+        assert queue.failed == ["bad"]
+        assert queue.fail_retries == [True]
+        assert sleeps == [0.05, 0.1]
+
+    def test_non_transient_complete_transition_failure_is_loud(self, monkeypatch) -> None:
+        sleeps: list[float] = []
+
+        class BrokenCompleteQueue(_FakeQueue):
+            def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
+                raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
+        queue = BrokenCompleteQueue([_item("ok")])
+
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SuccessSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="test-worker",
+            )
+
+        assert queue.completed == []
+        assert sleeps == []
+
+    def test_heartbeat_memory_error_propagates_to_main_thread(self, monkeypatch) -> None:
+        class MemoryErrorRenewQueue(_FakeQueue):
+            lease_timeout = 1
+
+            def renew_lease(self, item_id: str, *, claimed_by: str) -> None:
+                raise MemoryError("heartbeat exhausted memory")
+
+        monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 0.01)
+        queue = MemoryErrorRenewQueue([_item("memory")])
+
+        class _WaitSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+        with pytest.raises(MemoryError, match="heartbeat exhausted memory"):
+            run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_WaitSkill("wait", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="test-worker",
+            )
+
+    def test_complete_transition_memory_error_propagates(self) -> None:
+        class MemoryErrorCompleteQueue(_FakeQueue):
+            def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
+                raise MemoryError("complete exhausted memory")
+
+        with pytest.raises(MemoryError, match="complete exhausted memory"):
+            run_queue_loop(
+                queue=MemoryErrorCompleteQueue([_item("ok")]),
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SuccessSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="test-worker",
+            )
+
+    def test_fail_transition_memory_error_propagates(self) -> None:
+        class MemoryErrorFailQueue(_FakeQueue):
+            def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None:
+                raise MemoryError("fail exhausted memory")
+
+        with pytest.raises(MemoryError, match="fail exhausted memory"):
+            run_queue_loop(
+                queue=MemoryErrorFailQueue([_item("bad")]),
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SystemFailSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="test-worker",
+            )
 
     def test_persistence_memory_error_propagates(self, monkeypatch) -> None:
         def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
@@ -730,9 +923,15 @@ class TestRunnerManagedTransactionPersistence:
         assert errors
         assert "initial save failed" in str(errors[0])
 
-    def test_bind_transaction_retries_transient_sqlite_lock(self, monkeypatch, tmp_path) -> None:
+    def test_bind_transaction_retries_transient_sqlite_lock(
+        self,
+        monkeypatch,
+        tmp_path,
+        caplog,
+    ) -> None:
         db_path = str(tmp_path / "transactions.db")
         sleeps: list[float] = []
+        logger = logging.getLogger("test.runner.bind.retry")
 
         class LockedThenBindingQueue(_FakeQueue):
             def __init__(self, items: list[QueueItem]) -> None:
@@ -748,8 +947,55 @@ class TestRunnerManagedTransactionPersistence:
         monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
         queue = LockedThenBindingQueue([_item("bind-lock")])
 
+        with caplog.at_level(logging.WARNING, logger=logger.name):
+            summary = run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SuccessSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="test-worker",
+                transaction_db_path=db_path,
+                logger=logger,
+            )
+
+        assert summary.completed == 1
+        assert summary.failed == 0
+        assert queue.attempts == 3
+        assert queue.bindings
+        assert sleeps == [0.05, 0.1]
+        bind_retries = [
+            record for record in caplog.records
+            if record.__dict__.get("event") == "queue_bind_transaction_retry"
+        ]
+        assert [record.__dict__.get("queue_item_id") for record in bind_retries] == ["bind-lock", "bind-lock"]
+        assert [record.__dict__.get("worker_id") for record in bind_retries] == ["test-worker", "test-worker"]
+
+    def test_non_transient_initial_cleanup_error_is_not_retried(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        cleanup_attempts: list[str] = []
+        sleeps: list[float] = []
+
+        class FailingBindQueue(_FakeQueue):
+            def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
+                raise RuntimeError("bind failed")
+
+        def _fail_delete(transaction_id: str, *, db_path: str) -> None:
+            cleanup_attempts.append(transaction_id)
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(runner_module, "_delete_transaction", _fail_delete)
+        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
+
         summary = run_queue_loop(
-            queue=queue,
+            queue=FailingBindQueue([_item("cleanup")]),
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
@@ -761,11 +1007,39 @@ class TestRunnerManagedTransactionPersistence:
             transaction_db_path=db_path,
         )
 
-        assert summary.completed == 1
-        assert summary.failed == 0
-        assert queue.attempts == 3
-        assert queue.bindings
-        assert sleeps == [0.05, 0.1]
+        assert summary.failed == 1
+        assert summary.persistence_errors == 1
+        assert len(cleanup_attempts) == 1
+        assert sleeps == []
+
+    def test_sqlite_retry_helper_logs_shape_and_delay(self, monkeypatch, caplog) -> None:
+        sleeps: list[float] = []
+        logger = logging.getLogger("test.runner.retry.helper")
+        error = sqlite3.OperationalError("database is locked")
+        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
+
+        with caplog.at_level(logging.WARNING, logger=logger.name):
+            runner_module._sleep_before_sqlite_retry(
+                2,
+                delay_seconds=0.25,
+                log=logger,
+                event="retry_event",
+                operation="retry_operation",
+                queue_item_id="item-1",
+                worker_id="worker-1",
+                error=error,
+                max_attempts=7,
+            )
+
+        assert sleeps == [1.0]
+        record = caplog.records[0]
+        assert record.__dict__.get("event") == "retry_event"
+        assert record.__dict__.get("operation") == "retry_operation"
+        assert record.__dict__.get("queue_item_id") == "item-1"
+        assert record.__dict__.get("worker_id") == "worker-1"
+        assert record.__dict__.get("attempt") == 3
+        assert record.__dict__.get("max_attempts") == 7
+        assert record.__dict__.get("retry_delay_seconds") == 1.0
 
     def test_persisted_queue_retry_resumes_same_transaction_and_skips_successful_skills(
         self,

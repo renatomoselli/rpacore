@@ -57,7 +57,7 @@ class _LeaseHeartbeat:
 
     stop_event: threading.Event
     thread: threading.Thread
-    error: Exception | None = None
+    error: BaseException | None = None
 
     def raise_if_failed(self) -> None:
         if self.error is not None:
@@ -254,7 +254,7 @@ def _run_items(
             "Processing queue item",
             extra={"event": "queue_item_start", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
         )
-        heartbeat = _start_lease_heartbeat(queue, item)
+        heartbeat = _start_lease_heartbeat(queue, item, worker_id=worker_id, log=log)
         try:
             transaction = _transaction_for_queue_item(
                 queue,
@@ -306,6 +306,9 @@ def _run_items(
             except QueueLeaseLostError as exc:
                 error = exc
                 lease_lost = True
+            except MemoryError:
+                _stop_lease_heartbeat(heartbeat)
+                raise
             except Exception as exc:
                 if error is None:
                     error = exc
@@ -344,6 +347,9 @@ def _run_items(
             except QueueLeaseLostError as exc:
                 error = exc
                 lease_lost = True
+            except MemoryError:
+                _stop_lease_heartbeat(heartbeat)
+                raise
             except Exception as exc:
                 if error is None:
                     error = exc
@@ -356,7 +362,14 @@ def _run_items(
 
         if originally_intended_complete:
             try:
-                queue.complete(item.id, claimed_by=item.claimed_by)
+                transition_error = _complete_queue_item_with_retries(
+                    queue,
+                    item,
+                    worker_id=worker_id,
+                    log=log,
+                )
+                if transition_error is not None:
+                    raise transition_error
                 summary.completed += 1
                 if callback_failed:
                     summary.callback_errors += 1
@@ -382,7 +395,15 @@ def _run_items(
                     or not _transaction_has_only_business_failures(transaction)
                 )
             try:
-                queue.fail(item.id, retry=retry, claimed_by=item.claimed_by)
+                transition_error = _fail_queue_item_with_retries(
+                    queue,
+                    item,
+                    retry=retry,
+                    worker_id=worker_id,
+                    log=log,
+                )
+                if transition_error is not None:
+                    raise transition_error
                 summary.failed += 1
                 if not error and not callback_failed and ctx is not None:
                     log.warning(
@@ -419,7 +440,13 @@ def _lease_only_checkpoint(heartbeat: _LeaseHeartbeat) -> Callable[[Transaction]
     return checkpoint
 
 
-def _start_lease_heartbeat(queue: QueueProvider, item: QueueItem) -> _LeaseHeartbeat:
+def _start_lease_heartbeat(
+    queue: QueueProvider,
+    item: QueueItem,
+    *,
+    worker_id: str,
+    log: logging.Logger,
+) -> _LeaseHeartbeat:
     """Start one runner-owned heartbeat thread for a claimed queue item."""
     stop_event = threading.Event()
     heartbeat = _LeaseHeartbeat(
@@ -429,9 +456,15 @@ def _start_lease_heartbeat(queue: QueueProvider, item: QueueItem) -> _LeaseHeart
 
     def run() -> None:
         while not stop_event.is_set():
-            error = _renew_lease_with_retries(queue, item.id, claimed_by=item.claimed_by)
+            error = _renew_lease_with_retries(
+                queue,
+                item.id,
+                claimed_by=item.claimed_by,
+                log=log,
+                worker_id=worker_id,
+            )
             if error is not None:
-                if isinstance(error, QueueLeaseLostError):
+                if isinstance(error, (QueueLeaseLostError, MemoryError)):
                     heartbeat.error = error
                 else:
                     heartbeat.error = _LeaseRenewalError(
@@ -474,6 +507,8 @@ def _renew_lease_with_retries(
     item_id: str,
     *,
     claimed_by: str,
+    log: logging.Logger,
+    worker_id: str,
 ) -> Exception | None:
     for attempt in range(_LEASE_RENEW_ATTEMPTS):
         try:
@@ -482,7 +517,84 @@ def _renew_lease_with_retries(
         except sqlite3.OperationalError as exc:
             if not _is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
                 return exc
-            time.sleep(_LEASE_RETRY_DELAY_SECONDS * (2 ** attempt))
+            _sleep_before_sqlite_retry(
+                attempt,
+                delay_seconds=_LEASE_RETRY_DELAY_SECONDS,
+                log=log,
+                event="queue_lease_renewal_retry",
+                operation="renew_lease",
+                queue_item_id=item_id,
+                worker_id=worker_id,
+                error=exc,
+                max_attempts=_LEASE_RENEW_ATTEMPTS,
+            )
+        except MemoryError as exc:
+            return exc
+        except Exception as exc:
+            return exc
+    return None
+
+
+def _complete_queue_item_with_retries(
+    queue: QueueProvider,
+    item: QueueItem,
+    *,
+    worker_id: str,
+    log: logging.Logger,
+) -> Exception | None:
+    """Complete a queue item, retrying short-lived SQLite lock failures."""
+    for attempt in range(_LEASE_RENEW_ATTEMPTS):
+        try:
+            queue.complete(item.id, claimed_by=item.claimed_by)
+            return None
+        except sqlite3.OperationalError as exc:
+            if not _is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
+                return exc
+            _sleep_before_sqlite_retry(
+                attempt,
+                delay_seconds=_LEASE_RETRY_DELAY_SECONDS,
+                log=log,
+                event="queue_transition_retry",
+                operation="complete",
+                queue_item_id=item.id,
+                worker_id=worker_id,
+                error=exc,
+                max_attempts=_LEASE_RENEW_ATTEMPTS,
+            )
+        except MemoryError:
+            raise
+        except Exception as exc:
+            return exc
+    return None
+
+
+def _fail_queue_item_with_retries(
+    queue: QueueProvider,
+    item: QueueItem,
+    *,
+    retry: bool,
+    worker_id: str,
+    log: logging.Logger,
+) -> Exception | None:
+    """Fail a queue item, retrying short-lived SQLite lock failures."""
+    for attempt in range(_LEASE_RENEW_ATTEMPTS):
+        try:
+            queue.fail(item.id, retry=retry, claimed_by=item.claimed_by)
+            return None
+        except sqlite3.OperationalError as exc:
+            if not _is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
+                return exc
+            _sleep_before_sqlite_retry(
+                attempt,
+                delay_seconds=_LEASE_RETRY_DELAY_SECONDS,
+                log=log,
+                event="queue_transition_retry",
+                operation="fail",
+                queue_item_id=item.id,
+                worker_id=worker_id,
+                error=exc,
+                max_attempts=_LEASE_RENEW_ATTEMPTS,
+            )
         except MemoryError:
             raise
         except Exception as exc:
@@ -493,6 +605,35 @@ def _renew_lease_with_retries(
 def _is_transient_sqlite_lock(error: sqlite3.OperationalError) -> bool:
     message = str(error).lower()
     return "locked" in message or "busy" in message
+
+
+def _sleep_before_sqlite_retry(
+    attempt: int,
+    *,
+    delay_seconds: float,
+    log: logging.Logger,
+    event: str,
+    operation: str,
+    queue_item_id: str,
+    worker_id: str,
+    error: sqlite3.OperationalError,
+    max_attempts: int,
+) -> None:
+    delay = delay_seconds * (2 ** attempt)
+    log.warning(
+        "Retrying transient SQLite operation after lock/busy error",
+        extra={
+            "event": event,
+            "operation": operation,
+            "queue_item_id": queue_item_id,
+            "worker_id": worker_id,
+            "attempt": attempt + 1,
+            "max_attempts": max_attempts,
+            "retry_delay_seconds": delay,
+        },
+        exc_info=(type(error), error, error.__traceback__),
+    )
+    time.sleep(delay)
 
 
 def _log_lease_lost(
@@ -545,7 +686,14 @@ def _transaction_for_queue_item(
 
     transaction = build_transaction(item)
     _seed_transaction_state_from_payload(transaction, item, worker_id=worker_id, log=log)
-    error = _save_transaction_with_retries(transaction, db_path=transaction_db_path)
+    error = _save_transaction_with_retries(
+        transaction,
+        db_path=transaction_db_path,
+        log=log,
+        event="transaction_initial_persistence_retry",
+        queue_item_id=item.id,
+        worker_id=worker_id,
+    )
     if error is not None:
         summary.persistence_errors += 1
         log.error(
@@ -567,6 +715,8 @@ def _transaction_for_queue_item(
             item.id,
             transaction.id,
             claimed_by=item.claimed_by,
+            log=log,
+            worker_id=worker_id,
         )
         if error is not None:
             raise error
@@ -574,6 +724,9 @@ def _transaction_for_queue_item(
         cleanup_error = _delete_transaction_with_retries(
             transaction.id,
             db_path=transaction_db_path,
+            log=log,
+            queue_item_id=item.id,
+            worker_id=worker_id,
         )
         if cleanup_error is not None:
             summary.persistence_errors += 1
@@ -602,6 +755,8 @@ def _bind_transaction_with_retries(
     transaction_id: str,
     *,
     claimed_by: str,
+    log: logging.Logger,
+    worker_id: str,
 ) -> Exception | None:
     """Bind a queue item to a transaction, retrying short-lived SQLite locks."""
     for attempt in range(_LEASE_RENEW_ATTEMPTS):
@@ -611,7 +766,17 @@ def _bind_transaction_with_retries(
         except sqlite3.OperationalError as exc:
             if not _is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
                 return exc
-            time.sleep(_LEASE_RETRY_DELAY_SECONDS * (2 ** attempt))
+            _sleep_before_sqlite_retry(
+                attempt,
+                delay_seconds=_LEASE_RETRY_DELAY_SECONDS,
+                log=log,
+                event="queue_bind_transaction_retry",
+                operation="bind_transaction",
+                queue_item_id=item_id,
+                worker_id=worker_id,
+                error=exc,
+                max_attempts=_LEASE_RENEW_ATTEMPTS,
+            )
         except MemoryError:
             raise
         except Exception as exc:
@@ -666,7 +831,14 @@ def _strict_transaction_checkpoint(
     """Return a checkpoint that raises when transaction persistence fails."""
 
     def checkpoint(transaction: Transaction) -> None:
-        error = _save_transaction_with_retries(transaction, db_path=db_path)
+        error = _save_transaction_with_retries(
+            transaction,
+            db_path=db_path,
+            log=log,
+            event="transaction_checkpoint_retry",
+            queue_item_id=item.id,
+            worker_id=worker_id,
+        )
         if error is None:
             return
         summary.persistence_errors += 1
@@ -709,16 +881,34 @@ def _checkpoint_failure_allows_queue_retry(transaction: Transaction) -> bool:
     return True
 
 
-def _save_transaction_with_retries(transaction: Transaction, *, db_path: str) -> Exception | None:
+def _save_transaction_with_retries(
+    transaction: Transaction,
+    *,
+    db_path: str,
+    log: logging.Logger,
+    event: str,
+    queue_item_id: str,
+    worker_id: str,
+) -> Exception | None:
     """Save a transaction, retrying short-lived SQLite lock failures."""
     for attempt in range(_PERSISTENCE_SAVE_ATTEMPTS):
         try:
             save_transaction(transaction, db_path=db_path)
             return None
         except sqlite3.OperationalError as exc:
-            if attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1:
+            if not _is_transient_sqlite_lock(exc) or attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1:
                 return exc
-            time.sleep(_PERSISTENCE_RETRY_DELAY_SECONDS * (2 ** attempt))
+            _sleep_before_sqlite_retry(
+                attempt,
+                delay_seconds=_PERSISTENCE_RETRY_DELAY_SECONDS,
+                log=log,
+                event=event,
+                operation="save_transaction",
+                queue_item_id=queue_item_id,
+                worker_id=worker_id,
+                error=exc,
+                max_attempts=_PERSISTENCE_SAVE_ATTEMPTS,
+            )
         except MemoryError:
             raise
         except Exception as exc:
@@ -726,16 +916,33 @@ def _save_transaction_with_retries(transaction: Transaction, *, db_path: str) ->
     return None
 
 
-def _delete_transaction_with_retries(transaction_id: str, *, db_path: str) -> Exception | None:
+def _delete_transaction_with_retries(
+    transaction_id: str,
+    *,
+    db_path: str,
+    log: logging.Logger,
+    queue_item_id: str,
+    worker_id: str,
+) -> Exception | None:
     """Delete a not-yet-bound transaction, retrying short-lived SQLite lock failures."""
     for attempt in range(_PERSISTENCE_SAVE_ATTEMPTS):
         try:
             _delete_transaction(transaction_id, db_path=db_path)
             return None
         except sqlite3.OperationalError as exc:
-            if attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1:
+            if not _is_transient_sqlite_lock(exc) or attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1:
                 return exc
-            time.sleep(_PERSISTENCE_RETRY_DELAY_SECONDS * (2 ** attempt))
+            _sleep_before_sqlite_retry(
+                attempt,
+                delay_seconds=_PERSISTENCE_RETRY_DELAY_SECONDS,
+                log=log,
+                event="transaction_initial_cleanup_retry",
+                operation="delete_transaction",
+                queue_item_id=queue_item_id,
+                worker_id=worker_id,
+                error=exc,
+                max_attempts=_PERSISTENCE_SAVE_ATTEMPTS,
+            )
         except MemoryError:
             raise
         except Exception as exc:

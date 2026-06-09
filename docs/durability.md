@@ -321,6 +321,29 @@ successful, skipped, or terminal business-failed skill outcome, the runner marks
 the queue item failed without automatic retry to avoid replaying side effects
 that already occurred. Earlier checkpoint failures remain retryable.
 
+Runner retry has two separate layers. `Engine(max_retries=...)` owns in-process
+skill retry passes for `SystemException` failures inside one claimed queue item;
+it increments `Transaction.retry_count`. The queue owns item delivery retry:
+`SqliteQueue(max_retries=...)` increments `QueueItem.retry_count` only when
+`run_queue_loop()` calls `queue.fail(..., retry=True)`. These counters are not
+interchangeable, and a queue retry may resume an already persisted transaction
+when `transaction_db_path` is configured.
+
+The runner retries only short-lived SQLite `OperationalError` messages that
+contain `locked` or `busy`. This bounded retry policy uses 3 attempts with
+0.05s then 0.10s sleeps before the final attempt, and each sleep is logged with
+the operation, item id, worker id, attempt, maximum attempts, and delay. The
+policy applies to transaction checkpoints, initial transaction persistence,
+initial transaction cleanup, queue transaction binding, queue lease renewal, and
+final queue `complete()`/`fail()` transitions. Other SQLite operational errors
+remain loud and are not retried merely because they came from SQLite.
+
+Deterministic input and wiring failures are terminal queue outcomes. Invalid
+transaction wiring, invalid queue payload/state JSON, and invalid durable state
+are failed without queue retry. System failures and unexpected processing errors
+remain retryable unless a checkpoint boundary proves retry would risk replaying
+already completed or terminal business-failed work.
+
 An unavoidable boundary remains: external side effects can happen just before
 the checkpoint that records their success. Skills should still be idempotent
 where practical.

@@ -661,7 +661,7 @@ class TestSqliteQueueStaleReclaim:
         reclaimed = q.next_item("worker-b")
         assert reclaimed is not None
 
-        with pytest.raises(RuntimeError, match="no longer claimed"):
+        with pytest.raises(QueueLeaseLostError, match="no longer claimed"):
             q.complete(item.id, claimed_by="worker-a")
 
         stored = q.get_item(item.id)
@@ -687,7 +687,7 @@ class TestSqliteQueueStaleReclaim:
         reclaimed = q.next_item("worker-b")
         assert reclaimed is not None
 
-        with pytest.raises(RuntimeError, match="no longer claimed"):
+        with pytest.raises(QueueLeaseLostError, match="no longer claimed"):
             q.fail(item.id, claimed_by="worker-a")
 
         stored = q.get_item(item.id)
