@@ -435,6 +435,86 @@ class TestAfterItem:
         with pytest.raises(MemoryError, match="out of memory"):
             _run([_item("a")], after_item=_fail_callback)
 
+    def test_after_item_runs_after_notification_before_final_transition(self) -> None:
+        events: list[str] = []
+
+        class RecordingQueue(_FakeQueue):
+            def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
+                events.append("complete")
+                super().complete(item_id, claimed_by=claimed_by)
+
+        class RecordingNotifier:
+            def send(self, report) -> None:
+                events.append("notify")
+
+        queue = RecordingQueue([_item("ordered")])
+
+        run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_SuccessSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            notifiers=[RecordingNotifier()],
+            after_item=lambda item, tx, err: events.append("after_item"),
+        )
+
+        assert events == ["notify", "after_item", "complete"]
+
+    def test_after_item_runs_after_failure_notification_before_fail_transition(self) -> None:
+        events: list[str] = []
+
+        class RecordingQueue(_FakeQueue):
+            def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None:
+                events.append("fail")
+                super().fail(item_id, retry=retry, claimed_by=claimed_by)
+
+        class RecordingNotifier:
+            def send(self, report) -> None:
+                events.append("notify")
+
+        queue = RecordingQueue([_item("ordered-fail")])
+
+        run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_BusinessFailSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            notifiers=[RecordingNotifier()],
+            after_item=lambda item, tx, err: events.append("after_item"),
+        )
+
+        assert events == ["notify", "after_item", "fail"]
+
+    def test_after_item_receives_transaction_but_no_resource_mapping(self) -> None:
+        callback_args: list[tuple[QueueItem, Transaction | None, Exception | None]] = []
+
+        class _UseResourceSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                assert ctx.resources["session"] == "shared"
+
+        _run(
+            [_item("resources")],
+            skill_cls=_UseResourceSkill,
+            resource_scope=_resource_scope({"session": "shared"}),
+            after_item=lambda item, tx, err: callback_args.append((item, tx, err)),
+        )
+
+        item, tx, err = callback_args[0]
+        assert item.id == "resources"
+        assert tx is not None
+        assert tx.status is Status.SUCCESSFUL
+        assert err is None
+
 
 # ---------------------------------------------------------------------------
 # runner-managed transaction persistence
@@ -1358,6 +1438,7 @@ class TestQueueLeaseHeartbeat:
         release = threading.Event()
         summaries: list[QueueRunSummary] = []
         errors: list[BaseException] = []
+        after_item_calls: list[str] = []
 
         class _BlockingSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:
@@ -1378,6 +1459,7 @@ class TestQueueLeaseHeartbeat:
                         credentials=_CREDS,
                         worker_id="worker-a",
                         logger=logging.getLogger("test.runner.lease"),
+                        after_item=lambda item, tx, err: after_item_calls.append(item.id),
                     )
                 )
             except BaseException as exc:
@@ -1403,6 +1485,7 @@ class TestQueueLeaseHeartbeat:
         assert not worker.is_alive()
         assert errors == []
         assert summaries == [QueueRunSummary(processed=1, failed=1)]
+        assert after_item_calls == []
         stored_first = queue.get_item(first.id)
         stored_second = queue.get_item(second.id)
         assert stored_first is not None

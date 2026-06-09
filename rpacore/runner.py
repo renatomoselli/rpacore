@@ -106,14 +106,16 @@ def run_queue_loop(
       unless retry_business_failures=True.
     - Calls queue.fail() with retry=True for system failures and unexpected errors.
     - Also calls queue.fail() if build_transaction() or any unexpected error raises.
-    - Calls after_item(item, transaction, error) once per item regardless of outcome.
+    - Calls after_item(item, transaction, error) once per item on ordinary item
+      outcomes after execution, checkpointing, reporting, and notification.
             transaction is None if build_transaction() raised; error is None on normal paths
             and set for unexpected processing, reporting, or transaction persistence failures.
       Fires before the final queue state transition (complete/fail). If the callback
       raises on a success-path item, the item is still marked complete (the automation
       ran) but the error is counted in QueueRunSummary.callback_errors. If the callback
-      raises on a failure-path item, queue.fail() is called as normal. The loop always
-      continues regardless.
+      raises on a failure-path item, queue.fail() is called as normal. Ordinary
+      callback failures do not stop the loop. Confirmed lease loss skips the callback
+      because the worker no longer owns the item outcome.
     - Enters resource_scope before claiming any items. Returned resources are
       shallow-copied into every item context. Top-level resource names are isolated;
       nested resource objects retain shared identity.

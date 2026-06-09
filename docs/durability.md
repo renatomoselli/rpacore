@@ -122,6 +122,61 @@ finish external side effects before the next checkpoint or final transition
 observes the loss. Queue delivery is therefore at least once; skills should be
 idempotent when they perform external side effects.
 
+## Runner Failure Policy
+
+`run_queue_loop()` keeps framework lifecycle behavior separate from user
+automation behavior. `resource_scope` is the only setup/cleanup mechanism for
+shared runtime resources. It is entered before queue claims and exited after
+item processing. Setup failures prevent queue claims. Cleanup failures propagate
+after already-decided queue outcomes.
+
+`after_item` is a per-item observer for ordinary item outcomes. It receives
+`(QueueItem, Transaction | None, Exception | None)` after execution,
+checkpointing, report generation, and notification dispatch, immediately before
+the intended final queue transition. It never receives `ProcessContext` or
+resources. Ordinary `after_item` exceptions are logged as `after_item_error`; on
+successful item paths they increment `QueueRunSummary.callback_errors`; on
+failure paths they are logged but do not increment that counter. Ordinary
+callback failures do not change the intended `complete()` or `fail()`
+transition. Confirmed lease loss skips `after_item` because the worker no
+longer owns the item outcome. `MemoryError` from `after_item` propagates. User
+callbacks own their mutations and external side effects.
+
+`on_finish` is a final summary observer. It receives `QueueRunSummary` exactly
+once from the runner's finalization path, including empty-queue runs and
+`resource_scope` setup failures that happen before the item loop starts.
+Ordinary `on_finish` exceptions are logged as `on_finish_error`, increment
+`QueueRunSummary.lifecycle_errors`, and are swallowed so cleanup callbacks do
+not change the run outcome. `MemoryError` from `on_finish` propagates.
+
+Runner failure dispositions:
+
+| Boundary | Ordinary outcome | MemoryError outcome |
+| --- | --- | --- |
+| resource setup | propagates before queue claim | propagates |
+| transaction build | item fails with queue retry unless validation is terminal | propagates |
+| payload/state validation | terminal queue failure without retry | propagates |
+| engine system failure | queue failure with retry | propagates |
+| engine business-only failure | terminal queue failure unless `retry_business_failures=True` | propagates |
+| transaction checkpoint | queue retry only before successful/skipped/terminal business work is durably at risk | propagates |
+| reporting or notification | logged; intended queue outcome preserved | propagates |
+| `after_item` | logged; intended queue outcome preserved; skipped after confirmed lease loss | propagates |
+| final `complete()`/`fail()` transition | transient SQLite lock/busy is retried; non-transient errors propagate | propagates |
+| lease loss | increments `QueueRunSummary.failed`, logs `queue_item_lease_lost`, skips final transition, stops claiming work | propagates if heartbeat failure is `MemoryError` |
+| resource cleanup | propagates after already-decided queue outcomes | propagates |
+| `on_finish` | logged and swallowed | propagates |
+
+The runner keeps a small number of broad `except Exception` boundaries to
+convert unexpected ordinary failures into explicit queue retry decisions, to
+preserve already-decided outcomes after reporting/callback failures, and to
+keep lifecycle cleanup observers from changing the run result. Those catch-all
+boundaries do not catch `MemoryError`.
+
+After confirmed lease loss, the old worker records the item as failed in its run
+summary but leaves the queue row untouched. If another worker already claimed
+the item, that worker owns the next transition. If no worker owns it, normal
+lease expiry makes the item reclaimable later.
+
 ## Timestamps and History
 
 `Transaction.created_at` is set when a new transaction object is constructed.
