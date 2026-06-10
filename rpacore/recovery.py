@@ -16,6 +16,7 @@ def resume_transaction(
     skills: list[Skill],
     *,
     db_path: str = "rpacore.db",
+    retry_business_failures: bool = False,
 ) -> Transaction:
     """Load a persisted transaction and reattach executable skills.
 
@@ -59,6 +60,7 @@ def resume_transaction(
             loaded_skill.status,
             concrete.exceptions,
             preserve_recovery_state=preserve_recovery_state,
+            retry_business_failures=retry_business_failures,
         )
 
         restored.append(concrete)
@@ -73,6 +75,7 @@ def resume_transaction(
     transaction.skills = restored
     if transaction.status is not Status.SUCCESSFUL:
         transaction.status = Status.PENDING
+        transaction.retry_count = 0
         transaction.started_at = None
         transaction.finished_at = None
         if not already_resumed:
@@ -93,6 +96,7 @@ def _resumed_skill_status(
     exceptions: list[BaseException],
     *,
     preserve_recovery_state: bool,
+    retry_business_failures: bool,
 ) -> Status:
     """Return the skill status to use after explicit resume."""
     if status is Status.SUCCESSFUL:
@@ -101,5 +105,5 @@ def _resumed_skill_status(
         return Status.SKIPPED
     if status is Status.FAILED and exceptions:
         if isinstance(exceptions[-1], BusinessException):
-            return Status.FAILED
+            return Status.PENDING if retry_business_failures else Status.FAILED
     return Status.PENDING

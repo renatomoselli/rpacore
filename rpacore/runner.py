@@ -19,7 +19,7 @@ from rpacore.exceptions import BusinessException, ExecutionValidationError, Syst
 from rpacore.engine import Engine
 from rpacore.logger import get_logger
 from rpacore.notify import Notifier, dispatch
-from rpacore.persistence import save_transaction
+from rpacore.persistence import load_transaction, save_transaction
 from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider
 from rpacore.recovery import resume_transaction
 from rpacore.report import generate_report
@@ -263,6 +263,7 @@ def _run_items(
                 item,
                 build_transaction,
                 transaction_db_path=transaction_db_path,
+                retry_business_failures=retry_business_failures,
                 worker_id=worker_id,
                 log=log,
                 summary=summary,
@@ -663,6 +664,7 @@ def _transaction_for_queue_item(
     build_transaction: Callable[[QueueItem], Transaction],
     *,
     transaction_db_path: str | None,
+    retry_business_failures: bool,
     worker_id: str,
     log: logging.Logger,
     summary: QueueRunSummary,
@@ -679,6 +681,7 @@ def _transaction_for_queue_item(
                 item.transaction_id,
                 candidate.skills,
                 db_path=transaction_db_path,
+                retry_business_failures=retry_business_failures,
             )
         except (KeyError, sqlite3.Error, SystemException, ValueError) as exc:
             raise _DurableTransactionBindingError(
@@ -858,29 +861,36 @@ def _strict_transaction_checkpoint(
         )
         raise _CheckpointError(
             error,
-            retry=_checkpoint_failure_allows_queue_retry(transaction),
+            retry=_checkpoint_failure_allows_queue_retry(transaction, db_path=db_path),
         ) from error
 
     return checkpoint
 
 
-def _checkpoint_failure_allows_queue_retry(transaction: Transaction) -> bool:
-    """Return False once retrying could duplicate completed or terminal skill work."""
-    if not transaction.history:
+def _checkpoint_failure_allows_queue_retry(transaction: Transaction, *, db_path: str) -> bool:
+    """Return False once durable state proves retrying would duplicate terminal work."""
+    try:
+        durable = load_transaction(transaction.id, db_path)
+    except Exception:
+        if transaction.history and transaction.history[-1].event == HistoryEvent.SKILL_FAILED:
+            return not _has_business_failed_skill(transaction)
         return True
-    last_event = transaction.history[-1].event
-    if last_event in (
-        HistoryEvent.SKILL_SUCCEEDED,
-        HistoryEvent.SKILL_SKIPPED,
-    ):
+
+    if not durable.history:
+        return True
+    last_event = durable.history[-1].event
+    if last_event == HistoryEvent.SKILL_SUCCEEDED:
         return False
     if last_event == HistoryEvent.SKILL_FAILED:
-        failed = transaction.failed_skills()
-        return not any(
-            skill.exceptions and isinstance(skill.exceptions[-1], BusinessException)
-            for skill in failed
-        )
+        return not _has_business_failed_skill(durable)
     return True
+
+
+def _has_business_failed_skill(transaction: Transaction) -> bool:
+    return any(
+        skill.exceptions and isinstance(skill.exceptions[-1], BusinessException)
+        for skill in transaction.failed_skills()
+    )
 
 
 def _save_transaction_with_retries(

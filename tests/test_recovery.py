@@ -71,6 +71,27 @@ def test_resume_reruns_only_non_successful_skills(db_path) -> None:
     assert resumed.status is Status.SUCCESSFUL
 
 
+def test_resume_resets_retry_count_for_new_engine_run(db_path) -> None:
+    failed = Skill("failed", 1)
+    failed.status = Status.FAILED
+    failed.exceptions.append(SystemException("timeout", action="failed"))
+    tx = Transaction(
+        reference="REF-001",
+        status=Status.FAILED,
+        retry_count=3,
+        skills=[failed],
+    )
+    save_transaction(tx, db_path)
+
+    resumed = resume_transaction(
+        tx.id,
+        [_TrackingSkill("failed", 1, {})],
+        db_path=db_path,
+    )
+
+    assert resumed.retry_count == 0
+
+
 def test_load_shows_interrupted_state_before_explicit_resume(db_path) -> None:
     first = Skill("first", 1)
     first.status = Status.SUCCESSFUL
@@ -259,6 +280,29 @@ def test_resume_does_not_rerun_business_failed_skills(db_path) -> None:
     assert counts == {"next": 1}
     assert resumed.skills[0].status is Status.FAILED
     assert resumed.status is Status.FAILED
+
+
+def test_resume_can_retry_business_failed_skills_when_policy_allows_it(db_path) -> None:
+    counts: dict[str, int] = {}
+    failed = Skill("failed", 1)
+    failed.status = Status.FAILED
+    failed.exceptions.append(BusinessException("bad data", action="failed"))
+    tx = Transaction(reference="REF-001", status=Status.FAILED, skills=[failed])
+    save_transaction(tx, db_path)
+
+    resumed = resume_transaction(
+        tx.id,
+        [_TrackingSkill("failed", 1, counts)],
+        db_path=db_path,
+        retry_business_failures=True,
+    )
+
+    assert resumed.skills[0].status is Status.PENDING
+
+    Engine().run(ProcessContext(transaction=resumed))
+
+    assert counts == {"failed": 1}
+    assert resumed.status is Status.SUCCESSFUL
 
 
 def test_resume_successful_transaction_is_effective_no_op(db_path) -> None:

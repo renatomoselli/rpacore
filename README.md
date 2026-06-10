@@ -96,6 +96,35 @@ Engine(
 save_transaction(tx, db_path=config["transaction_db_path"])
 ```
 
+## CLI
+
+Create a new project scaffold:
+
+```bash
+rpacore init my_project
+cd my_project
+rpacore run
+```
+
+`rpacore init <project_name>` creates a normal Python project with
+`pyproject.toml`, `rpacore.toml`, `config.toml`, `main.py`, a `skills/` package,
+a pytest skill test, and `.gitignore`.
+
+`rpacore run` discovers `rpacore.toml` from the current directory, resolves the
+declared `module:callable` entrypoint, and invokes it. The CLI does not build
+skills, transactions, config, or persistence automatically; that wiring remains
+in project Python code.
+
+Exit behavior is stable across platforms:
+
+- entrypoint returns `None`: exit `0`
+- entrypoint returns an integer from `0` through `255`: propagate it
+- entrypoint or framework execution raises: exit `1` with diagnostics on stderr
+- CLI usage errors, invalid manifests, entrypoint-resolution errors, or invalid
+  return values: exit `2`
+
+`rpacore version` prints the installed framework version.
+
 ## Writing a Skill
 
 ```python

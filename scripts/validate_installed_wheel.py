@@ -47,13 +47,14 @@ import rpacore
 from rpacore import Engine, ProcessContext, Skill, Status, Transaction
 
 repo_root = Path({str(repo_root.resolve())!r})
+checkout_package = repo_root / "rpacore"
 module_path = Path(rpacore.__file__).resolve()
-if repo_root in module_path.parents:
+if module_path.parent == checkout_package:
     raise SystemExit(f"imported rpacore from checkout: {{module_path}}")
 
 class OkSkill(Skill):
     def execute(self, ctx: ProcessContext) -> None:
-        ctx.data["ran"] = True
+        ctx.state["ran"] = True
 
 tx = Transaction(reference="installed-wheel-smoke", skills=[OkSkill("ok", 1)])
 ctx = ProcessContext(transaction=tx)
@@ -61,7 +62,7 @@ Engine().run(ctx)
 
 assert tx.status is Status.SUCCESSFUL
 assert tx.skills[0].status is Status.SUCCESSFUL
-assert ctx.data == {{"ran": True}}
+assert ctx.state == {{"ran": True}}
 print(rpacore.__version__)
 """
 
@@ -91,7 +92,13 @@ def validate_installed_wheel(
     python = _venv_python(venv_dir)
     _run([str(python), "-m", "pip", "install", str(wheel)], cwd=outside_dir)
     _run([str(python), "-c", _smoke_code(repo_root)], cwd=outside_dir)
-    _run([str(_venv_script(venv_dir, "rpacore")), "version"], cwd=outside_dir)
+    rpacore_cli = _venv_script(venv_dir, "rpacore")
+    _run([str(rpacore_cli), "version"], cwd=outside_dir)
+    generated_project = outside_dir / "installed_project"
+    if generated_project.exists():
+        shutil.rmtree(generated_project, ignore_errors=True)
+    _run([str(rpacore_cli), "init", "installed_project"], cwd=outside_dir)
+    _run([str(rpacore_cli), "run"], cwd=generated_project)
 
     if examples_pytest:
         _run([str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir)

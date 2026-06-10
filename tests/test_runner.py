@@ -16,13 +16,13 @@ from rpacore.context import ProcessContext
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
-from rpacore.persistence import list_transactions, load_transaction
+from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.queue import QueueItem, QueueStatus, SqliteQueue
 import rpacore.runner as runner_module
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import Transaction
+from rpacore.transaction import HistoryEvent, Transaction
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +184,41 @@ class TestQueueRunSummary:
         assert summary.failed == 1
         assert queue.failed == ["a"]
         assert queue.fail_retries == [True]
+
+    def test_business_retry_policy_reruns_persisted_business_failure(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        attempts = 0
+
+        class _BusinessThenSuccessSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise BusinessException("bad data", action=self.name)
+
+        first = _item("a")
+        first_summary, first_queue = _run(
+            [first],
+            skill_cls=_BusinessThenSuccessSkill,
+            retry_business_failures=True,
+            transaction_db_path=db_path,
+        )
+        retry_item = _item("a")
+        retry_item.transaction_id = first_queue.bindings[0][1]
+
+        second_summary, second_queue = _run(
+            [retry_item],
+            skill_cls=_BusinessThenSuccessSkill,
+            retry_business_failures=True,
+            transaction_db_path=db_path,
+        )
+
+        assert first_summary.failed == 1
+        assert first_queue.fail_retries == [True]
+        assert second_summary.completed == 1
+        assert second_queue.completed == ["a"]
+        assert attempts == 2
+        assert load_transaction(retry_item.transaction_id, db_path).status is Status.SUCCESSFUL
 
     def test_build_transaction_error_counted_as_failed(self) -> None:
         summary, queue = _run(
@@ -839,24 +874,54 @@ class TestRunnerManagedTransactionPersistence:
         assert isinstance(errors[0], RuntimeError)
         assert str(errors[0]) == "write failed"
 
-    def test_success_checkpoint_error_fails_without_queue_retry(self, monkeypatch) -> None:
+    def test_success_checkpoint_error_retries_when_success_was_not_durable(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        real_save_transaction = runner_module.save_transaction
+
         def _fail_after_success(transaction: Transaction, db_path: str = "rpacore.db") -> None:
             if (
                 transaction.history
                 and transaction.history[-1].event == "skill_succeeded"
             ):
                 raise RuntimeError("write failed")
+            real_save_transaction(transaction, db_path=db_path)
 
         monkeypatch.setattr(runner_module, "save_transaction", _fail_after_success)
 
-        summary, queue = _run([_item("ok")], transaction_db_path="transactions.db")
+        summary, queue = _run([_item("ok")], transaction_db_path=db_path)
 
         assert summary.persistence_errors == 1
         assert summary.completed == 0
         assert summary.failed == 1
         assert queue.completed == []
         assert queue.failed == ["ok"]
-        assert queue.fail_retries == [False]
+        assert queue.fail_retries == [True]
+
+    def test_checkpoint_retry_decision_uses_durable_skipped_history(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        tx = Transaction(reference="skip")
+        tx.append_history(HistoryEvent.SKILL_SKIPPED)
+        save_transaction(tx, db_path)
+
+        assert runner_module._checkpoint_failure_allows_queue_retry(tx, db_path=db_path) is True
+
+    def test_checkpoint_retry_decision_allows_retry_when_durable_state_unreadable(
+        self,
+        monkeypatch,
+    ) -> None:
+        tx = Transaction(reference="ok")
+        tx.append_history(HistoryEvent.SKILL_SUCCEEDED)
+
+        def fail_load(transaction_id: str, db_path: str) -> Transaction:
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(runner_module, "load_transaction", fail_load)
+
+        assert runner_module._checkpoint_failure_allows_queue_retry(tx, db_path="tx.db") is True
 
     def test_business_failure_checkpoint_error_fails_without_queue_retry(self, monkeypatch) -> None:
         def _fail_save(transaction: Transaction, db_path: str = "rpacore.db") -> None:
