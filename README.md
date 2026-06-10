@@ -176,6 +176,27 @@ execution is not yet crash-durable at each successful skill boundary.
 
 ## Configuration
 
+Create a `rpacore.toml` in your project to declare the Python entrypoint and
+transaction storage:
+
+```toml
+[project]
+entrypoint = "main:main"
+
+[storage]
+transaction_db_path = "rpacore.db"
+```
+
+`rpacore.toml` is intentionally small. Skill construction and transaction wiring
+stay in Python; the manifest does not define pipelines or automatic skill
+discovery. See `docs/project-manifest.md` for the full schema.
+
+When both `rpacore.toml` and `config.toml` are present, the value passed to the
+runner or storage layer by user wiring still decides which transaction database
+is used. Queue settings, retry settings, credentials, screenshots, and
+notifications remain `config.toml` settings; they are not part of the project
+manifest schema.
+
 Create a `config.toml` in your project:
 
 ```toml
@@ -189,7 +210,7 @@ credential_provider = "env"
 
 [queue]
 db_path = "queue.db"
-claim_timeout = 30
+lease_timeout = 30
 max_retries = 3
 
 # [notification.email]

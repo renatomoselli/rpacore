@@ -19,6 +19,12 @@ from rpacore.credentials import CredentialNotFoundError, CredentialProvider, Env
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.logger import configure_logger, get_logger
+from rpacore.manifest import (
+    ProjectManifest,
+    find_project_manifest,
+    load_project_manifest,
+    resolve_project_entrypoint,
+)
 from rpacore.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifiers, dispatch
 from rpacore.paths import resolve_config_path, resolve_config_paths
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
@@ -44,6 +50,7 @@ __all__ = [
     "EnvCredentialProvider",
     "EmailNotifier",
     "ExecutionValidationError",
+    "find_project_manifest",
     "generate_report",
     "get_logger",
     "HistoryEntry",
@@ -52,9 +59,11 @@ __all__ = [
     "Notifier",
     "list_transactions",
     "load_config",
+    "load_project_manifest",
     "load_transaction",
     "optional_config",
     "ProcessContext",
+    "ProjectManifest",
     "QueueItem",
     "QueueLeaseLostError",
     "QueueProvider",
@@ -64,6 +73,7 @@ __all__ = [
     "require_section",
     "resolve_config_path",
     "resolve_config_paths",
+    "resolve_project_entrypoint",
     "resume_transaction",
     "WebhookNotifier",
     "render_html",

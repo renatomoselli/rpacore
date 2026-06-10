@@ -1,0 +1,194 @@
+"""Project manifest loading and entrypoint resolution."""
+
+from __future__ import annotations
+
+import importlib
+import inspect
+import sys
+import threading
+import tomllib
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from rpacore._validation import type_error, value_error
+
+
+MANIFEST_NAME = "rpacore.toml"
+_PROJECT_SECTION_KEYS = frozenset({"entrypoint"})
+_STORAGE_SECTION_KEYS = frozenset({"transaction_db_path"})
+_TOP_LEVEL_KEYS = frozenset({"project", "storage"})
+_IMPORT_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True)
+class ProjectManifest:
+    """Validated project manifest values."""
+
+    manifest_path: Path
+    project_dir: Path
+    entrypoint: str
+    transaction_db_path: str
+
+
+def find_project_manifest(start: str | Path = ".") -> Path:
+    """Return the nearest rpacore.toml at or above start."""
+    current = Path(start)
+    search_dir = current if current.is_dir() else current.parent
+    resolved_search_dir = search_dir.resolve()
+    for directory in [resolved_search_dir, *resolved_search_dir.parents]:
+        candidate = directory / MANIFEST_NAME
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"{MANIFEST_NAME} not found from {current}")
+
+
+def load_project_manifest(path: str | Path | None = None) -> ProjectManifest:
+    """Load and validate rpacore.toml.
+
+    When path is None, discovery starts from the current working directory. When
+    path names a directory, rpacore.toml in that directory is loaded.
+    """
+    manifest_path = _manifest_path(path)
+    with open(manifest_path, "rb") as file:
+        data = tomllib.load(file)
+    _validate_manifest_shape(data)
+
+    project = data["project"]
+    storage = data["storage"]
+    entrypoint = project["entrypoint"]
+    transaction_db_path = storage["transaction_db_path"]
+
+    if not isinstance(entrypoint, str):
+        raise type_error("project.entrypoint", "str", entrypoint)
+    if not entrypoint:
+        raise value_error("project.entrypoint", "non-empty str", entrypoint)
+    _validate_entrypoint(entrypoint)
+
+    if not isinstance(transaction_db_path, str):
+        raise type_error("storage.transaction_db_path", "str", transaction_db_path)
+    if not transaction_db_path:
+        raise value_error("storage.transaction_db_path", "non-empty str", transaction_db_path)
+
+    project_dir = manifest_path.resolve().parent
+    return ProjectManifest(
+        manifest_path=manifest_path.resolve(),
+        project_dir=project_dir,
+        entrypoint=entrypoint,
+        transaction_db_path=_resolve_path(project_dir, transaction_db_path),
+    )
+
+
+def resolve_project_entrypoint(manifest: ProjectManifest) -> Callable[[], object]:
+    """Import and return the manifest entrypoint callable."""
+    module_name, attribute_path = manifest.entrypoint.split(":", 1)
+    project_dir = str(manifest.project_dir)
+    with _IMPORT_LOCK:
+        inserted = False
+        if project_dir not in sys.path:
+            sys.path.insert(0, project_dir)
+            inserted = True
+        try:
+            existing = sys.modules.get(module_name)
+            if existing is not None and not _module_belongs_to_project(existing, manifest.project_dir):
+                del sys.modules[module_name]
+            importlib.invalidate_caches()
+            module = importlib.import_module(module_name)
+        finally:
+            if inserted:
+                try:
+                    sys.path.remove(project_dir)
+                except ValueError:
+                    pass
+
+    target: object = module
+    for attribute in attribute_path.split("."):
+        try:
+            target = getattr(target, attribute)
+        except AttributeError as exc:
+            raise AttributeError(
+                f"Project entrypoint attribute not found: {manifest.entrypoint}"
+            ) from exc
+
+    if not callable(target):
+        raise type_error("project.entrypoint", "callable", target)
+    if inspect.isclass(target):
+        raise TypeError(
+            f"project.entrypoint must be a function or callable object instance, not a class: "
+            f"{manifest.entrypoint}"
+        )
+    try:
+        inspect.signature(target).bind()
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"project.entrypoint must be callable without arguments: {manifest.entrypoint}"
+        ) from exc
+    return target
+
+
+def _manifest_path(path: str | Path | None) -> Path:
+    if path is None:
+        return find_project_manifest()
+    candidate = Path(path)
+    if candidate.is_dir():
+        candidate = candidate / MANIFEST_NAME
+    if not candidate.exists():
+        raise FileNotFoundError(f"Project manifest not found: {candidate}")
+    return candidate
+
+
+def _validate_manifest_shape(data: dict[str, object]) -> None:
+    _reject_unknown_keys(data, _TOP_LEVEL_KEYS, "manifest")
+    project = _required_section(data, "project")
+    storage = _required_section(data, "storage")
+    _reject_unknown_keys(project, _PROJECT_SECTION_KEYS, "project")
+    _reject_unknown_keys(storage, _STORAGE_SECTION_KEYS, "storage")
+    if "entrypoint" not in project:
+        raise KeyError("Missing required manifest key: project.entrypoint")
+    if "transaction_db_path" not in storage:
+        raise KeyError("Missing required manifest key: storage.transaction_db_path")
+
+
+def _required_section(data: dict[str, object], key: str) -> dict[str, object]:
+    if key not in data:
+        raise KeyError(f"Missing required manifest section: {key}")
+    section = data[key]
+    if not isinstance(section, dict):
+        raise type_error(key, "dict", section)
+    return section
+
+
+def _reject_unknown_keys(data: dict[str, object], allowed: frozenset[str], path: str) -> None:
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise KeyError(f"Unknown manifest key: {path}.{unknown[0]}")
+
+
+def _validate_entrypoint(entrypoint: str) -> None:
+    if entrypoint.count(":") != 1:
+        raise value_error("project.entrypoint", "module:callable", entrypoint)
+    module_name, attribute_path = entrypoint.split(":", 1)
+    if not _is_dotted_identifier(module_name) or not _is_dotted_identifier(attribute_path):
+        raise value_error("project.entrypoint", "module:callable", entrypoint)
+
+
+def _is_dotted_identifier(value: str) -> bool:
+    return bool(value) and all(part.isidentifier() for part in value.split("."))
+
+
+def _resolve_path(base_dir: Path, value: str) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    return str(base_dir / path)
+
+
+def _module_belongs_to_project(module: object, project_dir: Path) -> bool:
+    module_file = getattr(module, "__file__", None)
+    if not isinstance(module_file, str):
+        return True
+    try:
+        Path(module_file).resolve().relative_to(project_dir.resolve())
+        return True
+    except ValueError:
+        return False
