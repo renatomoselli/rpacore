@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
-import textwrap
 import threading
+import textwrap
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 
 from rpacore import __version__
+from rpacore.exceptions import BusinessException
 from rpacore.manifest import load_project_manifest, resolve_project_entrypoint
+from rpacore.persistence import list_transactions, load_transaction
+from rpacore.skill import Skill
+from rpacore.transaction import Artifact, HistoryEntry, Transaction
 
 
 USAGE_ERROR = 2
@@ -29,6 +35,36 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("project_name", help="Directory name for the generated project.")
 
     subparsers.add_parser("run", help="Run the current project's rpacore.toml entrypoint.")
+
+    transaction_parser = subparsers.add_parser(
+        "transaction",
+        help="Inspect persisted transactions.",
+    )
+    transaction_subparsers = transaction_parser.add_subparsers(
+        dest="transaction_command",
+        required=True,
+    )
+    list_parser = transaction_subparsers.add_parser(
+        "list",
+        help="List persisted transactions.",
+    )
+    list_parser.add_argument("--db", dest="db_path", help="Transaction database path.")
+    list_parser.add_argument("--json", action="store_true", help="Write JSON to stdout.")
+    list_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=100,
+        help="Maximum transactions to list. Defaults to 100.",
+    )
+
+    show_parser = transaction_subparsers.add_parser(
+        "show",
+        help="Show one persisted transaction.",
+    )
+    show_parser.add_argument("transaction_id", help="Transaction id to inspect.")
+    show_parser.add_argument("--db", dest="db_path", help="Transaction database path.")
+    show_parser.add_argument("--json", action="store_true", help="Write JSON to stdout.")
+
     subparsers.add_parser("version", help="Print the installed RPA Core version.")
     return parser
 
@@ -45,6 +81,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _init_project(Path(args.project_name))
     if args.command == "run":
         return _run_project()
+    if args.command == "transaction":
+        return _inspect_transactions(args)
     parser.error(f"unknown command: {args.command}")
 
 
@@ -115,6 +153,193 @@ def _init_project(project_dir: Path) -> int:
 
     print(f"Created RPA Core project: {project_dir}")
     return SUCCESS
+
+
+def _inspect_transactions(args: argparse.Namespace) -> int:
+    db_path = ""
+    try:
+        db_path = _transaction_db_path(args.db_path)
+        if args.transaction_command == "list":
+            transactions = list_transactions(db_path, limit=args.limit)
+            if args.json:
+                _write_json(
+                    {
+                        "schema_version": 1,
+                        "command": "transaction:list",
+                        "limit": args.limit,
+                        "transactions": [_transaction_summary(tx) for tx in transactions],
+                    }
+                )
+            else:
+                _write_transaction_list(transactions, limit=args.limit)
+            return SUCCESS
+        if args.transaction_command == "show":
+            transaction = load_transaction(args.transaction_id, db_path)
+            if args.json:
+                _write_json(
+                    {
+                        "schema_version": 1,
+                        "command": "transaction:show",
+                        "transaction": _transaction_detail(transaction),
+                    }
+                )
+            else:
+                _write_transaction_detail(transaction)
+            return SUCCESS
+    except KeyError as exc:
+        _print_error(str(exc.args[0] if exc.args else exc))
+        return EXECUTION_ERROR
+    except Exception as exc:
+        _print_error(f"Could not inspect transactions in {db_path}: {exc}")
+        return EXECUTION_ERROR
+
+
+def _transaction_db_path(db_path: str | None) -> str:
+    if db_path is not None:
+        return db_path
+    try:
+        return load_project_manifest().transaction_db_path
+    except Exception as exc:
+        raise RuntimeError(
+            f"could not resolve transaction database from rpacore.toml; pass --db: {exc}"
+        ) from exc
+
+
+def _write_transaction_list(transactions: list[Transaction], *, limit: int) -> None:
+    print(f"Showing up to {limit} transactions.")
+    if not transactions:
+        print("No transactions found.")
+        return
+    print("ID                                   STATUS       REFERENCE")
+    for transaction in transactions:
+        print(
+            f"{transaction.id:<36} {str(transaction.status):<12} {transaction.reference}"
+        )
+
+
+def _write_transaction_detail(transaction: Transaction) -> None:
+    print(f"ID:          {transaction.id}")
+    print(f"Reference:   {transaction.reference}")
+    print(f"Status:      {transaction.status}")
+    print(f"Retries:     {transaction.retry_count}")
+    print(f"Created:     {_format_optional_datetime(transaction.created_at)}")
+    print(f"Started:     {_format_optional_datetime(transaction.started_at)}")
+    print(f"Finished:    {_format_optional_datetime(transaction.finished_at)}")
+    print(f"Skills:      {len(transaction.skills)}")
+    for skill in transaction.ordered_skills():
+        print(f"  {skill.execution_order}. {skill.name}: {skill.status}")
+        for exc in skill.exceptions:
+            print(f"     - {_exception_kind(exc)}: {exc}")
+    print(f"History:     {len(transaction.history)}")
+    for entry in transaction.history:
+        skill = "" if not entry.skill_name else f" skill={entry.skill_name}"
+        print(
+            f"  {entry.sequence}. {entry.event} status={entry.status} "
+            f"retry={entry.retry_number}{skill}"
+        )
+    print(f"Artifacts:   {len(transaction.artifacts)}")
+    for artifact in transaction.artifacts:
+        kind = "" if not artifact.kind else f" ({artifact.kind})"
+        print(f"  {artifact.name}{kind}: {artifact.path}")
+    print(f"Metadata:    {len(transaction.metadata)} keys")
+
+
+def _write_json(data: dict[str, object]) -> None:
+    print(json.dumps(data, sort_keys=True, separators=(",", ":")))
+
+
+def _transaction_summary(transaction: Transaction) -> dict[str, object]:
+    return {
+        "id": transaction.id,
+        "reference": transaction.reference,
+        "status": str(transaction.status),
+        "retry_count": transaction.retry_count,
+        "created_at": _format_optional_datetime(transaction.created_at),
+        "started_at": _format_optional_datetime(transaction.started_at),
+        "finished_at": _format_optional_datetime(transaction.finished_at),
+        "skill_count": len(transaction.skills),
+        "history_count": len(transaction.history),
+        "artifact_count": len(transaction.artifacts),
+    }
+
+
+def _transaction_detail(transaction: Transaction) -> dict[str, object]:
+    detail = _transaction_summary(transaction)
+    detail.update(
+        {
+            "state": transaction.state,
+            "metadata": transaction.metadata,
+            "skills": [_skill_detail(skill) for skill in transaction.ordered_skills()],
+            "history": [_history_detail(entry) for entry in transaction.history],
+            "artifacts": [_artifact_detail(artifact) for artifact in transaction.artifacts],
+        }
+    )
+    return detail
+
+
+def _skill_detail(skill: Skill) -> dict[str, object]:
+    return {
+        "name": skill.name,
+        "execution_order": skill.execution_order,
+        "status": str(skill.status),
+        "arguments": skill.arguments,
+        "exceptions": [_exception_detail(exc) for exc in skill.exceptions],
+    }
+
+
+def _exception_detail(exc: BaseException) -> dict[str, object]:
+    return {
+        "type": _exception_kind(exc),
+        "message": str(exc),
+        "action": str(getattr(exc, "action", "")),
+        "retry_number": int(getattr(exc, "retry_number", 0)),
+        "datetime_occurred": _format_optional_datetime(
+            getattr(exc, "datetime_occurred", None)
+        ),
+        "screenshot_path": str(getattr(exc, "screenshot_path", "")),
+        "stops_execution": bool(getattr(exc, "stops_execution", True)),
+    }
+
+
+def _exception_kind(exc: BaseException) -> str:
+    return "business" if isinstance(exc, BusinessException) else "system"
+
+
+def _history_detail(entry: HistoryEntry) -> dict[str, object]:
+    return {
+        "sequence": entry.sequence,
+        "timestamp": _format_optional_datetime(entry.timestamp),
+        "event": str(entry.event),
+        "status": str(entry.status),
+        "retry_number": entry.retry_number,
+        "skill_name": entry.skill_name,
+        "skill_execution_order": entry.skill_execution_order,
+    }
+
+
+def _artifact_detail(artifact: Artifact) -> dict[str, object]:
+    return {
+        "id": artifact.id,
+        "name": artifact.name,
+        "path": artifact.path,
+        "kind": artifact.kind,
+        "created_at": _format_optional_datetime(artifact.created_at),
+        "metadata": artifact.metadata,
+    }
+
+
+def _format_optional_datetime(value: datetime | None) -> str | None:
+    return None if value is None else value.isoformat()
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"must be an integer >= 1: {value}") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"must be an integer >= 1: {value}")
+    return parsed
 
 
 def _write_project_files(project_dir: Path) -> None:

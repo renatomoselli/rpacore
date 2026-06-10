@@ -115,6 +115,24 @@ declared `module:callable` entrypoint, and invokes it. The CLI does not build
 skills, transactions, config, or persistence automatically; that wiring remains
 in project Python code.
 
+Inspect persisted local transactions:
+
+```bash
+rpacore transaction list
+rpacore transaction list --json
+rpacore transaction show <transaction_id>
+rpacore transaction show <transaction_id> --json
+```
+
+Transaction inspection uses `[storage].transaction_db_path` from `rpacore.toml`
+by default. Pass `--db path/to/rpacore.db` to inspect a specific database.
+`--db` paths are resolved relative to the current working directory; manifest
+storage paths are resolved relative to `rpacore.toml`. `transaction list`
+returns the latest 100 transactions by default; pass `--limit N` to choose a
+different cap. Human output is intended for operators; `--json` writes parseable
+JSON to stdout with diagnostics only on stderr. Transaction inspection JSON uses
+`schema_version = 1`.
+
 Exit behavior is stable across platforms:
 
 - entrypoint returns `None`: exit `0`

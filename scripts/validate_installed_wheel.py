@@ -99,6 +99,8 @@ def validate_installed_wheel(
         shutil.rmtree(generated_project, ignore_errors=True)
     _run([str(rpacore_cli), "init", "installed_project"], cwd=outside_dir)
     _run([str(rpacore_cli), "run"], cwd=generated_project)
+    _run([str(rpacore_cli), "transaction", "list"], cwd=generated_project)
+    _run([str(rpacore_cli), "transaction", "list", "--json"], cwd=generated_project)
 
     if examples_pytest:
         _run([str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir)

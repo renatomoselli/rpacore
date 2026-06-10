@@ -91,7 +91,7 @@ class TestInstalledWheelValidationScript:
                         examples_pytest=[],
                     )
 
-        assert len(calls) == 7
+        assert len(calls) == 9
         assert calls[0][0][1:3] == ["-m", "build"]
         assert calls[1][0][1:3] == ["-m", "venv"]
         assert calls[2][0][1:4] == ["-m", "pip", "install"]
@@ -100,6 +100,8 @@ class TestInstalledWheelValidationScript:
         assert calls[5][0][-2:] == ["init", "installed_project"]
         assert calls[6][0][-1] == "run"
         assert calls[6][1] == work_dir / "outside" / "installed_project"
+        assert calls[7][0][-2:] == ["transaction", "list"]
+        assert calls[8][0][-3:] == ["transaction", "list", "--json"]
 
     def test_validate_installed_wheel_removes_existing_generated_project(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -155,7 +157,7 @@ class TestInstalledWheelValidationScript:
                         examples_pytest=["examples/rest_api_batch/tests"],
                     )
 
-        assert len(calls) == 9
+        assert len(calls) == 11
         assert calls[-2][0][-2:] == ["install", "pytest"]
         assert calls[-2][1] == work_dir / "outside"
         assert calls[-1][0][-2:] == ["pytest", "examples/rest_api_batch/tests"]

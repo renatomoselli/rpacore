@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 
 import rpacore.cli as cli_module
+from rpacore import (
+    Artifact,
+    BusinessException,
+    HistoryEvent,
+    Skill,
+    Status,
+    Transaction,
+    save_transaction,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -246,3 +256,269 @@ class TestCliInit:
         assert "Could not create project" in captured.err
         assert "disk full" in captured.err
         assert not (tmp_path / "demo_project").exists()
+
+
+class TestCliTransaction:
+    def test_transaction_list_empty_database_human_output(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+
+        result = run_cli("transaction", "list", "--db", str(db_path), cwd=tmp_path)
+
+        assert result.returncode == 0
+        assert "Showing up to 100 transactions." in result.stdout
+        assert "No transactions found." in result.stdout
+        assert result.stderr == ""
+
+    def test_transaction_list_populated_database_human_output(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+        tx = Transaction(reference="invoice-001", status=Status.SUCCESSFUL)
+        save_transaction(tx, db_path=str(db_path))
+
+        result = run_cli("transaction", "list", "--db", str(db_path), cwd=tmp_path)
+
+        assert result.returncode == 0
+        assert tx.id in result.stdout
+        assert "successful" in result.stdout
+        assert "invoice-001" in result.stdout
+        assert result.stderr == ""
+
+    def test_transaction_list_json_stdout_is_parseable_and_clean(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+        tx = Transaction(reference="invoice-001", status=Status.SUCCESSFUL)
+        save_transaction(tx, db_path=str(db_path))
+
+        result = run_cli(
+            "transaction",
+            "list",
+            "--db",
+            str(db_path),
+            "--json",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        payload = json.loads(result.stdout)
+        assert payload["schema_version"] == 1
+        assert payload["command"] == "transaction:list"
+        assert payload["limit"] == 100
+        assert payload["transactions"][0]["id"] == tx.id
+        assert payload["transactions"][0]["status"] == "successful"
+
+    def test_transaction_list_limit_is_visible_and_applied(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+        first = Transaction(reference="first", status=Status.SUCCESSFUL)
+        second = Transaction(reference="second", status=Status.SUCCESSFUL)
+        save_transaction(first, db_path=str(db_path))
+        save_transaction(second, db_path=str(db_path))
+
+        human = run_cli(
+            "transaction",
+            "list",
+            "--db",
+            str(db_path),
+            "--limit",
+            "1",
+            cwd=tmp_path,
+        )
+        json_result = run_cli(
+            "transaction",
+            "list",
+            "--db",
+            str(db_path),
+            "--limit",
+            "1",
+            "--json",
+            cwd=tmp_path,
+        )
+
+        assert human.returncode == 0
+        assert "Showing up to 1 transactions." in human.stdout
+        payload = json.loads(json_result.stdout)
+        assert payload["limit"] == 1
+        assert len(payload["transactions"]) == 1
+
+    def test_transaction_list_invalid_limit_exits_one(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+
+        result = run_cli(
+            "transaction",
+            "list",
+            "--db",
+            str(db_path),
+            "--limit",
+            "0",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 2
+        assert result.stdout == ""
+        assert "must be an integer >= 1: 0" in result.stderr
+
+    def test_transaction_show_human_output(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+        skill = Skill("download", 1, arguments={"invoice": "001"})
+        skill.status = Status.FAILED
+        skill.exceptions.append(BusinessException("bad invoice", action="download"))
+        tx = Transaction(reference="invoice-001", status=Status.FAILED, skills=[skill])
+        tx.metadata = {"customer": "acme"}
+        tx.artifacts = [Artifact(name="invoice", path="invoice.pdf", kind="pdf")]
+        tx.append_history(skill=skill, event=HistoryEvent.SKILL_FAILED)
+        save_transaction(tx, db_path=str(db_path))
+
+        result = run_cli("transaction", "show", tx.id, "--db", str(db_path), cwd=tmp_path)
+
+        assert result.returncode == 0
+        assert f"ID:          {tx.id}" in result.stdout
+        assert "Reference:   invoice-001" in result.stdout
+        assert "1. download: failed" in result.stdout
+        assert "- business: bad invoice" in result.stdout
+        assert "1. skill_failed status=failed retry=0 skill=download" in result.stdout
+        assert "invoice (pdf): invoice.pdf" in result.stdout
+        assert "Artifacts:   1" in result.stdout
+        assert result.stderr == ""
+
+    def test_transaction_show_json_contains_loaded_transaction_details(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+        skill = Skill("download", 1, arguments={"invoice": "001"})
+        skill.status = Status.FAILED
+        skill.exceptions.append(BusinessException("bad invoice", action="download"))
+        tx = Transaction(
+            reference="invoice-001",
+            status=Status.FAILED,
+            state={"invoice": "001"},
+            metadata={"customer": "acme"},
+            skills=[skill],
+            artifacts=[Artifact(name="invoice", path="invoice.pdf", kind="pdf")],
+        )
+        tx.append_history(skill=skill, event=HistoryEvent.SKILL_FAILED)
+        save_transaction(tx, db_path=str(db_path))
+
+        result = run_cli(
+            "transaction",
+            "show",
+            tx.id,
+            "--db",
+            str(db_path),
+            "--json",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        payload = json.loads(result.stdout)
+        assert payload["schema_version"] == 1
+        assert payload["command"] == "transaction:show"
+        detail = payload["transaction"]
+        assert detail["id"] == tx.id
+        assert detail["state"] == {"invoice": "001"}
+        assert detail["metadata"] == {"customer": "acme"}
+        assert detail["skills"][0]["exceptions"][0]["type"] == "business"
+        assert detail["history"][0]["event"] == "skill_failed"
+        assert detail["artifacts"][0]["path"] == "invoice.pdf"
+
+    def test_transaction_list_uses_manifest_storage_path_by_default(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        db_path = project / "data" / "transactions.db"
+        db_path.parent.mkdir()
+        (project / "rpacore.toml").write_text(
+            "[project]\nentrypoint = \"main:main\"\n\n"
+            "[storage]\ntransaction_db_path = \"data/transactions.db\"\n",
+            encoding="utf-8",
+        )
+        tx = Transaction(reference="manifest-db", status=Status.SUCCESSFUL)
+        save_transaction(tx, db_path=str(db_path))
+
+        result = run_cli("transaction", "list", "--json", cwd=project)
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        assert json.loads(result.stdout)["transactions"][0]["id"] == tx.id
+
+    def test_transaction_show_json_uses_manifest_storage_path_by_default(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        db_path = project / "data" / "transactions.db"
+        db_path.parent.mkdir()
+        (project / "rpacore.toml").write_text(
+            "[project]\nentrypoint = \"main:main\"\n\n"
+            "[storage]\ntransaction_db_path = \"data/transactions.db\"\n",
+            encoding="utf-8",
+        )
+        tx = Transaction(reference="manifest-db", status=Status.SUCCESSFUL)
+        save_transaction(tx, db_path=str(db_path))
+
+        result = run_cli("transaction", "show", tx.id, "--json", cwd=project)
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        assert json.loads(result.stdout)["transaction"]["id"] == tx.id
+
+    def test_transaction_show_missing_transaction_exits_one(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+
+        result = run_cli(
+            "transaction",
+            "show",
+            "missing",
+            "--db",
+            str(db_path),
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "Transaction not found" in result.stderr
+
+    def test_transaction_show_json_missing_transaction_exits_one(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+
+        result = run_cli(
+            "transaction",
+            "show",
+            "missing",
+            "--db",
+            str(db_path),
+            "--json",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "Transaction not found" in result.stderr
+
+    def test_transaction_list_invalid_database_path_exits_one(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "missing" / "transactions.db"
+
+        result = run_cli("transaction", "list", "--db", str(db_path), cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "Could not inspect transactions" in result.stderr
+        assert str(db_path) in result.stderr
+
+    def test_transaction_show_json_invalid_database_path_exits_one(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "missing" / "transactions.db"
+
+        result = run_cli(
+            "transaction",
+            "show",
+            "tx-1",
+            "--db",
+            str(db_path),
+            "--json",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "Could not inspect transactions" in result.stderr
+        assert str(db_path) in result.stderr
+
+    def test_transaction_list_without_manifest_or_db_exits_one(self, tmp_path: Path) -> None:
+        result = run_cli("transaction", "list", cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "pass --db" in result.stderr
