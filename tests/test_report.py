@@ -123,6 +123,22 @@ class TestGenerateReport:
 
         assert tx.metadata == {"customer": "acme", "nested": {"b": 2, "a": 1}}
 
+    def test_report_includes_canonical_transaction_record(self):
+        tx = make_transaction()
+
+        report = generate_report(tx)
+
+        assert report.transaction_record["transaction_format_version"] == 1
+        assert report.transaction_record["id"] == tx.id
+
+    def test_report_omits_transaction_record_when_serialization_fails(self):
+        tx = make_transaction()
+        tx.state = {"runtime": object()}
+
+        report = generate_report(tx)
+
+        assert report.transaction_record == {}
+
     def test_report_includes_artifacts_as_defensive_copy(self):
         tx = make_transaction()
         tx.artifacts = [

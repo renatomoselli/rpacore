@@ -33,6 +33,12 @@ def _make_report(reference: str = "ref-test", status: Status = Status.SUCCESSFUL
         status=status,
         retry_count=0,
         skills=[],
+        transaction_record={
+            "transaction_format_version": 1,
+            "id": "tx-001",
+            "reference": reference,
+            "status": str(status),
+        },
         generated_at=datetime(2026, 4, 21, 12, 0, 0, tzinfo=timezone.utc),
     )
 
@@ -50,8 +56,19 @@ def _email_config(host: str = "smtp.example.com", port: int = 587) -> dict:
     }
 
 
-def _webhook_config(url: str = "https://hooks.example.com/notify") -> dict:
-    return {"notification": {"webhook": {"url": url}}}
+def _webhook_config(
+    url: str = "https://hooks.example.com/notify",
+    *,
+    include_transaction: bool = False,
+) -> dict:
+    return {
+        "notification": {
+            "webhook": {
+                "url": url,
+                "include_transaction": include_transaction,
+            }
+        }
+    }
 
 
 def _creds(password: str = "s3cr3t") -> EnvCredentialProvider:
@@ -319,6 +336,7 @@ class TestWebhookNotifierConfig:
     def test_valid_config(self):
         n = WebhookNotifier(_webhook_config())
         assert n.url == "https://hooks.example.com/notify"
+        assert n.include_transaction is False
 
     def test_missing_url_raises(self):
         with pytest.raises(ValueError) as exc_info:
@@ -350,6 +368,21 @@ class TestWebhookNotifierConfig:
         n = WebhookNotifier(cfg)
         assert n.timeout == 5
 
+    def test_include_transaction_enabled(self):
+        n = WebhookNotifier(_webhook_config(include_transaction=True))
+        assert n.include_transaction is True
+
+    def test_include_transaction_bad_type_rejected(self):
+        cfg = _webhook_config()
+        cfg["notification"]["webhook"]["include_transaction"] = "yes"
+        with pytest.raises(TypeError) as exc_info:
+            WebhookNotifier(cfg)
+
+        assert str(exc_info.value) == (
+            "notification.webhook.include_transaction expected bool; "
+            "got str value='yes'"
+        )
+
     def test_timeout_bool_rejected(self):
         cfg = _webhook_config()
         cfg["notification"]["webhook"]["timeout"] = True
@@ -378,11 +411,18 @@ class TestWebhookNotifierConfig:
 # ---------------------------------------------------------------------------
 
 class TestWebhookNotifierSend:
-    def _send(self, report: TransactionReport | None = None) -> bytes:
+    def _send(
+        self,
+        report: TransactionReport | None = None,
+        *,
+        include_transaction: bool = False,
+    ) -> bytes:
         """Call send() with a mocked urlopen, return the posted body."""
         if report is None:
             report = _make_report()
-        notifier = WebhookNotifier(_webhook_config())
+        notifier = WebhookNotifier(
+            _webhook_config(include_transaction=include_transaction)
+        )
         posted: list[bytes] = []
 
         def fake_urlopen(req, timeout=None):
@@ -414,6 +454,27 @@ class TestWebhookNotifierSend:
         body = self._send()
         payload = json.loads(body)
         assert "2026-04-21" in payload["generated_at"]
+
+    def test_json_preserves_legacy_shape_by_default(self):
+        body = self._send()
+        payload = json.loads(body)
+        assert "transaction" not in payload
+
+    def test_json_contains_canonical_transaction_record_when_enabled(self):
+        body = self._send(include_transaction=True)
+        payload = json.loads(body)
+        assert payload["transaction"]["transaction_format_version"] == 1
+        assert payload["transaction"]["id"] == "tx-001"
+        assert payload["transaction"]["reference"] == "ref-test"
+
+    def test_empty_transaction_record_is_omitted_when_enabled(self):
+        report = _make_report()
+        report.transaction_record = {}
+
+        body = self._send(report, include_transaction=True)
+
+        payload = json.loads(body)
+        assert "transaction" not in payload
 
     def test_posts_to_correct_url(self):
         notifier = WebhookNotifier(_webhook_config("https://custom.url/hook"))

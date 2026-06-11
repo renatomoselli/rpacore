@@ -151,7 +151,8 @@ class WebhookNotifier:
     endpoint that accepts a JSON POST.
 
     Config section: [notification.webhook]
-      url (str, required)
+      url                 (str, required)
+      include_transaction (bool, default false)
     """
 
     def __init__(self, config: dict[str, object]) -> None:
@@ -174,8 +175,17 @@ class WebhookNotifier:
         if timeout <= 0:
             raise value_error("notification.webhook.timeout", "int > 0", timeout)
 
+        include_transaction = cfg.get("include_transaction", False)
+        if not isinstance(include_transaction, bool):
+            raise type_error(
+                "notification.webhook.include_transaction",
+                "bool",
+                include_transaction,
+            )
+
         self.url: str = url
         self.timeout: int = timeout
+        self.include_transaction: bool = include_transaction
 
     def send(self, report: TransactionReport) -> None:
         """POST a JSON payload to the configured webhook URL."""
@@ -187,6 +197,8 @@ class WebhookNotifier:
             "generated_at": report.generated_at.isoformat(),
             "text": render_text(report),
         }
+        if self.include_transaction and report.transaction_record:
+            payload["transaction"] = report.transaction_record
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             self.url,

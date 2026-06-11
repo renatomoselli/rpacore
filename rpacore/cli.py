@@ -16,8 +16,8 @@ from rpacore import __version__
 from rpacore.exceptions import BusinessException
 from rpacore.manifest import load_project_manifest, resolve_project_entrypoint
 from rpacore.persistence import list_transactions, load_transaction
-from rpacore.skill import Skill
-from rpacore.transaction import Artifact, HistoryEntry, Transaction
+from rpacore.serialization import serialize_transaction
+from rpacore.transaction import Transaction
 
 
 USAGE_ERROR = 2
@@ -167,7 +167,10 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
                         "schema_version": 1,
                         "command": "transaction:list",
                         "limit": args.limit,
-                        "transactions": [_transaction_summary(tx) for tx in transactions],
+                        "transactions": [
+                            serialize_transaction(tx)
+                            for tx in transactions
+                        ],
                     }
                 )
             else:
@@ -180,7 +183,7 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
                     {
                         "schema_version": 1,
                         "command": "transaction:show",
-                        "transaction": _transaction_detail(transaction),
+                        "transaction": serialize_transaction(transaction),
                     }
                 )
             else:
@@ -188,6 +191,9 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
             return SUCCESS
     except KeyError as exc:
         _print_error(str(exc.args[0] if exc.args else exc))
+        return EXECUTION_ERROR
+    except TypeError as exc:
+        _print_error(str(exc))
         return EXECUTION_ERROR
     except Exception as exc:
         _print_error(f"Could not inspect transactions in {db_path}: {exc}")
@@ -248,84 +254,8 @@ def _write_json(data: dict[str, object]) -> None:
     print(json.dumps(data, sort_keys=True, separators=(",", ":")))
 
 
-def _transaction_summary(transaction: Transaction) -> dict[str, object]:
-    return {
-        "id": transaction.id,
-        "reference": transaction.reference,
-        "status": str(transaction.status),
-        "retry_count": transaction.retry_count,
-        "created_at": _format_optional_datetime(transaction.created_at),
-        "started_at": _format_optional_datetime(transaction.started_at),
-        "finished_at": _format_optional_datetime(transaction.finished_at),
-        "skill_count": len(transaction.skills),
-        "history_count": len(transaction.history),
-        "artifact_count": len(transaction.artifacts),
-    }
-
-
-def _transaction_detail(transaction: Transaction) -> dict[str, object]:
-    detail = _transaction_summary(transaction)
-    detail.update(
-        {
-            "state": transaction.state,
-            "metadata": transaction.metadata,
-            "skills": [_skill_detail(skill) for skill in transaction.ordered_skills()],
-            "history": [_history_detail(entry) for entry in transaction.history],
-            "artifacts": [_artifact_detail(artifact) for artifact in transaction.artifacts],
-        }
-    )
-    return detail
-
-
-def _skill_detail(skill: Skill) -> dict[str, object]:
-    return {
-        "name": skill.name,
-        "execution_order": skill.execution_order,
-        "status": str(skill.status),
-        "arguments": skill.arguments,
-        "exceptions": [_exception_detail(exc) for exc in skill.exceptions],
-    }
-
-
-def _exception_detail(exc: BaseException) -> dict[str, object]:
-    return {
-        "type": _exception_kind(exc),
-        "message": str(exc),
-        "action": str(getattr(exc, "action", "")),
-        "retry_number": int(getattr(exc, "retry_number", 0)),
-        "datetime_occurred": _format_optional_datetime(
-            getattr(exc, "datetime_occurred", None)
-        ),
-        "screenshot_path": str(getattr(exc, "screenshot_path", "")),
-        "stops_execution": bool(getattr(exc, "stops_execution", True)),
-    }
-
-
 def _exception_kind(exc: BaseException) -> str:
     return "business" if isinstance(exc, BusinessException) else "system"
-
-
-def _history_detail(entry: HistoryEntry) -> dict[str, object]:
-    return {
-        "sequence": entry.sequence,
-        "timestamp": _format_optional_datetime(entry.timestamp),
-        "event": str(entry.event),
-        "status": str(entry.status),
-        "retry_number": entry.retry_number,
-        "skill_name": entry.skill_name,
-        "skill_execution_order": entry.skill_execution_order,
-    }
-
-
-def _artifact_detail(artifact: Artifact) -> dict[str, object]:
-    return {
-        "id": artifact.id,
-        "name": artifact.name,
-        "path": artifact.path,
-        "kind": artifact.kind,
-        "created_at": _format_optional_datetime(artifact.created_at),
-        "metadata": artifact.metadata,
-    }
 
 
 def _format_optional_datetime(value: datetime | None) -> str | None:

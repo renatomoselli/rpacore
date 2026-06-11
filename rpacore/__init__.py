@@ -32,6 +32,7 @@ from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider, QueueSt
 from rpacore.recovery import resume_transaction
 from rpacore.report import ArtifactReport, SkillReport, TransactionReport, generate_report, render_html, render_text
 from rpacore.runner import QueueRunSummary, run_queue_loop
+from rpacore.serialization import TRANSACTION_FORMAT_VERSION, serialize_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
@@ -80,11 +81,13 @@ __all__ = [
     "render_text",
     "run_queue_loop",
     "save_transaction",
+    "serialize_transaction",
     "SkillReport",
     "SqliteQueue",
     "SystemException",
     "Skill",
     "Status",
     "Transaction",
+    "TRANSACTION_FORMAT_VERSION",
     "TransactionReport",
 ]

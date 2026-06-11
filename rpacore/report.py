@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from rpacore.exceptions import BusinessException, SystemException
+from rpacore.serialization import serialize_transaction
 from rpacore.status import Status
 
 if TYPE_CHECKING:
@@ -63,6 +64,7 @@ class TransactionReport:
     metadata: dict[str, object] = field(default_factory=dict)
     artifacts: list[ArtifactReport] = field(default_factory=list)
     history: list[HistoryEntry] = field(default_factory=list)
+    transaction_record: dict[str, object] = field(default_factory=dict)
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -106,6 +108,11 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         )
         for artifact in transaction.artifacts
     ]
+    try:
+        transaction_record = serialize_transaction(transaction)
+    except TypeError:
+        transaction_record = {}
+
     return TransactionReport(
         transaction_id=transaction.id,
         reference=transaction.reference,
@@ -118,6 +125,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         metadata=dict(transaction.metadata),
         artifacts=artifact_reports,
         history=list(transaction.history),
+        transaction_record=transaction_record,
     )
 
 

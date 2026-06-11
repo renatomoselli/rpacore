@@ -19,3 +19,4 @@ max_retries = 3
 
 # [notification.webhook]
 # url = "https://hooks.example.com/rpacore"
+# include_transaction = false

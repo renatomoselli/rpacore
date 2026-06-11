@@ -284,7 +284,12 @@ class TestCliTransaction:
 
     def test_transaction_list_json_stdout_is_parseable_and_clean(self, tmp_path: Path) -> None:
         db_path = tmp_path / "transactions.db"
-        tx = Transaction(reference="invoice-001", status=Status.SUCCESSFUL)
+        tx = Transaction(
+            reference="invoice-001",
+            status=Status.SUCCESSFUL,
+            state={"invoice": "001"},
+            metadata={"customer": "acme"},
+        )
         save_transaction(tx, db_path=str(db_path))
 
         result = run_cli(
@@ -303,7 +308,10 @@ class TestCliTransaction:
         assert payload["command"] == "transaction:list"
         assert payload["limit"] == 100
         assert payload["transactions"][0]["id"] == tx.id
+        assert payload["transactions"][0]["transaction_format_version"] == 1
         assert payload["transactions"][0]["status"] == "successful"
+        assert payload["transactions"][0]["state"] == {"invoice": "001"}
+        assert payload["transactions"][0]["metadata"] == {"customer": "acme"}
 
     def test_transaction_list_limit_is_visible_and_applied(self, tmp_path: Path) -> None:
         db_path = tmp_path / "transactions.db"
@@ -410,12 +418,31 @@ class TestCliTransaction:
         assert payload["schema_version"] == 1
         assert payload["command"] == "transaction:show"
         detail = payload["transaction"]
+        assert detail["transaction_format_version"] == 1
         assert detail["id"] == tx.id
         assert detail["state"] == {"invoice": "001"}
         assert detail["metadata"] == {"customer": "acme"}
         assert detail["skills"][0]["exceptions"][0]["type"] == "business"
         assert detail["history"][0]["event"] == "skill_failed"
         assert detail["artifacts"][0]["path"] == "invoice.pdf"
+
+    def test_transaction_list_json_serialization_type_error_exits_one(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        tx = Transaction(reference="invoice", state={"runtime": object()})
+        monkeypatch.setattr(cli_module, "list_transactions", lambda *_args, **_kwargs: [tx])
+
+        result = cli_module.main(
+            ["transaction", "list", "--db", str(tmp_path / "transactions.db"), "--json"]
+        )
+
+        captured = capsys.readouterr()
+        assert result == 1
+        assert captured.out == ""
+        assert "transaction.state['runtime'] expected JSON value" in captured.err
 
     def test_transaction_list_uses_manifest_storage_path_by_default(self, tmp_path: Path) -> None:
         project = tmp_path / "project"

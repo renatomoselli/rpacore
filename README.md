@@ -131,7 +131,16 @@ storage paths are resolved relative to `rpacore.toml`. `transaction list`
 returns the latest 100 transactions by default; pass `--limit N` to choose a
 different cap. Human output is intended for operators; `--json` writes parseable
 JSON to stdout with diagnostics only on stderr. Transaction inspection JSON uses
-`schema_version = 1`.
+`schema_version = 1` and embeds the canonical transaction record with
+`transaction_format_version = 1`.
+
+Machine-readable transaction records include user-supplied state, metadata,
+skill arguments, exception messages, and artifact metadata. These fields can
+contain sensitive business data. They never include resources, config,
+credentials, or artifact file contents. Webhook notifications preserve their
+compact payload shape by default. Set
+`[notification.webhook].include_transaction = true` to include the canonical
+transaction record in the webhook JSON payload.
 
 Exit behavior is stable across platforms:
 
@@ -268,6 +277,7 @@ max_retries = 3
 
 # [notification.webhook]
 # url = "https://hooks.example.com/rpacore"
+# include_transaction = false
 ```
 
 ## Exception Model

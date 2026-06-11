@@ -30,6 +30,10 @@ class TestPackageVersion:
         assert rpacore.HistoryEntry.__name__ == "HistoryEntry"
         assert rpacore.HistoryEvent.TRANSACTION_STARTED == "transaction_started"
 
+    def test_serializer_is_reexported(self) -> None:
+        assert rpacore.TRANSACTION_FORMAT_VERSION == 1
+        assert callable(rpacore.serialize_transaction)
+
 
 class TestCli:
     def test_version_command_prints_version(self, capsys) -> None:
