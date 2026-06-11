@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from contextlib import AbstractContextManager
@@ -184,12 +185,14 @@ def run_queue_loop(
                 summary=summary,
             )
 
-        with resource_scope as scope_resources:
+        scope_resources = resource_scope.__enter__()
+        try:
             if scope_resources is not None:
                 if not isinstance(scope_resources, dict):
                     raise type_error("resource_scope yield", "dict | None", scope_resources)
                 shared_resources = dict(scope_resources)
-            return _run_items(
+            _log_resource_scope(log, "resource_scope_acquired", worker_id, shared_resources)
+            result = _run_items(
                 queue,
                 engine,
                 build_transaction,
@@ -205,6 +208,15 @@ def run_queue_loop(
                 shared_resources=shared_resources,
                 summary=summary,
             )
+        except BaseException:
+            exc_info = sys.exc_info()
+            if not resource_scope.__exit__(*exc_info):
+                raise
+            result = summary
+        else:
+            resource_scope.__exit__(None, None, None)
+        _log_resource_scope(log, "resource_scope_released", worker_id, shared_resources)
+        return result
     finally:
         if on_finish is not None:
             try:
@@ -432,6 +444,23 @@ def _lease_checked_checkpoint(
         heartbeat.raise_if_failed()
 
     return checked_checkpoint
+
+
+def _log_resource_scope(
+    log: logging.Logger,
+    event: str,
+    worker_id: str,
+    resources: dict[str, object],
+) -> None:
+    log.info(
+        "Resource scope event",
+        extra={
+            "event": event,
+            "worker_id": worker_id,
+            "resource_count": len(resources),
+            "resource_names": sorted(resources),
+        },
+    )
 
 
 def _lease_only_checkpoint(heartbeat: _LeaseHeartbeat) -> Callable[[Transaction], None]:

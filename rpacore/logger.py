@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sys
+from datetime import datetime, timezone
 from typing import TextIO
 
 _LOGGER_NAME = "rpacore"
+LOG_FORMAT_VERSION = 1
 _RESERVED_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
+_REDACTED_EXTRA_FIELDS = frozenset({"config", "credentials", "resources"})
 
 
 def _extra_fields(record: logging.LogRecord) -> dict[str, object]:
@@ -43,12 +47,47 @@ class JsonFormatter(logging.Formatter):
     """JSON formatter for rpacore events."""
 
     def format(self, record: logging.LogRecord) -> str:
+        extra = _extra_fields(record)
+        event = str(extra.pop("event", "log"))
         payload: dict[str, object] = {
+            "log_format_version": LOG_FORMAT_VERSION,
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
+            "event": event,
             "level": record.levelname.lower(),
             "message": record.getMessage(),
         }
-        payload.update(_extra_fields(record))
-        return json.dumps(payload, default=str)
+        payload.update(
+            {
+                key: _json_log_value(value)
+                for key, value in extra.items()
+                if key not in _REDACTED_EXTRA_FIELDS
+            }
+        )
+        return json.dumps(payload, allow_nan=False, sort_keys=True, separators=(",", ":"))
+
+
+def _json_log_value(value: object) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, list):
+        return [_json_log_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_log_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        items = [_json_log_value(item) for item in value]
+        return sorted(
+            items,
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        )
+    if isinstance(value, dict):
+        return {
+            str(key): _json_log_value(item)
+            for key, item in value.items()
+            if str(key) not in _REDACTED_EXTRA_FIELDS
+        }
+    return type(value).__name__
 
 
 def get_logger(name: str = _LOGGER_NAME) -> logging.Logger:

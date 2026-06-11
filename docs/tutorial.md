@@ -143,6 +143,7 @@ max_retries = 1
 retry_delay = 0.0
 retry_backoff = 1.0
 log_level = "INFO"
+log_format = "text"
 transaction_db_path = "rpacore.db"
 screenshot_dir = ""
 credential_provider = "env"
@@ -202,7 +203,7 @@ from skills.greet_user import WriteGreeting
 
 def main() -> None:
     config = load_config("config.toml")
-    configure_logger(level=str(config["log_level"]))
+    configure_logger(level=str(config["log_level"]), fmt=str(config["log_format"]))
 
     tx = Transaction(reference="greet-user")
     tx.skills = [

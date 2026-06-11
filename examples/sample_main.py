@@ -34,7 +34,7 @@ def main(
     config = load_config(config_path)
 
     # 2. Configure the logger once for the entire run.
-    configure_logger(level=str(config["log_level"]))
+    configure_logger(level=str(config["log_level"]), fmt=str(config["log_format"]))
 
     # 3. Build the transaction.
     #    Explicitly instantiate skills so the wiring is readable and greppable.

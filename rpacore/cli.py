@@ -405,6 +405,7 @@ def _config_toml() -> str:
         retry_delay = 0.0
         retry_backoff = 1.0
         log_level = "INFO"
+        log_format = "text"
         transaction_db_path = "rpacore.db"
         screenshot_dir = ""
         credential_provider = "env"

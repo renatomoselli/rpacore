@@ -17,6 +17,7 @@ class TestLoadConfig:
         assert config["retry_delay"] == 0.0
         assert config["retry_backoff"] == 1.0
         assert config["log_level"] == "INFO"
+        assert config["log_format"] == "text"
         assert config["transaction_db_path"] == "rpacore.db"
 
     def test_require_file_missing_file_raises(self, tmp_path: Path) -> None:
@@ -28,7 +29,8 @@ class TestLoadConfig:
     def test_loads_values_from_file(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
         toml.write_text(
-            'max_retries = 3\nlog_level = "DEBUG"\ntransaction_db_path = "custom.db"\n',
+            'max_retries = 3\nlog_level = "DEBUG"\nlog_format = "json"\n'
+            'transaction_db_path = "custom.db"\n',
             encoding="utf-8",
         )
 
@@ -38,6 +40,7 @@ class TestLoadConfig:
         assert config["retry_delay"] == 0.0
         assert config["retry_backoff"] == 1.0
         assert config["log_level"] == "DEBUG"
+        assert config["log_format"] == "json"
         assert config["transaction_db_path"] == str(tmp_path / "custom.db")
 
     def test_partial_file_merges_with_defaults(self, tmp_path: Path) -> None:
@@ -48,6 +51,7 @@ class TestLoadConfig:
 
         assert config["max_retries"] == 5
         assert config["log_level"] == "INFO"
+        assert config["log_format"] == "text"
         assert config["transaction_db_path"] == str(tmp_path / "rpacore.db")
 
     def test_returns_plain_dict(self, tmp_path: Path) -> None:
@@ -257,6 +261,34 @@ class TestLoadConfig:
         config = load_config(toml)
 
         assert config["log_level"] == "DEBUG"
+
+    def test_invalid_log_format_type_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text("log_format = 1\n", encoding="utf-8")
+
+        with pytest.raises(TypeError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == "log_format expected str; got int value=1"
+
+    def test_invalid_log_format_value_raises(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('log_format = "xml"\n', encoding="utf-8")
+
+        with pytest.raises(ValueError) as exc_info:
+            load_config(toml)
+
+        assert str(exc_info.value) == (
+            "log_format expected one of text, json; got str value='xml'"
+        )
+
+    def test_uppercase_log_format_is_normalized(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('log_format = "JSON"\n', encoding="utf-8")
+
+        config = load_config(toml)
+
+        assert config["log_format"] == "json"
 
     def test_invalid_transaction_db_path_type_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"

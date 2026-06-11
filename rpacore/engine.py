@@ -142,6 +142,16 @@ class Engine:
             return
         validate_json_object(transaction.state, path="transaction.state")
         checkpoint(transaction)
+        self.logger.info(
+            "Transaction checkpoint completed",
+            extra={
+                "event": "transaction_checkpoint",
+                "transaction_id": transaction.id,
+                "transaction_reference": transaction.reference,
+                "transaction_status": transaction.status,
+                "retry_count": transaction.retry_count,
+            },
+        )
 
     def _sleep_before_retry(self, completed_retry_passes: int) -> None:
         """Delay before a retry pass when configured."""

@@ -74,7 +74,7 @@ from my_skills import FetchRecord, ProcessRecord, WriteOutput
 
 
 config = load_config("config.toml")
-configure_logger(level=config["log_level"])
+configure_logger(level=config["log_level"], fmt=config["log_format"])
 
 tx = Transaction(reference="my-automation")
 tx.skills = [
@@ -148,6 +148,10 @@ credentials, or artifact file contents. Webhook notifications preserve their
 compact payload shape by default. Set
 `[notification.webhook].include_transaction = true` to include the canonical
 transaction record in the webhook JSON payload.
+
+Set `log_format = "json"` and pass it to `configure_logger(..., fmt=...)` for
+line-delimited JSON logs. Each JSON log line contains `log_format_version`,
+UTC `timestamp`, `event`, `level`, and `message`, plus sanitized event fields.
 
 Exit behavior is stable across platforms:
 
@@ -267,6 +271,7 @@ max_retries = 2
 retry_delay = 0.0
 retry_backoff = 1.0
 log_level = "INFO"
+log_format = "text"  # "text" or "json"
 transaction_db_path = "rpacore.db"
 screenshot_dir = ""
 credential_provider = "env"

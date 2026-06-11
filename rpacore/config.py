@@ -14,11 +14,13 @@ _DEFAULTS: dict[str, object] = {
     "retry_delay": 0.0,
     "retry_backoff": 1.0,
     "log_level": "INFO",
+    "log_format": "text",
     "transaction_db_path": "rpacore.db",
     "screenshot_dir": "",
     "credential_provider": "env",
 }
 _LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"})
+_LOG_FORMATS = frozenset({"text", "json"})
 
 
 def _validate(config: dict[str, object]) -> None:
@@ -57,6 +59,14 @@ def _validate(config: dict[str, object]) -> None:
     if normalized_log_level not in _LOG_LEVELS:
         raise value_error("log_level", "one of CRITICAL, ERROR, WARNING, INFO, DEBUG, NOTSET", log_level)
     config["log_level"] = normalized_log_level
+
+    log_format = config["log_format"]
+    if not isinstance(log_format, str):
+        raise type_error("log_format", "str", log_format)
+    normalized_log_format = log_format.lower()
+    if normalized_log_format not in _LOG_FORMATS:
+        raise value_error("log_format", "one of text, json", log_format)
+    config["log_format"] = normalized_log_format
 
     transaction_db_path = config["transaction_db_path"]
     if not isinstance(transaction_db_path, str):
@@ -98,7 +108,8 @@ def load_config(path: str | Path = "config.toml", *, require_file: bool = False)
     Missing keys fall back to defaults. A missing file returns defaults without error.
     Pass require_file=True to raise FileNotFoundError when the file is missing.
     Known keys are validated at load time. Unknown keys pass through.
-    log_level is normalized to uppercase in the returned dict.
+    log_level is normalized to uppercase and log_format is normalized to
+    lowercase in the returned dict.
     transaction_db_path and queue.db_path are resolved relative to the config
     file's directory.
     """

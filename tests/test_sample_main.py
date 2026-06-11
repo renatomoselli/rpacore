@@ -23,6 +23,7 @@ def _write_config(tmp_path: Path) -> tuple[str, str, str]:
         textwrap.dedent(f"""\
             max_retries = 0
             log_level = "INFO"
+            log_format = "text"
             transaction_db_path = "{db.as_posix()}"
         """),
         encoding="utf-8",
