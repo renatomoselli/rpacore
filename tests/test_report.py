@@ -78,7 +78,7 @@ class TestGenerateReport:
 
         assert len(report.skills[0].exceptions) == 3
 
-    def test_system_exceptions_only_last_retry_included(self):
+    def test_all_system_exceptions_included(self):
         skill = make_skill("s1", 1, Status.FAILED)
         skill.exceptions = [
             sys_("early", retry=0),
@@ -89,8 +89,11 @@ class TestGenerateReport:
 
         report = generate_report(tx)
 
-        assert len(report.skills[0].exceptions) == 1
-        assert str(report.skills[0].exceptions[0]) == "last"
+        assert [str(exc) for exc in report.skills[0].exceptions] == [
+            "early",
+            "middle",
+            "last",
+        ]
 
     def test_report_includes_timestamps_and_history(self):
         tx = make_transaction()
@@ -163,7 +166,7 @@ class TestGenerateReport:
 
         assert report_fields == artifact_fields
 
-    def test_system_exception_from_earlier_retry_excluded(self):
+    def test_system_exception_from_earlier_retry_preserved(self):
         skill = make_skill("s1", 1, Status.FAILED)
         skill.exceptions = [sys_("old", retry=0), sys_("current", retry=1)]
         tx = make_transaction(retry_count=1, skills=[skill])
@@ -171,11 +174,10 @@ class TestGenerateReport:
         report = generate_report(tx)
         messages = [str(e) for e in report.skills[0].exceptions]
 
-        assert "old" not in messages
+        assert "old" in messages
         assert "current" in messages
 
-    def test_mixed_exceptions_filtering(self):
-        """All biz exceptions kept; only last-retry system exceptions kept."""
+    def test_mixed_exceptions_preserve_recorded_order(self):
         skill = make_skill("s1", 1, Status.FAILED)
         skill.exceptions = [
             biz("biz0", retry=0),
@@ -188,13 +190,7 @@ class TestGenerateReport:
         report = generate_report(tx)
         kept = report.skills[0].exceptions
 
-        # Both biz exceptions included, only sys with retry=2
-        assert len(kept) == 3
-        messages = [str(e) for e in kept]
-        assert "biz0" in messages
-        assert "biz2" in messages
-        assert "sys2" in messages
-        assert "sys0" not in messages
+        assert [str(e) for e in kept] == ["biz0", "sys0", "biz2", "sys2"]
 
     def test_no_exceptions_gives_empty_list(self):
         skill = make_skill("s1", 1)

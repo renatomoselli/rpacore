@@ -75,6 +75,7 @@ class QueueRunSummary:
     callback_errors: int = field(default=0)
     persistence_errors: int = field(default=0)
     lifecycle_errors: int = field(default=0)
+    notification_errors: int = field(default=0)
 
 
 def run_queue_loop(
@@ -135,6 +136,8 @@ def run_queue_loop(
         credentials:       Credential provider (passed to ProcessContext).
         worker_id:         Worker identifier passed to queue.next_item(). Defaults to hostname.
         notifiers:         Optional list of notifiers to call after each transaction. Defaults to [].
+                           Notification failures are logged and counted but never change
+                           transaction or queue outcomes.
         logger:            Optional logger. Defaults to the rpacore logger.
         after_item:        Optional callback fired after each item. Receives (item, transaction, error).
         stop_event:        Optional threading.Event. When set, the loop stops before claiming
@@ -331,7 +334,6 @@ def _run_items(
         if ctx is not None and not lease_lost:
             try:
                 report = generate_report(ctx.transaction)
-                dispatch(notifiers, report, logger=log)
             except MemoryError:
                 _stop_lease_heartbeat(heartbeat)
                 raise
@@ -339,8 +341,18 @@ def _run_items(
                 if error is None:
                     error = exc
                 log.exception(
-                    "Post-run reporting failed; preserving queue outcome",
+                    "Post-run report generation failed; preserving queue outcome",
                     extra={"event": "queue_item_postprocess_error", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
+                )
+            else:
+                def count_notification_error(notifier: str) -> None:
+                    summary.notification_errors += 1
+
+                dispatch(
+                    notifiers,
+                    report,
+                    logger=log,
+                    on_failure=count_notification_error,
                 )
 
         if after_item is not None and not lease_lost:

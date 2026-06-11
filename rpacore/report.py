@@ -71,30 +71,18 @@ class TransactionReport:
 def generate_report(transaction: Transaction) -> TransactionReport:
     """Build a TransactionReport from a completed transaction.
 
-    Exception filtering rules:
-    - ALL BusinessExceptions are included (expected violations, always relevant).
-    - ONLY SystemExceptions whose retry_number equals transaction.retry_count are
-      included. Earlier-retry system exceptions are noise once execution has moved on;
-      the last-retry system exception is the one that matters for diagnosis.
+    Reports preserve every diagnostic attempt recorded on each skill. Operator
+    views should not hide earlier retry failures by default.
     """
     skill_reports: list[SkillReport] = []
     for skill in transaction.ordered_skills():
-        filtered = [
-            exc
-            for exc in skill.exceptions
-            if isinstance(exc, BusinessException)
-            or (
-                isinstance(exc, SystemException)
-                and exc.retry_number == transaction.retry_count
-            )
-        ]
         skill_reports.append(
             SkillReport(
                 name=skill.name,
                 execution_order=skill.execution_order,
                 status=skill.status,
                 icon=_ICONS.get(skill.status, "?"),
-                exceptions=filtered,
+                exceptions=list(skill.exceptions),
             )
         )
     artifact_reports = [

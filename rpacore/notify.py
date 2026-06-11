@@ -6,11 +6,12 @@ import json
 import logging
 import os
 import smtplib
+import urllib.parse
 import urllib.request
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Protocol, runtime_checkable
+from typing import Callable, Protocol, runtime_checkable
 
 from rpacore._validation import type_error, value_error
 from rpacore.credentials import CredentialProvider
@@ -39,9 +40,12 @@ class EmailNotifier:
       port      (int, default 587)
       from_addr (str, required)
       to_addrs  (list[str] or comma-separated str, required)
+      attach_screenshots (bool, default true)
 
     Screenshots referenced in the report are attached as files if they
-    exist on disk.
+    exist on disk and attach_screenshots is true. Missing or unreadable
+    screenshot paths are skipped so notification delivery cannot depend on
+    artifact file availability.
     """
 
     def __init__(
@@ -98,11 +102,20 @@ class EmailNotifier:
         if timeout <= 0:
             raise value_error("notification.email.timeout", "int > 0", timeout)
 
+        attach_screenshots = cfg.get("attach_screenshots", True)
+        if not isinstance(attach_screenshots, bool):
+            raise type_error(
+                "notification.email.attach_screenshots",
+                "bool",
+                attach_screenshots,
+            )
+
         self.host: str = host
         self.port: int = port
         self.timeout: int = timeout
         self.from_addr: str = from_addr
         self.to_addrs: list[str] = to_addrs
+        self.attach_screenshots: bool = attach_screenshots
         self._credentials: CredentialProvider = credentials
 
     def send(self, report: TransactionReport) -> None:
@@ -122,21 +135,21 @@ class EmailNotifier:
         alt.attach(MIMEText(html_body, "html", "utf-8"))
         msg.attach(alt)
 
-        # Attach screenshots referenced in exception reports.
-        seen: set[str] = set()
-        for sr in report.skills:
-            for exc in sr.exceptions:
-                path = exc.screenshot_path
-                if path and path not in seen:
-                    seen.add(path)
-                    try:
-                        filename = os.path.basename(path)
-                        with open(path, "rb") as fh:
-                            part = MIMEApplication(fh.read())
-                        part["Content-Disposition"] = f'attachment; filename="{filename}"'
-                        msg.attach(part)
-                    except OSError:
-                        pass  # Screenshot missing on disk — skip attachment silently.
+        if self.attach_screenshots:
+            seen: set[str] = set()
+            for sr in report.skills:
+                for exc in sr.exceptions:
+                    path = exc.screenshot_path
+                    if path and path not in seen:
+                        seen.add(path)
+                        try:
+                            filename = os.path.basename(path)
+                            with open(path, "rb") as fh:
+                                part = MIMEApplication(fh.read())
+                            part["Content-Disposition"] = f'attachment; filename="{filename}"'
+                            msg.attach(part)
+                        except OSError:
+                            pass
 
         with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as smtp:
             smtp.starttls()
@@ -153,6 +166,9 @@ class WebhookNotifier:
     Config section: [notification.webhook]
       url                 (str, required)
       include_transaction (bool, default false)
+
+    Only http and https URLs are accepted. Private, loopback, and link-local
+    hosts are allowed because webhook URLs are trusted operator configuration.
     """
 
     def __init__(self, config: dict[str, object]) -> None:
@@ -168,6 +184,19 @@ class WebhookNotifier:
             raise type_error("notification.webhook.url", "str", url)
         if not url:
             raise value_error("notification.webhook.url", "non-empty str", url)
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise value_error(
+                "notification.webhook.url",
+                "http or https URL",
+                url,
+            )
+        if parsed.username or parsed.password:
+            raise value_error(
+                "notification.webhook.url",
+                "URL without embedded credentials",
+                _redact_url_credentials(parsed),
+            )
 
         timeout = cfg.get("timeout", 30)
         if isinstance(timeout, bool) or not isinstance(timeout, int):
@@ -195,6 +224,18 @@ class WebhookNotifier:
             "status": str(report.status),
             "retry_count": report.retry_count,
             "generated_at": report.generated_at.isoformat(),
+            "metadata": report.metadata,
+            "artifacts": [
+                {
+                    "id": artifact.id,
+                    "name": artifact.name,
+                    "path": artifact.path,
+                    "kind": artifact.kind,
+                    "metadata": artifact.metadata,
+                    "created_at": artifact.created_at.isoformat(),
+                }
+                for artifact in report.artifacts
+            ],
             "text": render_text(report),
         }
         if self.include_transaction and report.transaction_record:
@@ -210,19 +251,27 @@ class WebhookNotifier:
             resp.read()
 
 
+def _redact_url_credentials(parsed: urllib.parse.ParseResult) -> str:
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return parsed._replace(netloc=f"<credentials>@{netloc}").geturl()
+
+
 def dispatch(
     notifiers: list[Notifier],
     report: TransactionReport,
     *,
     logger: logging.Logger | None = None,
+    on_failure: Callable[[str], None] | None = None,
 ) -> None:
     """Send a report through all configured notifiers.
 
-    If a notifier raises, the error is logged and swallowed.
+    If a notifier raises, the error is logged and swallowed. When supplied,
+    on_failure receives the failed notifier class name after logging.
     The transaction outcome is never affected by notification failures.
     """
     log = logger if logger is not None else get_logger()
     for notifier in notifiers:
+        notifier_name = type(notifier).__name__
         try:
             notifier.send(report)
         except MemoryError:
@@ -230,9 +279,19 @@ def dispatch(
         except Exception:
             log.exception(
                 "Notifier %s failed; swallowing to protect transaction outcome",
-                type(notifier).__name__,
-                extra={"event": "notifier_error", "notifier": type(notifier).__name__},
+                notifier_name,
+                extra={"event": "notifier_error", "notifier": notifier_name},
             )
+            if on_failure is not None:
+                try:
+                    on_failure(notifier_name)
+                except MemoryError:
+                    raise
+                except Exception:
+                    log.exception(
+                        "Notification failure callback raised; swallowing to protect transaction outcome",
+                        extra={"event": "notifier_failure_callback_error", "notifier": notifier_name},
+                    )
 
 
 def build_notifiers(

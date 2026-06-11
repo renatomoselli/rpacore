@@ -145,9 +145,22 @@ Machine-readable transaction records include user-supplied state, metadata,
 skill arguments, exception messages, and artifact metadata. These fields can
 contain sensitive business data. They never include resources, config,
 credentials, or artifact file contents. Webhook notifications preserve their
-compact payload shape by default. Set
+compact payload shape by default while including report metadata and artifact
+records. Set
 `[notification.webhook].include_transaction = true` to include the canonical
 transaction record in the webhook JSON payload.
+
+Webhook URLs must use `http` or `https`. Local, private, loopback, and
+link-local hosts are allowed because webhook endpoints are trusted operator
+configuration in local automation deployments. Treat webhook config as
+sensitive: outbound requests can still reach internal services. The stdlib URL
+open timeout bounds socket operations after resolution starts, but it does not
+fully control operating-system DNS resolution latency.
+
+Email notifications attach screenshots referenced by exception reports only
+when `[notification.email].attach_screenshots` is true, which is the default.
+Missing or unreadable screenshot files are skipped; report and notification
+payloads include artifact records and paths, not artifact file contents.
 
 Set `log_format = "json"` and pass it to `configure_logger(..., fmt=...)` for
 line-delimited JSON logs. Each JSON log line contains `log_format_version`,
@@ -286,6 +299,7 @@ max_retries = 3
 # port = 587
 # from_addr = "rpacore@example.com"
 # to_addrs = ["admin@example.com"]
+# attach_screenshots = true
 
 # [notification.webhook]
 # url = "https://hooks.example.com/rpacore"

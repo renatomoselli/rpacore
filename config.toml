@@ -17,6 +17,7 @@ max_retries = 3
 # port = 587
 # from_addr = "rpacore@example.com"
 # to_addrs = ["admin@example.com"]
+# attach_screenshots = true
 
 # [notification.webhook]
 # url = "https://hooks.example.com/rpacore"

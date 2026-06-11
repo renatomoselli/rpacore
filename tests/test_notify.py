@@ -18,7 +18,7 @@ from rpacore.notify import (
     build_notifiers,
     dispatch,
 )
-from rpacore.report import SkillReport, TransactionReport
+from rpacore.report import ArtifactReport, SkillReport, TransactionReport
 from rpacore.status import Status
 
 
@@ -33,11 +33,33 @@ def _make_report(reference: str = "ref-test", status: Status = Status.SUCCESSFUL
         status=status,
         retry_count=0,
         skills=[],
+        metadata={"customer": "acme"},
+        artifacts=[
+            ArtifactReport(
+                id="artifact-001",
+                name="invoice",
+                path="/tmp/invoice.pdf",
+                kind="pdf",
+                metadata={"invoice_id": 42},
+                created_at=datetime(2026, 4, 21, 11, 0, 0, tzinfo=timezone.utc),
+            )
+        ],
         transaction_record={
             "transaction_format_version": 1,
             "id": "tx-001",
             "reference": reference,
             "status": str(status),
+            "metadata": {"customer": "acme"},
+            "artifacts": [
+                {
+                    "id": "artifact-001",
+                    "name": "invoice",
+                    "path": "/tmp/invoice.pdf",
+                    "kind": "pdf",
+                    "metadata": {"invoice_id": 42},
+                    "created_at": "2026-04-21T11:00:00+00:00",
+                }
+            ],
         },
         generated_at=datetime(2026, 4, 21, 12, 0, 0, tzinfo=timezone.utc),
     )
@@ -102,6 +124,7 @@ class TestEmailNotifierConfig:
         assert n.port == 587
         assert n.from_addr == "rpacore@example.com"
         assert n.to_addrs == ["admin@example.com"]
+        assert n.attach_screenshots is True
 
     def test_to_addrs_as_comma_string(self):
         cfg = {"notification": {"email": {
@@ -202,6 +225,23 @@ class TestEmailNotifierConfig:
         cfg["notification"]["email"]["timeout"] = -5
         with pytest.raises(ValueError, match="timeout"):
             EmailNotifier(cfg, _creds())
+
+    def test_attach_screenshots_can_be_disabled(self):
+        cfg = _email_config()
+        cfg["notification"]["email"]["attach_screenshots"] = False
+        n = EmailNotifier(cfg, _creds())
+        assert n.attach_screenshots is False
+
+    def test_attach_screenshots_bad_type_rejected(self):
+        cfg = _email_config()
+        cfg["notification"]["email"]["attach_screenshots"] = "yes"
+        with pytest.raises(TypeError) as exc_info:
+            EmailNotifier(cfg, _creds())
+
+        assert str(exc_info.value) == (
+            "notification.email.attach_screenshots expected bool; "
+            "got str value='yes'"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +367,30 @@ class TestEmailNotifierSend:
             notifier.send(report)  # must not raise
         mock_smtp.sendmail.assert_called_once()
 
+    def test_screenshot_attachment_can_be_disabled(self, tmp_path):
+        img = tmp_path / "shot.png"
+        img.write_bytes(b"PNG")
+
+        skill_report = SkillReport(
+            name="s", execution_order=1, status=Status.FAILED, icon="✗",
+            exceptions=[BusinessException("err", screenshot_path=str(img))],
+        )
+        report = TransactionReport(
+            transaction_id="tx", reference="r", status=Status.FAILED,
+            retry_count=0, skills=[skill_report],
+            generated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+        )
+        cfg = _email_config()
+        cfg["notification"]["email"]["attach_screenshots"] = False
+        notifier = EmailNotifier(cfg, _creds())
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+            notifier.send(report)
+        _, _, raw_msg = mock_smtp.sendmail.call_args.args
+        assert "shot.png" not in raw_msg
+
 
 # ---------------------------------------------------------------------------
 # TestWebhookNotifierConfig
@@ -349,6 +413,29 @@ class TestWebhookNotifierConfig:
     def test_bad_url_type_raises(self):
         with pytest.raises(TypeError, match="url"):
             WebhookNotifier({"notification": {"webhook": {"url": 42}}})
+
+    def test_non_http_url_rejected(self):
+        with pytest.raises(ValueError) as exc_info:
+            WebhookNotifier(_webhook_config("file:///tmp/hook"))
+
+        assert str(exc_info.value) == (
+            "notification.webhook.url expected http or https URL; "
+            "got str value='file:///tmp/hook'"
+        )
+
+    def test_url_without_host_rejected(self):
+        with pytest.raises(ValueError, match="http or https URL"):
+            WebhookNotifier(_webhook_config("https:///hook"))
+
+    def test_url_with_embedded_credentials_rejected(self):
+        with pytest.raises(ValueError) as exc_info:
+            WebhookNotifier(_webhook_config("https://user:pass@hooks.example.com/path"))
+
+        assert str(exc_info.value) == (
+            "notification.webhook.url expected URL without embedded credentials; "
+            "got str value='https://<credentials>@hooks.example.com/path'"
+        )
+        assert "user:pass" not in str(exc_info.value)
 
     def test_bad_notification_section_type(self):
         with pytest.raises(TypeError, match="notification"):
@@ -459,6 +546,8 @@ class TestWebhookNotifierSend:
         body = self._send()
         payload = json.loads(body)
         assert "transaction" not in payload
+        assert payload["metadata"] == {"customer": "acme"}
+        assert payload["artifacts"][0]["metadata"] == {"invoice_id": 42}
 
     def test_json_contains_canonical_transaction_record_when_enabled(self):
         body = self._send(include_transaction=True)
@@ -466,6 +555,8 @@ class TestWebhookNotifierSend:
         assert payload["transaction"]["transaction_format_version"] == 1
         assert payload["transaction"]["id"] == "tx-001"
         assert payload["transaction"]["reference"] == "ref-test"
+        assert payload["transaction"]["metadata"] == {"customer": "acme"}
+        assert payload["transaction"]["artifacts"][0]["metadata"] == {"invoice_id": 42}
 
     def test_empty_transaction_record_is_omitted_when_enabled(self):
         report = _make_report()
@@ -549,7 +640,26 @@ class TestDispatch:
         good.send.assert_called_once_with(report)
 
     def test_empty_notifiers_is_noop(self):
-        dispatch([], _make_report())  # must not raise
+        assert dispatch([], _make_report()) is None
+
+    def test_notifier_exception_calls_failure_callback(self):
+        bad = MagicMock(spec=Notifier)
+        bad.send.side_effect = RuntimeError("boom")
+        failed: list[str] = []
+
+        result = dispatch([bad], _make_report(), on_failure=failed.append)
+
+        assert result is None
+        assert failed == ["MagicMock"]
+
+    def test_failure_callback_exception_swallowed(self):
+        bad = MagicMock(spec=Notifier)
+        bad.send.side_effect = RuntimeError("boom")
+
+        def callback(_notifier: str) -> None:
+            raise RuntimeError("callback failed")
+
+        dispatch([bad], _make_report(), on_failure=callback)
 
     def test_exception_logged(self):
         import logging

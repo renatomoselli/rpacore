@@ -500,6 +500,32 @@ class TestAfterItem:
 
         assert events == ["notify", "after_item", "complete"]
 
+    def test_notifier_failure_counted_without_changing_queue_outcome(self) -> None:
+        class FailingNotifier:
+            def send(self, report) -> None:
+                raise RuntimeError("notify failed")
+
+        queue = _FakeQueue([_item("notify-fail")])
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_SuccessSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            notifiers=[FailingNotifier()],
+        )
+
+        assert summary.completed == 1
+        assert summary.failed == 0
+        assert summary.notification_errors == 1
+        assert queue.completed == ["notify-fail"]
+        assert queue.failed == []
+
     def test_after_item_runs_after_failure_notification_before_fail_transition(self) -> None:
         events: list[str] = []
 
