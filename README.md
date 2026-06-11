@@ -333,7 +333,9 @@ automation needs a hard deadline with termination, run it behind an external
 worker-process or orchestrator boundary and record the outcome back into RPA
 Core. RPA Core v0.1.0 intentionally rejects Pebble or similar process-timeout
 dependencies because process termination cannot make arbitrary external side
-effects reversible.
+effects reversible. See [Runtime Dependency Decisions](docs/runtime-dependencies.md)
+for the v0.1.0 decisions on process-timeout libraries, Pydantic, Tenacity, and
+AnyIO.
 
 ## Optional Dependencies
 

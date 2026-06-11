@@ -12,6 +12,7 @@ from typing import Iterable, Protocol, runtime_checkable
 
 from rpacore._json_state import validate_json_object
 from rpacore._validation import type_error, value_error
+from rpacore.config_validation import optional_config
 
 
 class QueueStatus(StrEnum):
@@ -216,16 +217,25 @@ class SqliteQueue:
     def __init__(self, config: dict[str, object] | None = None) -> None:
         cfg: dict[str, object] = config or {}
 
-        db_path = cfg.get("db_path", _DEFAULT_DB_PATH)
-        lease_timeout = cfg.get("lease_timeout", _DEFAULT_LEASE_TIMEOUT)
-        max_retries = cfg.get("max_retries", _DEFAULT_MAX_RETRIES)
-
-        if not isinstance(db_path, str):
-            raise type_error("queue.db_path", "str", db_path)
-        if isinstance(lease_timeout, bool) or not isinstance(lease_timeout, int):
-            raise type_error("queue.lease_timeout", "int", lease_timeout)
-        if isinstance(max_retries, bool) or not isinstance(max_retries, int):
-            raise type_error("queue.max_retries", "int", max_retries)
+        validation_config = {f"queue.{key}": value for key, value in cfg.items()}
+        db_path = optional_config(
+            validation_config,
+            "queue.db_path",
+            str,
+            _DEFAULT_DB_PATH,
+        )
+        lease_timeout = optional_config(
+            validation_config,
+            "queue.lease_timeout",
+            int,
+            _DEFAULT_LEASE_TIMEOUT,
+        )
+        max_retries = optional_config(
+            validation_config,
+            "queue.max_retries",
+            int,
+            _DEFAULT_MAX_RETRIES,
+        )
         if lease_timeout <= 0:
             raise value_error("queue.lease_timeout", "int > 0", lease_timeout)
         if max_retries < 0:

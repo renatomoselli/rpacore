@@ -26,6 +26,7 @@ AI tools may assist development, but they do not control execution.
 - `tomllib` from the standard library
 - No external runtime dependencies by default
 - Optional extras: `mss` for screenshots, `keyring` for OS credential storage
+- Runtime dependency decisions are recorded in `docs/runtime-dependencies.md`.
 
 ## Project Structure
 
@@ -170,6 +171,7 @@ All exceptions should be logged and persisted.
 - Each commit should pass the full test suite
 - Skill testing guidance lives in `docs/testing.md`; v0.1.0 uses normal pytest
   tests instead of a custom `SkillTestCase` base class.
+- Core validation migration decisions live in `docs/core-validation-audit.md`.
 
 ## Development Strategy
 
