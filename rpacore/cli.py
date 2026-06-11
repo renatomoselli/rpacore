@@ -467,6 +467,12 @@ def _greeting_skill_py() -> str:
                 output_path = Path(str(self.arguments.get("output_path", "greeting.txt")))
                 output_path.write_text(f"Hello, {name}\\n", encoding="utf-8")
                 ctx.state["greeting_path"] = str(output_path)
+                ctx.add_artifact(
+                    "greeting",
+                    str(output_path),
+                    kind="text",
+                    metadata={"name": name},
+                )
         """)
 
 
@@ -476,7 +482,9 @@ def _skill_test_py() -> str:
 
         from pathlib import Path
 
-        from rpacore import ProcessContext, Transaction
+        import pytest
+
+        from rpacore import BusinessException, ProcessContext, Transaction
         from skills.greeting import WriteGreeting
 
 
@@ -493,6 +501,27 @@ def _skill_test_py() -> str:
 
             assert output.read_text(encoding="utf-8") == "Hello, Alice\\n"
             assert transaction.state["greeting_path"] == str(output)
+            assert transaction.artifacts[0].name == "greeting"
+            assert transaction.artifacts[0].path == str(output)
+            assert transaction.artifacts[0].kind == "text"
+            assert transaction.artifacts[0].metadata == {"name": "Alice"}
+
+
+        def test_write_greeting_rejects_missing_name(tmp_path: Path) -> None:
+            output = tmp_path / "greeting.txt"
+            skill = WriteGreeting(
+                name="write_greeting",
+                execution_order=1,
+                arguments={"name": "", "output_path": str(output)},
+            )
+            transaction = Transaction(reference="test", skills=[skill])
+
+            with pytest.raises(BusinessException, match="non-empty string"):
+                skill.execute(ProcessContext(transaction=transaction))
+
+            assert not output.exists()
+            assert transaction.state == {}
+            assert transaction.artifacts == []
         """)
 
 

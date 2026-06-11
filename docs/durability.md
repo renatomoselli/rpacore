@@ -177,6 +177,35 @@ summary but leaves the queue row untouched. If another worker already claimed
 the item, that worker owns the next transition. If no worker owns it, normal
 lease expiry makes the item reclaimable later.
 
+## Extension and Event API Decision
+
+RPA Core v0.1.0 does not provide a generic synchronous `Engine` event bus.
+The extension surface stays explicit:
+
+- persisted transaction history records the durable execution timeline
+- structured logs expose operational events for observers and log pipelines
+- `after_item` observes per-item outcomes after reporting and notification
+- `on_finish` observes the final runner summary exactly once
+- `resource_scope` owns paired setup and cleanup for shared runtime resources
+- reports, notification payloads, and canonical transaction serialization expose
+  completed transaction records without reading artifact contents
+
+These mechanisms cover the demonstrated extension needs without adding an
+in-process handler chain inside `Engine.run()`. A generic event bus would require
+new decisions about handler timing, handler failure disposition, transaction
+mutation rights, ordering between handlers, and checkpoint boundaries. Those
+decisions affect determinism and durability: a handler that mutates transaction
+state before a checkpoint, raises after external side effects, or depends on
+relative ordering with another handler could change retry behavior in ways that
+are hard to audit.
+
+If a future workflow cannot be expressed with durable history, structured logs,
+runner callbacks, resource scopes, reports, notifications, or explicit skill
+code, add a narrow extension point for that workflow rather than a broad event
+bus. The extension point must document when it runs, whether ordinary exceptions
+propagate or are swallowed, whether mutation is allowed, and how it orders
+relative to persistence checkpoints and queue transitions.
+
 ## Timestamps and History
 
 `Transaction.created_at` is set when a new transaction object is constructed.

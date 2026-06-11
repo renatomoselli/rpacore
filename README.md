@@ -108,7 +108,8 @@ rpacore run
 
 `rpacore init <project_name>` creates a normal Python project with
 `pyproject.toml`, `rpacore.toml`, `config.toml`, `main.py`, a `skills/` package,
-a pytest skill test, and `.gitignore`.
+a pytest skill test, and `.gitignore`. Skill tests use normal pytest with
+plain skill instances and `ProcessContext`; see [Testing RPA Core Skills](docs/testing.md).
 
 `rpacore run` discovers `rpacore.toml` from the current directory, resolves the
 declared `module:callable` entrypoint, and invokes it. The CLI does not build

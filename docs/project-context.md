@@ -168,6 +168,8 @@ All exceptions should be logged and persisted.
 - The test layout mirrors `rpacore/` where practical
 - Run `pytest` from the project root
 - Each commit should pass the full test suite
+- Skill testing guidance lives in `docs/testing.md`; v0.1.0 uses normal pytest
+  tests instead of a custom `SkillTestCase` base class.
 
 ## Development Strategy
 
