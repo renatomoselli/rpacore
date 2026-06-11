@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime
 
 from rpacore._json_state import JsonStateError, validate_json_object
@@ -650,3 +651,42 @@ def list_transactions(
         conn.close()
 
     return [load_transaction(tx_id, db_path) for tx_id in transaction_ids]
+
+
+def iter_transactions(
+    db_path: str = "rpacore.db",
+    *,
+    status: Status | None = None,
+    since: datetime | None = None,
+    metadata_filter: dict[str, object] | None = None,
+) -> Iterator[Transaction]:
+    """Yield transactions matching optional filters, newest first."""
+    metadata_json = (
+        _metadata_to_storage(metadata_filter, path="metadata_filter")
+        if metadata_filter is not None
+        else {}
+    )
+    conn = _connect(db_path)
+    try:
+        _ensure_schema(conn)
+        query = "SELECT id FROM transactions WHERE 1=1"
+        params: list[object] = []
+        if status is not None:
+            query += " AND status = ?"
+            params.append(str(status))
+        if since is not None:
+            query += " AND created_at >= ?"
+            params.append(since.isoformat())
+        for key, value_json in sorted(metadata_json.items()):
+            query += (
+                " AND EXISTS ("
+                "SELECT 1 FROM transaction_metadata tm "
+                "WHERE tm.transaction_id = transactions.id "
+                "AND tm.key = ? AND tm.value_json = ?)"
+            )
+            params.extend([key, value_json])
+        query += " ORDER BY created_at DESC, id ASC"
+        for row in conn.execute(query, params):
+            yield load_transaction(row["id"], db_path)
+    finally:
+        conn.close()

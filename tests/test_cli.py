@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 import textwrap
+from datetime import datetime, timezone
 from pathlib import Path
 
 import rpacore.cli as cli_module
@@ -425,6 +426,221 @@ class TestCliTransaction:
         assert detail["skills"][0]["exceptions"][0]["type"] == "business"
         assert detail["history"][0]["event"] == "skill_failed"
         assert detail["artifacts"][0]["path"] == "invoice.pdf"
+
+    def test_transaction_export_json_stdout_is_versioned_and_clean(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+        artifact_path = tmp_path / "invoice.txt"
+        artifact_path.write_text("secret artifact body", encoding="utf-8")
+        older = Transaction(
+            reference="older",
+            status=Status.SUCCESSFUL,
+            created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+            state={"invoice": "001"},
+            metadata={"customer": "acme"},
+            artifacts=[Artifact(name="invoice", path=str(artifact_path), kind="txt")],
+        )
+        newer = Transaction(
+            reference="newer",
+            status=Status.FAILED,
+            created_at=datetime(2026, 6, 10, 13, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(older, db_path=str(db_path))
+        save_transaction(newer, db_path=str(db_path))
+
+        result = run_cli(
+            "transaction",
+            "export",
+            "--db",
+            str(db_path),
+            "--format",
+            "json",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        payload = json.loads(result.stdout)
+        assert set(payload) == {
+            "export_format_version",
+            "exported_at",
+            "framework_version",
+            "transactions",
+        }
+        assert payload["export_format_version"] == 1
+        assert payload["framework_version"] == cli_module.__version__
+        assert payload["exported_at"].endswith("+00:00")
+        assert [tx["reference"] for tx in payload["transactions"]] == ["newer", "older"]
+        assert payload["transactions"][1]["transaction_format_version"] == 1
+        assert payload["transactions"][1]["state"] == {"invoice": "001"}
+        assert "secret artifact body" not in result.stdout
+
+    def test_transaction_export_ndjson_stdout_is_parseable_and_clean(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+        first = Transaction(
+            reference="first",
+            status=Status.SUCCESSFUL,
+            created_at=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        )
+        second = Transaction(
+            reference="second",
+            status=Status.SUCCESSFUL,
+            created_at=datetime(2026, 6, 10, 13, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(first, db_path=str(db_path))
+        save_transaction(second, db_path=str(db_path))
+
+        result = run_cli(
+            "transaction",
+            "export",
+            "--db",
+            str(db_path),
+            "--format",
+            "ndjson",
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        lines = result.stdout.splitlines()
+        assert len(lines) == 2
+        records = [json.loads(line) for line in lines]
+        assert set(records[0]) == {
+            "artifacts",
+            "created_at",
+            "export_format_version",
+            "exported_at",
+            "finished_at",
+            "framework_version",
+            "history",
+            "id",
+            "metadata",
+            "reference",
+            "retry_count",
+            "skills",
+            "started_at",
+            "state",
+            "status",
+            "transaction_format_version",
+        }
+        assert [record["reference"] for record in records] == ["second", "first"]
+        assert {record["export_format_version"] for record in records} == {1}
+        assert {record["transaction_format_version"] for record in records} == {1}
+        assert {record["framework_version"] for record in records} == {
+            cli_module.__version__,
+        }
+        assert all(record["exported_at"].endswith("+00:00") for record in records)
+
+    def test_transaction_export_json_uses_manifest_storage_path_by_default(self, tmp_path: Path) -> None:
+        project = tmp_path / "project"
+        project.mkdir()
+        db_path = project / "data" / "transactions.db"
+        db_path.parent.mkdir()
+        (project / "rpacore.toml").write_text(
+            "[project]\nentrypoint = \"main:main\"\n\n"
+            "[storage]\ntransaction_db_path = \"data/transactions.db\"\n",
+            encoding="utf-8",
+        )
+        tx = Transaction(reference="manifest-db", status=Status.SUCCESSFUL)
+        save_transaction(tx, db_path=str(db_path))
+
+        result = run_cli("transaction", "export", "--format", "json", cwd=project)
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        payload = json.loads(result.stdout)
+        assert payload["transactions"][0]["id"] == tx.id
+
+    def test_transaction_export_uses_streaming_iterator(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        monkeypatch.setattr(
+            cli_module,
+            "list_transactions",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no list")),
+        )
+        monkeypatch.setattr(cli_module, "iter_transactions", lambda *_args: iter([]))
+
+        result = cli_module.main(
+            [
+                "transaction",
+                "export",
+                "--db",
+                str(tmp_path / "transactions.db"),
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert result == 0
+        assert captured.err == ""
+        assert json.loads(captured.out)["transactions"] == []
+
+    def test_transaction_export_ndjson_serialization_error_writes_no_stdout(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        good = Transaction(reference="good")
+        bad = Transaction(reference="bad", state={"runtime": object()})
+        monkeypatch.setattr(
+            cli_module,
+            "iter_transactions",
+            lambda *_args: iter([good, bad]),
+        )
+
+        result = cli_module.main(
+            [
+                "transaction",
+                "export",
+                "--db",
+                str(tmp_path / "transactions.db"),
+                "--format",
+                "ndjson",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert result == 1
+        assert captured.out == ""
+        assert "transaction.state['runtime'] expected JSON value" in captured.err
+
+    def test_transaction_export_ndjson_rejects_export_key_collision(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        monkeypatch.setattr(
+            cli_module,
+            "iter_transactions",
+            lambda *_args: iter([Transaction(reference="collision")]),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "serialize_transaction",
+            lambda _transaction: {"export_format_version": 999},
+        )
+
+        result = cli_module.main(
+            [
+                "transaction",
+                "export",
+                "--db",
+                str(tmp_path / "transactions.db"),
+                "--format",
+                "ndjson",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert result == 1
+        assert captured.out == ""
+        assert "transaction export record key collision: export_format_version" in captured.err
 
     def test_transaction_list_json_serialization_type_error_exits_one(
         self,

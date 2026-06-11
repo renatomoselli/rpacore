@@ -6,16 +6,17 @@ import argparse
 import json
 import shutil
 import sys
+import tempfile
 import threading
 import textwrap
-from collections.abc import Callable, Sequence
-from datetime import datetime
+from collections.abc import Callable, Iterable, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rpacore import __version__
 from rpacore.exceptions import BusinessException
 from rpacore.manifest import load_project_manifest, resolve_project_entrypoint
-from rpacore.persistence import list_transactions, load_transaction
+from rpacore.persistence import iter_transactions, list_transactions, load_transaction
 from rpacore.serialization import serialize_transaction
 from rpacore.transaction import Transaction
 
@@ -23,6 +24,10 @@ from rpacore.transaction import Transaction
 USAGE_ERROR = 2
 EXECUTION_ERROR = 1
 SUCCESS = 0
+EXPORT_FORMAT_VERSION = 1
+_NDJSON_EXPORT_KEYS = frozenset(
+    {"export_format_version", "framework_version", "exported_at"}
+)
 _ENTRYPOINT_PATH_LOCK = threading.RLock()
 
 
@@ -64,6 +69,18 @@ def build_parser() -> argparse.ArgumentParser:
     show_parser.add_argument("transaction_id", help="Transaction id to inspect.")
     show_parser.add_argument("--db", dest="db_path", help="Transaction database path.")
     show_parser.add_argument("--json", action="store_true", help="Write JSON to stdout.")
+
+    export_parser = transaction_subparsers.add_parser(
+        "export",
+        help="Export persisted transactions as JSON or NDJSON.",
+    )
+    export_parser.add_argument("--db", dest="db_path", help="Transaction database path.")
+    export_parser.add_argument(
+        "--format",
+        choices=("json", "ndjson"),
+        required=True,
+        help="Export format.",
+    )
 
     subparsers.add_parser("version", help="Print the installed RPA Core version.")
     return parser
@@ -189,6 +206,10 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
             else:
                 _write_transaction_detail(transaction)
             return SUCCESS
+        if args.transaction_command == "export":
+            transactions = iter_transactions(db_path)
+            _write_transaction_export(transactions, export_format=args.format)
+            return SUCCESS
     except KeyError as exc:
         _print_error(str(exc.args[0] if exc.args else exc))
         return EXECUTION_ERROR
@@ -254,12 +275,79 @@ def _write_json(data: dict[str, object]) -> None:
     print(json.dumps(data, sort_keys=True, separators=(",", ":")))
 
 
+def _write_transaction_export(
+    transactions: Iterable[Transaction],
+    *,
+    export_format: str,
+) -> None:
+    exported_at = _utc_now().isoformat()
+    with tempfile.TemporaryFile("w+", encoding="utf-8", newline="\n") as output:
+        if export_format == "json":
+            output.write("{")
+            output.write(
+                _json_field("export_format_version", EXPORT_FORMAT_VERSION)
+            )
+            output.write(",")
+            output.write(_json_field("exported_at", exported_at))
+            output.write(",")
+            output.write(_json_field("framework_version", __version__))
+            output.write(',"transactions":[')
+            first = True
+            for transaction in transactions:
+                if not first:
+                    output.write(",")
+                first = False
+                output.write(
+                    json.dumps(
+                        serialize_transaction(transaction),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+            output.write("]}")
+        else:
+            for transaction in transactions:
+                record = serialize_transaction(transaction)
+                _raise_for_ndjson_export_key_collision(record)
+                export_record = {
+                    **record,
+                    "export_format_version": EXPORT_FORMAT_VERSION,
+                    "framework_version": __version__,
+                    "exported_at": exported_at,
+                }
+                output.write(
+                    json.dumps(export_record, sort_keys=True, separators=(",", ":"))
+                )
+                output.write("\n")
+        output.seek(0)
+        shutil.copyfileobj(output, sys.stdout)
+
+
+def _raise_for_ndjson_export_key_collision(record: dict[str, object]) -> None:
+    collisions = sorted(_NDJSON_EXPORT_KEYS.intersection(record))
+    if collisions:
+        keys = ", ".join(collisions)
+        raise RuntimeError(f"transaction export record key collision: {keys}")
+
+
+def _json_field(key: str, value: object) -> str:
+    return (
+        json.dumps(key, sort_keys=True, separators=(",", ":"))
+        + ":"
+        + json.dumps(value, sort_keys=True, separators=(",", ":"))
+    )
+
+
 def _exception_kind(exc: BaseException) -> str:
     return "business" if isinstance(exc, BusinessException) else "system"
 
 
 def _format_optional_datetime(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _positive_int(value: str) -> int:

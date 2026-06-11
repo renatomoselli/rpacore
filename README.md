@@ -122,6 +122,8 @@ rpacore transaction list
 rpacore transaction list --json
 rpacore transaction show <transaction_id>
 rpacore transaction show <transaction_id> --json
+rpacore transaction export --format json
+rpacore transaction export --format ndjson
 ```
 
 Transaction inspection uses `[storage].transaction_db_path` from `rpacore.toml`
@@ -133,6 +135,11 @@ different cap. Human output is intended for operators; `--json` writes parseable
 JSON to stdout with diagnostics only on stderr. Transaction inspection JSON uses
 `schema_version = 1` and embeds the canonical transaction record with
 `transaction_format_version = 1`.
+
+Transaction export writes portable machine-readable records for all persisted
+transactions. JSON export uses an envelope with `export_format_version = 1`,
+`framework_version`, `exported_at`, and `transactions`. NDJSON export writes one
+record per line with `export_format_version = 1` on each record.
 
 Machine-readable transaction records include user-supplied state, metadata,
 skill arguments, exception messages, and artifact metadata. These fields can
