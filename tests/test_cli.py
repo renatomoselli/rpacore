@@ -260,6 +260,12 @@ class TestCliInit:
 
 
 class TestCliTransaction:
+    def test_transaction_resume_is_not_a_cli_command(self, tmp_path: Path) -> None:
+        result = run_cli("transaction", "resume", cwd=tmp_path)
+
+        assert result.returncode == 2
+        assert "invalid choice" in result.stderr
+
     def test_transaction_list_empty_database_human_output(self, tmp_path: Path) -> None:
         db_path = tmp_path / "transactions.db"
 

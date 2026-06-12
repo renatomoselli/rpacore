@@ -172,6 +172,7 @@ All exceptions should be logged and persisted.
 - Skill testing guidance lives in `docs/testing.md`; v0.1.0 uses normal pytest
   tests instead of a custom `SkillTestCase` base class.
 - Core validation migration decisions live in `docs/core-validation-audit.md`.
+- Public API and rejected-feature decisions live in `docs/public-api-audit.md`.
 
 ## Development Strategy
 

@@ -10,6 +10,13 @@ from rpacore.config import load_config
 
 
 class TestLoadConfig:
+    def test_repository_sample_config_uses_lease_timeout(self) -> None:
+        sample = Path(__file__).resolve().parents[1] / "config.toml"
+        text = sample.read_text(encoding="utf-8")
+
+        assert "lease_timeout = 30" in text
+        assert "claim_timeout" not in text
+
     def test_returns_defaults_when_file_missing(self, tmp_path: Path) -> None:
         config = load_config(tmp_path / "nonexistent.toml")
 

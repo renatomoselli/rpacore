@@ -9,7 +9,7 @@ credential_provider = "env"
 
 [queue]
 db_path = "queue.db"
-claim_timeout = 30
+lease_timeout = 30
 max_retries = 3
 
 # [notification.email]
