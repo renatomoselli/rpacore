@@ -92,8 +92,13 @@ Engine(
     max_retries=config["max_retries"],
     retry_delay=config["retry_delay"],
     retry_backoff=config["retry_backoff"],
-).run(ctx)
-save_transaction(tx, db_path=config["transaction_db_path"])
+).run(
+    ctx,
+    checkpoint=lambda transaction: save_transaction(
+        transaction,
+        db_path=config["transaction_db_path"],
+    ),
+)
 ```
 
 ## CLI
@@ -229,8 +234,7 @@ main.py
   create Transaction
   attach ordered Skills
   create ProcessContext
-  Engine.run(ctx)
-  save_transaction()
+  Engine.run(ctx, checkpoint=save_transaction)
   generate report / dispatch notifications
 ```
 

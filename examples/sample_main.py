@@ -49,7 +49,15 @@ def main(
         ConfirmOutput(name="confirm_output", execution_order=3, arguments=arguments),
     ]
 
-    # 4. Run the engine.
+    # 4. Resolve persistence before running so strict checkpoints can save each transition.
+    #    transaction_db_path defaults to config value; pass an override for testing.
+    _db_path = (
+        transaction_db_path
+        if transaction_db_path is not None
+        else str(config["transaction_db_path"])
+    )
+
+    # 5. Run the engine with strict checkpoint persistence.
     engine = Engine(
         max_retries=int(config["max_retries"]),
         retry_delay=float(config["retry_delay"]),
@@ -58,16 +66,10 @@ def main(
     )
     credentials = build_credential_provider(str(config["credential_provider"]))
     ctx = ProcessContext(transaction=transaction, config=config, credentials=credentials)
-    engine.run(ctx)
-
-    # 5. Persist the result so failed runs can be inspected (and resumed).
-    #    transaction_db_path defaults to config value; pass an override for testing.
-    _db_path = (
-        transaction_db_path
-        if transaction_db_path is not None
-        else str(config["transaction_db_path"])
+    engine.run(
+        ctx,
+        checkpoint=lambda tx: save_transaction(tx, db_path=_db_path),
     )
-    save_transaction(transaction, db_path=_db_path)
 
     # 6. Dispatch notifications (email / webhook) if configured.
     notifiers = build_notifiers(config, credentials)

@@ -222,8 +222,13 @@ def main() -> None:
         max_retries=int(config["max_retries"]),
         retry_delay=float(config["retry_delay"]),
         retry_backoff=float(config["retry_backoff"]),
-    ).run(ctx)
-    save_transaction(tx, db_path=str(config["transaction_db_path"]))
+    ).run(
+        ctx,
+        checkpoint=lambda transaction: save_transaction(
+            transaction,
+            db_path=str(config["transaction_db_path"]),
+        ),
+    )
 
     print(f"Transaction {tx.id}: {tx.status}")
 

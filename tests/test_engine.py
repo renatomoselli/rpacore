@@ -564,6 +564,118 @@ class TestEngineCheckpointing:
         assert loaded.state == {"first": "done"}
         assert HistoryEvent.SKILL_SUCCEEDED in [entry.event for entry in loaded.history]
 
+    def test_subprocess_resume_after_crash_does_not_repeat_successful_skill(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        log_path = str(tmp_path / "runs.txt")
+        first_script = textwrap.dedent(
+            """
+            import os
+            import sys
+            from pathlib import Path
+
+            from rpacore.context import ProcessContext
+            from rpacore.engine import Engine
+            from rpacore.persistence import save_transaction
+            from rpacore.skill import Skill
+            from rpacore.transaction import Transaction
+
+            class FirstSkill(Skill):
+                def execute(self, ctx):
+                    with Path(sys.argv[2]).open("a", encoding="utf-8") as log:
+                        log.write("first\\n")
+                    ctx.state["first"] = "done"
+
+            class CrashSkill(Skill):
+                def execute(self, ctx):
+                    os._exit(7)
+
+            tx = Transaction(
+                reference="crash",
+                id="crash-tx",
+                skills=[FirstSkill("first", 1), CrashSkill("crash", 2)],
+            )
+            Engine().run(
+                ProcessContext(transaction=tx),
+                checkpoint=lambda transaction: save_transaction(transaction, sys.argv[1]),
+            )
+            """
+        )
+        resume_script = textwrap.dedent(
+            """
+            import sys
+            from pathlib import Path
+
+            from rpacore.context import ProcessContext
+            from rpacore.engine import Engine
+            from rpacore.persistence import save_transaction
+            from rpacore.recovery import resume_transaction
+            from rpacore.skill import Skill
+
+            class FirstSkill(Skill):
+                def execute(self, ctx):
+                    with Path(sys.argv[2]).open("a", encoding="utf-8") as log:
+                        log.write("first\\n")
+                    ctx.state["first"] = "rerun"
+
+            class CompleteSkill(Skill):
+                def execute(self, ctx):
+                    with Path(sys.argv[2]).open("a", encoding="utf-8") as log:
+                        log.write("second\\n")
+                    ctx.state["second"] = "done"
+
+            tx = resume_transaction(
+                "crash-tx",
+                [FirstSkill("first", 1), CompleteSkill("crash", 2)],
+                db_path=sys.argv[1],
+            )
+            Engine().run(
+                ProcessContext(transaction=tx),
+                checkpoint=lambda transaction: save_transaction(transaction, sys.argv[1]),
+            )
+            """
+        )
+
+        first = subprocess.run(
+            [sys.executable, "-c", first_script, db_path, log_path],
+            check=False,
+        )
+        assert first.returncode == 7
+        assert open(log_path, encoding="utf-8").read().splitlines() == ["first"]
+
+        resumed = subprocess.run(
+            [sys.executable, "-c", resume_script, db_path, log_path],
+            check=False,
+        )
+
+        assert resumed.returncode == 0
+        assert open(log_path, encoding="utf-8").read().splitlines() == [
+            "first",
+            "second",
+        ]
+        loaded = load_transaction("crash-tx", db_path)
+        assert loaded.status is Status.SUCCESSFUL
+        assert loaded.state == {"first": "done", "second": "done"}
+        first_skill_succeeded = [
+            entry
+            for entry in loaded.history
+            if (
+                entry.event is HistoryEvent.SKILL_SUCCEEDED
+                and entry.skill_name == "first"
+                and entry.skill_execution_order == 1
+            )
+        ]
+        first_skill_started = [
+            entry
+            for entry in loaded.history
+            if (
+                entry.event is HistoryEvent.SKILL_STARTED
+                and entry.skill_name == "first"
+                and entry.skill_execution_order == 1
+            )
+        ]
+        assert len(first_skill_succeeded) == 1
+        assert len(first_skill_started) == 1
+
 
 class TestEngineDirectSkillExecution:
     def test_timeout_error_raised_by_skill_uses_normal_classification(self) -> None:

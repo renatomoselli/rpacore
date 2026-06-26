@@ -1,5 +1,5 @@
 # Private - not part of the framework
-book/
+.internal/
 Classes/
 .rpiv/
 

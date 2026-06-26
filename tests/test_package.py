@@ -93,6 +93,7 @@ class TestPackageVersion:
 
         assert not actual - expected, f"Unexpected public exports: {sorted(actual - expected)}"
         assert not expected - actual, f"Missing public exports: {sorted(expected - actual)}"
+        assert rpacore.__all__ == sorted(rpacore.__all__)
 
     def test_rejected_features_are_not_public_exports(self) -> None:
         rejected = {

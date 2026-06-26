@@ -18,6 +18,7 @@ from rpacore import (
     Skill,
     Status,
     Transaction,
+    list_transactions,
     save_transaction,
 )
 
@@ -212,6 +213,15 @@ class TestCliInit:
         assert run_result.stderr == ""
         assert (project / "greeting.txt").read_text(encoding="utf-8") == "Hello, Alice\n"
         assert (project / "rpacore.db").exists()
+        assert "checkpoint=lambda tx: save_transaction(tx, db_path=db_path)" in (
+            project / "main.py"
+        ).read_text(encoding="utf-8")
+        transactions = list_transactions(str(project / "rpacore.db"))
+        assert len(transactions) == 1
+        assert transactions[0].status is Status.SUCCESSFUL
+        assert HistoryEvent.SKILL_SUCCEEDED in [
+            entry.event for entry in transactions[0].history
+        ]
 
     def test_generated_project_skill_test_passes(self, tmp_path: Path) -> None:
         init_result = run_cli("init", "demo_project", cwd=tmp_path)

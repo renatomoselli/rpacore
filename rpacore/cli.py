@@ -439,8 +439,11 @@ def _main_py() -> str:
                 retry_backoff=float(config["retry_backoff"]),
                 screenshot_dir=str(config["screenshot_dir"]),
             )
-            engine.run(ctx)
-            save_transaction(transaction, db_path=str(config["transaction_db_path"]))
+            db_path = str(config["transaction_db_path"])
+            engine.run(
+                ctx,
+                checkpoint=lambda tx: save_transaction(tx, db_path=db_path),
+            )
             return 0 if transaction.status is Status.SUCCESSFUL else 1
 
 
