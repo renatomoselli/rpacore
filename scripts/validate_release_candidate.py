@@ -23,6 +23,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
+# These scripts must run directly from scripts/ before rpacore is installed.
+if str(REPO_ROOT_FOR_IMPORTS) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT_FOR_IMPORTS))
+
+from rpacore._validation import (
+    PRERELEASE_WHEEL_PATTERN,
+    ValidationError,
+    assert_relative_path,
+    validate_contained_path as _validate_contained_path,
+)
+
 
 TRUNCATE_OUTPUT_CHARS = 12_000
 VALIDATION_FINDINGS = (
@@ -56,7 +68,6 @@ COPY_IGNORE_PATTERNS = ("*.egg-info", "*.pyc", "*.pyo")
 PYTEST_COUNT_PATTERN = re.compile(
     r"\b(?P<count>\d+)\s+(?P<status>passed|failed|skipped|xfailed|xpassed|errors?)\b"
 )
-PRERELEASE_WHEEL_PATTERN = re.compile(r"(?:a|b|rc)\d", re.IGNORECASE)
 
 
 @dataclass
@@ -85,10 +96,6 @@ class RepoEvidence:
     status: list[str]
 
 
-class ValidationError(RuntimeError):
-    """Release-candidate validation failed before a command could continue."""
-
-
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -110,14 +117,30 @@ def _run(
 ) -> CommandEvidence:
     _validate_contained_path(cwd, allowed_roots=allowed_roots, label=f"{name} cwd")
     started = time.perf_counter()
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+    except subprocess.CalledProcessError as exc:
+        evidence = CommandEvidence(
+            name=name,
+            command=command,
+            cwd=str(cwd),
+            exit_code=exc.returncode,
+            duration_seconds=round(time.perf_counter() - started, 3),
+            stdout=_truncate(exc.stdout or ""),
+            stderr=_truncate(exc.stderr or ""),
+        )
+        raise ValidationError(
+            f"{name} failed with exit code {exc.returncode}\n"
+            f"stdout:\n{evidence.stdout}\n"
+            f"stderr:\n{evidence.stderr}"
+        ) from exc
     evidence = CommandEvidence(
         name=name,
         command=command,
@@ -147,31 +170,8 @@ def _git_output(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _validate_contained_path(
-    path: Path,
-    *,
-    allowed_roots: tuple[Path, ...],
-    label: str,
-) -> Path:
-    resolved = path.resolve()
-    for root in allowed_roots:
-        resolved_root = root.resolve()
-        if resolved == resolved_root or resolved.is_relative_to(resolved_root):
-            return resolved
-    roots = ", ".join(str(root.resolve()) for root in allowed_roots)
-    raise ValidationError(f"{label} resolves outside allowed roots: {resolved} (allowed: {roots})")
-
-
 def _validate_relative_test_path(test_path: str, *, examples_root: Path) -> str:
-    candidate = Path(test_path)
-    if candidate.is_absolute():
-        raise ValidationError(f"example pytest path must be relative: {test_path}")
-    _validate_contained_path(
-        examples_root / candidate,
-        allowed_roots=(examples_root,),
-        label=f"example pytest path {test_path!r}",
-    )
-    return test_path
+    return assert_relative_path(test_path, root=examples_root, label="example pytest path")
 
 
 def _require_git_repo(path: Path, *, name: str) -> None:
@@ -231,14 +231,23 @@ def _remove_tree(path: Path) -> None:
     if not path.exists():
         return
 
-    def _onerror(function, failed_path, _exc_info) -> None:
+    def _onerror(function, failed_path, exc_info) -> None:
+        original_error = exc_info[1]
         try:
             os.chmod(failed_path, 0o700)
             function(failed_path)
-        except OSError:
-            raise
+        except OSError as exc:
+            logging.warning(
+                "Failed to clean %s after %s: %s",
+                failed_path,
+                type(original_error).__name__,
+                exc,
+                exc_info=True,
+            )
 
     shutil.rmtree(path, onerror=_onerror)
+    if path.exists():
+        raise OSError(f"validation cleanup left directory behind: {path}")
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -438,6 +447,7 @@ def validate_release_candidate(
             _remove_tree(generated_dir)
     if examples_repo is not None and not examples_pytest:
         raise ValidationError("--examples-pytest is required when --examples-repo is provided")
+    cleanup_failures: list[Path] = []
     try:
         source_dir.mkdir(parents=True)
         wheelhouse.mkdir(parents=True)
@@ -580,12 +590,22 @@ def validate_release_candidate(
         }
         _write_manifest(manifest, output_dir)
         return manifest
-    except Exception:
+    except BaseException:
+        # Keep generated-directory cleanup deterministic, then re-raise interrupts unchanged.
         for generated_dir in generated_dirs:
             try:
                 _remove_tree(generated_dir)
             except OSError:
                 logging.warning("Failed to clean generated directory %s", generated_dir, exc_info=True)
+                cleanup_failures.append(generated_dir)
+        for generated_dir in generated_dirs:
+            if generated_dir.exists() and generated_dir not in cleanup_failures:
+                cleanup_failures.append(generated_dir)
+        if cleanup_failures:
+            logging.warning(
+                "Validation cleanup left generated directories behind: %s",
+                ", ".join(str(path) for path in cleanup_failures),
+            )
         raise
 
 

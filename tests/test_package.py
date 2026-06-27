@@ -33,7 +33,9 @@ class TestPackageVersion:
 
         pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
-        assert pyproject["project"]["license"] == {"text": "Apache-2.0"}
+        license_value = pyproject["project"]["license"]
+        license_text = license_value if isinstance(license_value, str) else license_value["text"]
+        assert license_text == "Apache-2.0"
         assert "pytest>=8.1.1" in pyproject["project"]["optional-dependencies"]["dev"]
         assert "twine>=5.1.0" in pyproject["project"]["optional-dependencies"]["dev"]
         assert "wheel>=0.46.2" in pyproject["project"]["optional-dependencies"]["dev"]

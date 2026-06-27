@@ -23,6 +23,7 @@ class TestTransactionFreshState:
         tx = Transaction(reference="INV-001")
         parsed = uuid.UUID(tx.id)
         assert str(parsed) == tx.id
+        assert tx.id == tx.id.lower()
 
     def test_id_is_unique_per_instance(self) -> None:
         a = Transaction(reference="A")

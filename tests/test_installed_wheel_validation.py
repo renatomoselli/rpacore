@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
+
+from rpacore._validation import ValidationError as SharedValidationError
+from rpacore._validation import ValidationFailure
 
 
 def _load_script():
@@ -27,6 +31,18 @@ class TestInstalledWheelValidationScript:
         new_wheel.write_text("", encoding="utf-8")
 
         assert module._latest_wheel(tmp_path) == new_wheel
+
+    def test_latest_wheel_prefers_stable_when_mtimes_match(self, tmp_path: Path) -> None:
+        module = _load_script()
+        stable = tmp_path / "rpacore-1.0.0-py3-none-any.whl"
+        prerelease = tmp_path / "rpacore-1.0.0rc1-py3-none-any.whl"
+        stable.write_text("", encoding="utf-8")
+        prerelease.write_text("", encoding="utf-8")
+        mtime = 1_800_000_000
+        os.utime(stable, (mtime, mtime))
+        os.utime(prerelease, (mtime, mtime))
+
+        assert module._latest_wheel(tmp_path) == stable
 
     def test_parser_defaults_examples_repo_to_sibling(self) -> None:
         module = _load_script()
@@ -63,22 +79,66 @@ class TestInstalledWheelValidationScript:
 
         try:
             module._run(["python", "--version"], cwd=outside, allowed_roots=(root,))
-        except ValueError as exc:
+        except module.ValidationError as exc:
             assert "outside allowed roots" in str(exc)
         else:
-            raise AssertionError("Expected ValueError")
+            raise AssertionError("Expected ValidationError")
 
-    def test_run_propagates_subprocess_errors(self, tmp_path: Path) -> None:
+    def test_validation_error_uses_shared_base(self) -> None:
+        module = _load_script()
+
+        assert issubclass(module.ValidationError, ValidationFailure)
+        assert module.ValidationError is SharedValidationError
+
+    def test_run_converts_subprocess_errors(self, tmp_path: Path) -> None:
         module = _load_script()
         error = subprocess.CalledProcessError(1, ["bad"])
 
         with patch.object(module.subprocess, "run", side_effect=error):
             try:
-                module._run(["bad"], cwd=tmp_path)
-            except subprocess.CalledProcessError as exc:
-                assert exc is error
+                module._run(["bad"], cwd=tmp_path, allowed_roots=(tmp_path,))
+            except module.ValidationError as exc:
+                assert "command failed with exit code 1" in str(exc)
+                assert exc.__cause__ is error
             else:
-                raise AssertionError("Expected CalledProcessError")
+                raise AssertionError("Expected ValidationError")
+
+    def test_remove_tree_raises_when_directory_remains(self, tmp_path: Path) -> None:
+        module = _load_script()
+        path = tmp_path / "locked"
+        path.mkdir()
+
+        with patch.object(module.shutil, "rmtree"):
+            try:
+                module._remove_tree(path)
+            except OSError as exc:
+                assert "left directory behind" in str(exc)
+            else:
+                raise AssertionError("Expected OSError")
+
+    def test_remove_tree_logs_chmod_failure(self, tmp_path: Path) -> None:
+        module = _load_script()
+        path = tmp_path / "locked"
+        path.mkdir()
+
+        def fail_with_onerror(target: Path, *, onerror) -> None:
+            onerror(module.os.unlink, target / "file.txt", (PermissionError, PermissionError("locked"), None))
+
+        with patch.object(module.shutil, "rmtree", side_effect=fail_with_onerror):
+            with patch.object(module.os, "chmod", side_effect=OSError("chmod failed")):
+                with patch.object(module.logging, "warning") as warning:
+                    try:
+                        module._remove_tree(path)
+                    except OSError as exc:
+                        assert "left directory behind" in str(exc)
+                    else:
+                        raise AssertionError("Expected OSError")
+
+        warning.assert_called_once()
+        assert warning.call_args.args[:2] == (
+            "Failed to clean %s after %s: %s",
+            path / "file.txt",
+        )
 
     def test_validate_installed_wheel_runs_expected_steps(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -88,7 +148,7 @@ class TestInstalledWheelValidationScript:
         work_dir.mkdir()
         calls: list[tuple[list[str], Path]] = []
 
-        def fake_run(command: list[str], *, cwd: Path, allowed_roots=None) -> None:
+        def fake_run(command: list[str], *, cwd: Path, allowed_roots: tuple[Path, ...]) -> None:
             calls.append((command, cwd))
             if command[1:3] == ["-m", "build"]:
                 wheelhouse = Path(command[-1])
@@ -125,7 +185,7 @@ class TestInstalledWheelValidationScript:
         repo_root.mkdir()
         generated_project.mkdir(parents=True)
 
-        def fake_run(command: list[str], *, cwd: Path, allowed_roots=None) -> None:
+        def fake_run(command: list[str], *, cwd: Path, allowed_roots: tuple[Path, ...]) -> None:
             if command[1:3] == ["-m", "build"]:
                 wheelhouse = Path(command[-1])
                 wheelhouse.mkdir(parents=True, exist_ok=True)
@@ -134,15 +194,14 @@ class TestInstalledWheelValidationScript:
         with patch.object(module, "_run", side_effect=fake_run):
             with patch.object(module, "_venv_python", return_value=work_dir / "venv" / "Scripts" / "python.exe"):
                 with patch.object(module, "_venv_script", return_value=work_dir / "venv" / "Scripts" / "rpacore.exe"):
-                    with patch.object(module.shutil, "rmtree") as rmtree:
-                        module.validate_installed_wheel(
-                            repo_root=repo_root,
-                            work_dir=work_dir,
-                            examples_repo=None,
-                            examples_pytest=[],
-                        )
+                    module.validate_installed_wheel(
+                        repo_root=repo_root,
+                        work_dir=work_dir,
+                        examples_repo=None,
+                        examples_pytest=[],
+                    )
 
-        rmtree.assert_called_once_with(generated_project, ignore_errors=True)
+        assert not generated_project.exists()
 
     def test_validate_installed_wheel_runs_examples_when_paths_are_explicit(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -154,7 +213,7 @@ class TestInstalledWheelValidationScript:
         examples_repo.mkdir()
         calls: list[tuple[list[str], Path]] = []
 
-        def fake_run(command: list[str], *, cwd: Path, allowed_roots=None) -> None:
+        def fake_run(command: list[str], *, cwd: Path, allowed_roots: tuple[Path, ...]) -> None:
             calls.append((command, cwd))
             if command[1:3] == ["-m", "build"]:
                 wheelhouse = Path(command[-1])
@@ -186,7 +245,7 @@ class TestInstalledWheelValidationScript:
         work_dir.mkdir()
         examples_repo.mkdir()
 
-        def fake_run(command: list[str], *, cwd: Path, allowed_roots=None) -> None:
+        def fake_run(command: list[str], *, cwd: Path, allowed_roots: tuple[Path, ...]) -> None:
             if command[1:3] == ["-m", "build"]:
                 wheelhouse = Path(command[-1])
                 wheelhouse.mkdir(parents=True, exist_ok=True)
@@ -202,10 +261,10 @@ class TestInstalledWheelValidationScript:
                             examples_repo=examples_repo,
                             examples_pytest=["../outside"],
                         )
-                    except ValueError as exc:
+                    except module.ValidationError as exc:
                         assert "outside allowed roots" in str(exc)
                     else:
-                        raise AssertionError("Expected ValueError")
+                        raise AssertionError("Expected ValidationError")
 
     def test_validate_installed_wheel_requires_examples_pytest_with_examples_repo(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -217,10 +276,10 @@ class TestInstalledWheelValidationScript:
                 examples_repo=tmp_path / "examples",
                 examples_pytest=[],
             )
-        except ValueError as exc:
+        except module.ValidationError as exc:
             assert str(exc) == "--examples-pytest is required when --examples-repo is provided"
         else:
-            raise AssertionError("Expected ValueError")
+            raise AssertionError("Expected ValidationError")
 
     def test_validate_installed_wheel_requires_examples_repo_with_examples_pytest(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -232,10 +291,89 @@ class TestInstalledWheelValidationScript:
                 examples_repo=None,
                 examples_pytest=["tests"],
             )
-        except ValueError as exc:
+        except module.ValidationError as exc:
             assert str(exc) == "--examples-repo is required when --examples-pytest is used"
         else:
-            raise AssertionError("Expected ValueError")
+            raise AssertionError("Expected ValidationError")
+
+    def test_validate_installed_wheel_cleans_generated_dirs_on_failure(self, tmp_path: Path) -> None:
+        module = _load_script()
+        repo_root = tmp_path / "repo"
+        work_dir = tmp_path / "work"
+        repo_root.mkdir()
+
+        try:
+            with patch.object(module, "_run", side_effect=module.ValidationError("boom")):
+                module.validate_installed_wheel(
+                    repo_root=repo_root,
+                    work_dir=work_dir,
+                    examples_repo=None,
+                    examples_pytest=[],
+                )
+        except module.ValidationError as exc:
+            assert "boom" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
+        assert not (work_dir / "wheelhouse").exists()
+        assert not (work_dir / "outside").exists()
+
+    def test_validate_installed_wheel_preserves_keyboard_interrupt_when_cleanup_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module = _load_script()
+        repo_root = tmp_path / "repo"
+        work_dir = tmp_path / "work"
+        repo_root.mkdir()
+        interrupt = KeyboardInterrupt()
+
+        with patch.object(module, "_run", side_effect=interrupt):
+            with patch.object(module, "_remove_tree", side_effect=OSError("locked")):
+                try:
+                    module.validate_installed_wheel(
+                        repo_root=repo_root,
+                        work_dir=work_dir,
+                        examples_repo=None,
+                        examples_pytest=[],
+                    )
+                except KeyboardInterrupt as exc:
+                    assert exc is interrupt
+                else:
+                    raise AssertionError("Expected KeyboardInterrupt")
+
+    def test_validate_installed_wheel_reports_cleanup_residue(self, tmp_path: Path) -> None:
+        module = _load_script()
+        repo_root = tmp_path / "repo"
+        work_dir = tmp_path / "work"
+        residue = work_dir / "outside"
+        repo_root.mkdir()
+        residue.mkdir(parents=True)
+
+        def fake_remove_tree(path: Path) -> None:
+            if path == residue:
+                return
+            if path.exists():
+                module.shutil.rmtree(path)
+
+        try:
+            with patch.object(module.logging, "warning") as warning:
+                with patch.object(module, "_run", side_effect=module.ValidationError("boom")):
+                    with patch.object(module, "_remove_tree", side_effect=fake_remove_tree):
+                        module.validate_installed_wheel(
+                            repo_root=repo_root,
+                            work_dir=work_dir,
+                            examples_repo=None,
+                            examples_pytest=[],
+                        )
+        except module.ValidationError as exc:
+            assert "boom" in str(exc)
+            warning.assert_called_once_with(
+                "Installed-wheel cleanup left generated directories behind: %s",
+                str(residue),
+            )
+        else:
+            raise AssertionError("Expected ValidationError")
 
     def test_main_cleans_owned_work_dir_on_failure(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -252,4 +390,5 @@ class TestInstalledWheelValidationScript:
                     else:
                         raise AssertionError("Expected RuntimeError")
 
-        rmtree.assert_called_once_with(work_dir, ignore_errors=True)
+        rmtree.assert_called_once()
+        assert rmtree.call_args.args == (work_dir,)

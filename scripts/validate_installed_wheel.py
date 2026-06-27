@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -10,44 +11,37 @@ import sys
 import tempfile
 from pathlib import Path
 
+REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
+# These scripts must run directly from scripts/ before rpacore is installed.
+if str(REPO_ROOT_FOR_IMPORTS) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT_FOR_IMPORTS))
+
+from rpacore._validation import (
+    PRERELEASE_WHEEL_PATTERN,
+    ValidationError,
+    assert_relative_path,
+    validate_contained_path as _validate_contained_path,
+)
+
 
 def _run(
     command: list[str],
     *,
     cwd: Path,
-    allowed_roots: tuple[Path, ...] | None = None,
-) -> None:
-    if allowed_roots is not None:
-        _validate_contained_path(cwd, allowed_roots=allowed_roots, label="command cwd")
-    print(f"+ {' '.join(command)}")
-    subprocess.run(command, cwd=cwd, check=True)
-
-
-def _validate_contained_path(
-    path: Path,
-    *,
     allowed_roots: tuple[Path, ...],
-    label: str,
-) -> Path:
-    resolved = path.resolve()
-    for root in allowed_roots:
-        resolved_root = root.resolve()
-        if resolved == resolved_root or resolved.is_relative_to(resolved_root):
-            return resolved
-    roots = ", ".join(str(root.resolve()) for root in allowed_roots)
-    raise ValueError(f"{label} resolves outside allowed roots: {resolved} (allowed: {roots})")
+) -> None:
+    _validate_contained_path(cwd, allowed_roots=allowed_roots, label="command cwd")
+    print(f"+ {' '.join(command)}")
+    try:
+        subprocess.run(command, cwd=cwd, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise ValidationError(
+            f"command failed with exit code {exc.returncode}: {' '.join(command)}"
+        ) from exc
 
 
 def _validate_relative_test_path(test_path: str, *, examples_root: Path) -> str:
-    candidate = Path(test_path)
-    if candidate.is_absolute():
-        raise ValueError(f"example pytest path must be relative: {test_path}")
-    _validate_contained_path(
-        examples_root / candidate,
-        allowed_roots=(examples_root,),
-        label=f"example pytest path {test_path!r}",
-    )
-    return test_path
+    return assert_relative_path(test_path, root=examples_root, label="example pytest path")
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -65,12 +59,39 @@ def _venv_script(venv_dir: Path, name: str) -> Path:
 def _latest_wheel(wheelhouse: Path) -> Path:
     wheels = sorted(
         wheelhouse.glob("rpacore-*.whl"),
-        key=lambda path: (path.stat().st_mtime, path.name),
+        key=lambda path: (
+            path.stat().st_mtime,
+            not PRERELEASE_WHEEL_PATTERN.search(path.name),
+            path.name,
+        ),
         reverse=True,
     )
     if not wheels:
         raise FileNotFoundError(f"No rpacore wheel found in {wheelhouse}")
     return wheels[0]
+
+
+def _remove_tree(path: Path) -> None:
+    if not path.exists():
+        return
+
+    def _onerror(function, failed_path, exc_info) -> None:
+        original_error = exc_info[1]
+        try:
+            os.chmod(failed_path, 0o700)
+            function(failed_path)
+        except OSError as exc:
+            logging.warning(
+                "Failed to clean %s after %s: %s",
+                failed_path,
+                type(original_error).__name__,
+                exc,
+                exc_info=True,
+            )
+
+    shutil.rmtree(path, onerror=_onerror)
+    if path.exists():
+        raise OSError(f"validation cleanup left directory behind: {path}")
 
 
 def _smoke_code(repo_root: Path) -> str:
@@ -111,46 +132,66 @@ def validate_installed_wheel(
     wheelhouse = work_dir / "wheelhouse"
     venv_dir = work_dir / "venv"
     outside_dir = work_dir / "outside"
-    wheelhouse.mkdir(parents=True, exist_ok=True)
-    outside_dir.mkdir(parents=True, exist_ok=True)
+    generated_dirs = (wheelhouse, venv_dir, outside_dir)
 
     if examples_repo is not None and not examples_pytest:
-        raise ValueError("--examples-pytest is required when --examples-repo is provided")
+        raise ValidationError("--examples-pytest is required when --examples-repo is provided")
     if examples_pytest and examples_repo is None:
-        raise ValueError("--examples-repo is required when --examples-pytest is used")
+        raise ValidationError("--examples-repo is required when --examples-pytest is used")
     allowed_run_roots = (repo_root, work_dir)
 
-    _run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheelhouse)],
-        cwd=repo_root,
-        allowed_roots=allowed_run_roots,
-    )
-    wheel = _latest_wheel(wheelhouse)
+    try:
+        wheelhouse.mkdir(parents=True, exist_ok=True)
+        outside_dir.mkdir(parents=True, exist_ok=True)
 
-    _run([sys.executable, "-m", "venv", str(venv_dir)], cwd=outside_dir, allowed_roots=allowed_run_roots)
-    python = _venv_python(venv_dir)
-    _run([str(python), "-m", "pip", "install", str(wheel)], cwd=outside_dir, allowed_roots=allowed_run_roots)
-    _run([str(python), "-c", _smoke_code(repo_root)], cwd=outside_dir, allowed_roots=allowed_run_roots)
-    rpacore_cli = _venv_script(venv_dir, "rpacore")
-    _run([str(rpacore_cli), "version"], cwd=outside_dir, allowed_roots=allowed_run_roots)
-    generated_project = outside_dir / "installed_project"
-    if generated_project.exists():
-        shutil.rmtree(generated_project, ignore_errors=True)
-    _run([str(rpacore_cli), "init", "installed_project"], cwd=outside_dir, allowed_roots=allowed_run_roots)
-    _run([str(rpacore_cli), "run"], cwd=generated_project, allowed_roots=allowed_run_roots)
-    _run([str(rpacore_cli), "transaction", "list"], cwd=generated_project, allowed_roots=allowed_run_roots)
-    _run([str(rpacore_cli), "transaction", "list", "--json"], cwd=generated_project, allowed_roots=allowed_run_roots)
+        _run(
+            [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheelhouse)],
+            cwd=repo_root,
+            allowed_roots=allowed_run_roots,
+        )
+        wheel = _latest_wheel(wheelhouse)
 
-    if examples_pytest:
-        assert examples_repo is not None
-        _run([str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir, allowed_roots=allowed_run_roots)
-        for test_path in examples_pytest:
-            test_path = _validate_relative_test_path(test_path, examples_root=examples_repo)
-            _run(
-                [str(python), "-m", "pytest", test_path],
-                cwd=examples_repo,
-                allowed_roots=(examples_repo,),
+        _run([sys.executable, "-m", "venv", str(venv_dir)], cwd=outside_dir, allowed_roots=allowed_run_roots)
+        python = _venv_python(venv_dir)
+        _run([str(python), "-m", "pip", "install", str(wheel)], cwd=outside_dir, allowed_roots=allowed_run_roots)
+        _run([str(python), "-c", _smoke_code(repo_root)], cwd=outside_dir, allowed_roots=allowed_run_roots)
+        rpacore_cli = _venv_script(venv_dir, "rpacore")
+        _run([str(rpacore_cli), "version"], cwd=outside_dir, allowed_roots=allowed_run_roots)
+        generated_project = outside_dir / "installed_project"
+        if generated_project.exists():
+            _remove_tree(generated_project)
+        _run([str(rpacore_cli), "init", "installed_project"], cwd=outside_dir, allowed_roots=allowed_run_roots)
+        _run([str(rpacore_cli), "run"], cwd=generated_project, allowed_roots=allowed_run_roots)
+        _run([str(rpacore_cli), "transaction", "list"], cwd=generated_project, allowed_roots=allowed_run_roots)
+        _run([str(rpacore_cli), "transaction", "list", "--json"], cwd=generated_project, allowed_roots=allowed_run_roots)
+
+        if examples_pytest:
+            _run([str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir, allowed_roots=allowed_run_roots)
+            for test_path in examples_pytest:
+                test_path = _validate_relative_test_path(test_path, examples_root=examples_repo)
+                _run(
+                    [str(python), "-m", "pytest", test_path],
+                    cwd=examples_repo,
+                    allowed_roots=(examples_repo,),
+                )
+    except BaseException:
+        # Keep generated-directory cleanup deterministic, then re-raise interrupts unchanged.
+        cleanup_failures: list[Path] = []
+        for generated_dir in generated_dirs:
+            try:
+                _remove_tree(generated_dir)
+            except OSError:
+                logging.warning("Failed to clean generated directory %s", generated_dir, exc_info=True)
+                cleanup_failures.append(generated_dir)
+        for generated_dir in generated_dirs:
+            if generated_dir.exists() and generated_dir not in cleanup_failures:
+                cleanup_failures.append(generated_dir)
+        if cleanup_failures:
+            logging.warning(
+                "Installed-wheel cleanup left generated directories behind: %s",
+                ", ".join(str(path) for path in cleanup_failures),
             )
+        raise
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,7 +227,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     finally:
         if owns_work_dir and not args.keep_work_dir:
-            shutil.rmtree(work_dir, ignore_errors=True)
+            try:
+                _remove_tree(work_dir)
+            except OSError:
+                logging.warning("Failed to clean owned work directory %s", work_dir, exc_info=True)
 
     return 0
 
