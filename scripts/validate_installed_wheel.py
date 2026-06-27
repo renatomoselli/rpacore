@@ -11,9 +11,43 @@ import tempfile
 from pathlib import Path
 
 
-def _run(command: list[str], *, cwd: Path) -> None:
+def _run(
+    command: list[str],
+    *,
+    cwd: Path,
+    allowed_roots: tuple[Path, ...] | None = None,
+) -> None:
+    if allowed_roots is not None:
+        _validate_contained_path(cwd, allowed_roots=allowed_roots, label="command cwd")
     print(f"+ {' '.join(command)}")
     subprocess.run(command, cwd=cwd, check=True)
+
+
+def _validate_contained_path(
+    path: Path,
+    *,
+    allowed_roots: tuple[Path, ...],
+    label: str,
+) -> Path:
+    resolved = path.resolve()
+    for root in allowed_roots:
+        resolved_root = root.resolve()
+        if resolved == resolved_root or resolved.is_relative_to(resolved_root):
+            return resolved
+    roots = ", ".join(str(root.resolve()) for root in allowed_roots)
+    raise ValueError(f"{label} resolves outside allowed roots: {resolved} (allowed: {roots})")
+
+
+def _validate_relative_test_path(test_path: str, *, examples_root: Path) -> str:
+    candidate = Path(test_path)
+    if candidate.is_absolute():
+        raise ValueError(f"example pytest path must be relative: {test_path}")
+    _validate_contained_path(
+        examples_root / candidate,
+        allowed_roots=(examples_root,),
+        label=f"example pytest path {test_path!r}",
+    )
+    return test_path
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -84,28 +118,39 @@ def validate_installed_wheel(
         raise ValueError("--examples-pytest is required when --examples-repo is provided")
     if examples_pytest and examples_repo is None:
         raise ValueError("--examples-repo is required when --examples-pytest is used")
+    allowed_run_roots = (repo_root, work_dir)
 
-    _run([sys.executable, "-m", "build", "--wheel", "--outdir", str(wheelhouse)], cwd=repo_root)
+    _run(
+        [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheelhouse)],
+        cwd=repo_root,
+        allowed_roots=allowed_run_roots,
+    )
     wheel = _latest_wheel(wheelhouse)
 
-    _run([sys.executable, "-m", "venv", str(venv_dir)], cwd=outside_dir)
+    _run([sys.executable, "-m", "venv", str(venv_dir)], cwd=outside_dir, allowed_roots=allowed_run_roots)
     python = _venv_python(venv_dir)
-    _run([str(python), "-m", "pip", "install", str(wheel)], cwd=outside_dir)
-    _run([str(python), "-c", _smoke_code(repo_root)], cwd=outside_dir)
+    _run([str(python), "-m", "pip", "install", str(wheel)], cwd=outside_dir, allowed_roots=allowed_run_roots)
+    _run([str(python), "-c", _smoke_code(repo_root)], cwd=outside_dir, allowed_roots=allowed_run_roots)
     rpacore_cli = _venv_script(venv_dir, "rpacore")
-    _run([str(rpacore_cli), "version"], cwd=outside_dir)
+    _run([str(rpacore_cli), "version"], cwd=outside_dir, allowed_roots=allowed_run_roots)
     generated_project = outside_dir / "installed_project"
     if generated_project.exists():
         shutil.rmtree(generated_project, ignore_errors=True)
-    _run([str(rpacore_cli), "init", "installed_project"], cwd=outside_dir)
-    _run([str(rpacore_cli), "run"], cwd=generated_project)
-    _run([str(rpacore_cli), "transaction", "list"], cwd=generated_project)
-    _run([str(rpacore_cli), "transaction", "list", "--json"], cwd=generated_project)
+    _run([str(rpacore_cli), "init", "installed_project"], cwd=outside_dir, allowed_roots=allowed_run_roots)
+    _run([str(rpacore_cli), "run"], cwd=generated_project, allowed_roots=allowed_run_roots)
+    _run([str(rpacore_cli), "transaction", "list"], cwd=generated_project, allowed_roots=allowed_run_roots)
+    _run([str(rpacore_cli), "transaction", "list", "--json"], cwd=generated_project, allowed_roots=allowed_run_roots)
 
     if examples_pytest:
-        _run([str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir)
+        assert examples_repo is not None
+        _run([str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir, allowed_roots=allowed_run_roots)
         for test_path in examples_pytest:
-            _run([str(python), "-m", "pytest", test_path], cwd=examples_repo)
+            test_path = _validate_relative_test_path(test_path, examples_root=examples_repo)
+            _run(
+                [str(python), "-m", "pytest", test_path],
+                cwd=examples_repo,
+                allowed_roots=(examples_repo,),
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -141,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     finally:
         if owns_work_dir and not args.keep_work_dir:
-            shutil.rmtree(work_dir)
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     return 0
 

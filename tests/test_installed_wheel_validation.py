@@ -49,10 +49,24 @@ class TestInstalledWheelValidationScript:
         command = ["python", "--version"]
 
         with patch.object(module.subprocess, "run") as run:
-            module._run(command, cwd=tmp_path)
+            module._run(command, cwd=tmp_path, allowed_roots=(tmp_path,))
 
         run.assert_called_once_with(command, cwd=tmp_path, check=True)
         assert capsys.readouterr().out.strip() == "+ python --version"
+
+    def test_run_rejects_cwd_outside_allowed_roots(self, tmp_path: Path) -> None:
+        module = _load_script()
+        root = tmp_path / "root"
+        outside = tmp_path / "outside"
+        root.mkdir()
+        outside.mkdir()
+
+        try:
+            module._run(["python", "--version"], cwd=outside, allowed_roots=(root,))
+        except ValueError as exc:
+            assert "outside allowed roots" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError")
 
     def test_run_propagates_subprocess_errors(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -74,7 +88,7 @@ class TestInstalledWheelValidationScript:
         work_dir.mkdir()
         calls: list[tuple[list[str], Path]] = []
 
-        def fake_run(command: list[str], *, cwd: Path) -> None:
+        def fake_run(command: list[str], *, cwd: Path, allowed_roots=None) -> None:
             calls.append((command, cwd))
             if command[1:3] == ["-m", "build"]:
                 wheelhouse = Path(command[-1])
@@ -111,7 +125,7 @@ class TestInstalledWheelValidationScript:
         repo_root.mkdir()
         generated_project.mkdir(parents=True)
 
-        def fake_run(command: list[str], *, cwd: Path) -> None:
+        def fake_run(command: list[str], *, cwd: Path, allowed_roots=None) -> None:
             if command[1:3] == ["-m", "build"]:
                 wheelhouse = Path(command[-1])
                 wheelhouse.mkdir(parents=True, exist_ok=True)
@@ -140,7 +154,7 @@ class TestInstalledWheelValidationScript:
         examples_repo.mkdir()
         calls: list[tuple[list[str], Path]] = []
 
-        def fake_run(command: list[str], *, cwd: Path) -> None:
+        def fake_run(command: list[str], *, cwd: Path, allowed_roots=None) -> None:
             calls.append((command, cwd))
             if command[1:3] == ["-m", "build"]:
                 wheelhouse = Path(command[-1])
@@ -162,6 +176,36 @@ class TestInstalledWheelValidationScript:
         assert calls[-2][1] == work_dir / "outside"
         assert calls[-1][0][-2:] == ["pytest", "examples/rest_api_batch/tests"]
         assert calls[-1][1] == examples_repo
+
+    def test_validate_installed_wheel_rejects_escaped_example_test_path(self, tmp_path: Path) -> None:
+        module = _load_script()
+        repo_root = tmp_path / "repo"
+        work_dir = tmp_path / "work"
+        examples_repo = tmp_path / "examples"
+        repo_root.mkdir()
+        work_dir.mkdir()
+        examples_repo.mkdir()
+
+        def fake_run(command: list[str], *, cwd: Path, allowed_roots=None) -> None:
+            if command[1:3] == ["-m", "build"]:
+                wheelhouse = Path(command[-1])
+                wheelhouse.mkdir(parents=True, exist_ok=True)
+                (wheelhouse / "rpacore-0.1.0-py3-none-any.whl").write_text("", encoding="utf-8")
+
+        with patch.object(module, "_run", side_effect=fake_run):
+            with patch.object(module, "_venv_python", return_value=work_dir / "venv" / "Scripts" / "python.exe"):
+                with patch.object(module, "_venv_script", return_value=work_dir / "venv" / "Scripts" / "rpacore.exe"):
+                    try:
+                        module.validate_installed_wheel(
+                            repo_root=repo_root,
+                            work_dir=work_dir,
+                            examples_repo=examples_repo,
+                            examples_pytest=["../outside"],
+                        )
+                    except ValueError as exc:
+                        assert "outside allowed roots" in str(exc)
+                    else:
+                        raise AssertionError("Expected ValueError")
 
     def test_validate_installed_wheel_requires_examples_pytest_with_examples_repo(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -208,4 +252,4 @@ class TestInstalledWheelValidationScript:
                     else:
                         raise AssertionError("Expected RuntimeError")
 
-        rmtree.assert_called_once_with(work_dir)
+        rmtree.assert_called_once_with(work_dir, ignore_errors=True)

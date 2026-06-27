@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tomllib
 from importlib import metadata
+from pathlib import Path
 
 import rpacore
 from rpacore.cli import main
@@ -25,6 +27,16 @@ class TestPackageVersion:
     def test_exported_version_is_non_empty(self) -> None:
         assert isinstance(rpacore.__version__, str)
         assert rpacore.__version__
+
+    def test_pyproject_license_metadata_is_build_backend_compatible(self) -> None:
+        pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+
+        assert pyproject["project"]["license"] == {"text": "Apache-2.0"}
+        assert "pytest>=8.1.1" in pyproject["project"]["optional-dependencies"]["dev"]
+        assert "twine>=5.1.0" in pyproject["project"]["optional-dependencies"]["dev"]
+        assert "wheel>=0.46.2" in pyproject["project"]["optional-dependencies"]["dev"]
 
     def test_history_types_are_reexported(self) -> None:
         assert rpacore.HistoryEntry.__name__ == "HistoryEntry"
