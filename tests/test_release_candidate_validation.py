@@ -32,10 +32,32 @@ class TestReleaseCandidateValidationScript:
 
         ignored = module._copy_ignore(
             "repo",
-            [".git", ".internal", ".pytest_cache", "NUL", "rpacore.egg-info", "rpacore", "README.md"],
+            [
+                ".git",
+                ".internal",
+                ".pytest_cache",
+                "Aux",
+                "con",
+                "NUL",
+                "nul",
+                "Prn",
+                "rpacore.egg-info",
+                "rpacore",
+                "README.md",
+            ],
         )
 
-        assert ignored == {".git", ".internal", ".pytest_cache", "NUL", "rpacore.egg-info"}
+        assert ignored == {
+            ".git",
+            ".internal",
+            ".pytest_cache",
+            "Aux",
+            "con",
+            "NUL",
+            "nul",
+            "Prn",
+            "rpacore.egg-info",
+        }
 
     def test_copy_tree_skips_symlinks(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -422,6 +444,33 @@ class TestReleaseCandidateValidationScript:
         }
         assert module._pytest_counts("1 passedenough in 0.01s") == {}
 
+    def test_aggregate_pytest_counts_uses_command_parsed_counts(self) -> None:
+        module = _load_script()
+        commands = [
+            module.CommandEvidence(
+                name="framework_tests",
+                command=["pytest"],
+                cwd=".",
+                exit_code=0,
+                duration_seconds=0.01,
+                parsed={"passed": 2, "skipped": 1, "transaction_count": 99},
+            ),
+            module.CommandEvidence(
+                name="example_pytest:examples/demo/tests",
+                command=["pytest"],
+                cwd=".",
+                exit_code=0,
+                duration_seconds=0.01,
+                parsed={"passed": 3, "errors": 1, "note": "ignored"},
+            ),
+        ]
+
+        assert module._aggregate_pytest_counts(commands) == {
+            "errors": 1,
+            "passed": 5,
+            "skipped": 1,
+        }
+
     def test_sha256_hashes_file_contents(self, tmp_path: Path) -> None:
         module = _load_script()
         path = tmp_path / "payload.txt"
@@ -446,6 +495,7 @@ class TestReleaseCandidateValidationScript:
             "commands": [
                 {"name": "framework_tests", "exit_code": 0, "duration_seconds": 1.2}
             ],
+            "pytest_totals": {"passed": 10, "skipped": 2},
             "artifacts": [{"name": "rpacore.whl", "sha256": "abc"}],
         }
 
@@ -453,9 +503,33 @@ class TestReleaseCandidateValidationScript:
 
         written = json.loads((tmp_path / "release-candidate-evidence.json").read_text())
         assert written["finding_ids"] == ["G2-001"]
+        assert written["pytest_totals"] == {"passed": 10, "skipped": 2}
         summary = (tmp_path / "release-candidate-summary.md").read_text()
+        assert "## Pytest Totals" in summary
+        assert "passed=10, skipped=2" in summary
         assert "framework_tests" in summary
         assert "rpacore.whl" in summary
+
+    def test_write_manifest_includes_empty_pytest_totals_when_present(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module = _load_script()
+        manifest = {
+            "generated_at": "2026-06-26T00:00:00+00:00",
+            "finding_ids": ["G2-001"],
+            "platform": {"system": "Windows", "release": "10", "machine": "AMD64"},
+            "repositories": [],
+            "commands": [],
+            "pytest_totals": {},
+            "artifacts": [],
+        }
+
+        module._write_manifest(manifest, tmp_path)
+
+        summary = (tmp_path / "release-candidate-summary.md").read_text()
+        assert "## Pytest Totals" in summary
+        assert "- (none)" in summary
 
     def test_write_manifest_replaces_manifest_before_summary(
         self,
@@ -701,6 +775,7 @@ class TestReleaseCandidateValidationScript:
             "example_pytest:examples/demo/tests",
         ]
         assert manifest["commands"][10]["parsed"] == {"transaction_count": 1}
+        assert manifest["pytest_totals"] == {"passed": 2}
         assert manifest["artifacts"][0]["contains_examples"] is False
         assert "--db" not in command_details["cli_transaction_export_json"][0]
         example_cli_command, example_cli_cwd = command_details["example_cli_transaction_export_json"]

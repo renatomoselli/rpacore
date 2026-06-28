@@ -60,6 +60,8 @@ COPY_IGNORE_NAMES = {
     "__pycache__",
     "build",
     "dist",
+}
+WINDOWS_RESERVED_NAMES = {
     "AUX",
     "CON",
     "NUL",
@@ -68,6 +70,9 @@ COPY_IGNORE_NAMES = {
 COPY_IGNORE_PATTERNS = ("*.egg-info", "*.pyc", "*.pyo")
 PYTEST_COUNT_PATTERN = re.compile(
     r"\b(?P<count>\d+)\s+(?P<status>passed|failed|skipped|xfailed|xpassed|errors?)\b"
+)
+PYTEST_COUNT_STATUSES = frozenset(
+    {"passed", "failed", "skipped", "xfailed", "xpassed", "errors"}
 )
 
 
@@ -237,7 +242,7 @@ def _repo_evidence(name: str, path: Path) -> RepoEvidence:
 def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
     ignored: set[str] = set()
     for name in names:
-        if name in COPY_IGNORE_NAMES:
+        if name in COPY_IGNORE_NAMES or name.upper() in WINDOWS_RESERVED_NAMES:
             ignored.add(name)
             continue
         if any(fnmatch.fnmatch(name, pattern) for pattern in COPY_IGNORE_PATTERNS):
@@ -366,6 +371,17 @@ def _pytest_counts(output: str) -> dict[str, int]:
             status = "errors"
         counts[status] = counts.get(status, 0) + int(match.group("count"))
     return counts
+
+
+def _aggregate_pytest_counts(commands: list[CommandEvidence]) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for command in commands:
+        for status, count in command.parsed.items():
+            if not isinstance(count, int):
+                continue
+            if status in PYTEST_COUNT_STATUSES:
+                totals[status] = totals.get(status, 0) + count
+    return dict(sorted(totals.items()))
 
 
 def _parse_json_output(evidence: CommandEvidence) -> dict[str, Any]:
@@ -714,6 +730,7 @@ def validate_release_candidate(
             "python": _python_version_info(Path(sys.executable)),
             "repositories": [asdict(repo) for repo in repos],
             "artifacts": artifacts,
+            "pytest_totals": _aggregate_pytest_counts(commands),
             "commands": [_command_record(command) for command in commands],
             "work_dir": str(work_dir),
         }
@@ -756,6 +773,12 @@ def _write_manifest(manifest: dict[str, Any], output_dir: Path) -> None:
     for repo in manifest["repositories"]:
         state = "dirty" if repo["dirty"] else "clean"
         lines.append(f"- `{repo['name']}` `{repo['commit'][:7]}` on `{repo['branch']}`: {state}")
+    if "pytest_totals" in manifest:
+        totals = ", ".join(
+            f"{status}={count}"
+            for status, count in manifest["pytest_totals"].items()
+        ) or "(none)"
+        lines.extend(["", "## Pytest Totals", "", f"- {totals}"])
     lines.extend(["", "## Commands", ""])
     for command in manifest["commands"]:
         status = "pass" if command["exit_code"] == 0 else "fail"
