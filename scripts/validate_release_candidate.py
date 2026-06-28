@@ -83,6 +83,8 @@ class CommandEvidence:
     stdout: str = ""
     stderr: str = ""
     parsed: dict[str, Any] = field(default_factory=dict)
+    raw_stdout: str | None = field(default=None, repr=False)
+    raw_stderr: str | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -136,6 +138,8 @@ def _run(
             duration_seconds=round(time.perf_counter() - started, 3),
             stdout=_truncate(exc.stdout or ""),
             stderr=_truncate(exc.stderr or ""),
+            raw_stdout=exc.stdout or "",
+            raw_stderr=exc.stderr or "",
         )
         raise ValidationError(
             f"{name} failed with exit code {exc.returncode}\n"
@@ -150,6 +154,8 @@ def _run(
         duration_seconds=round(time.perf_counter() - started, 3),
         stdout=_truncate(completed.stdout),
         stderr=_truncate(completed.stderr),
+        raw_stdout=completed.stdout,
+        raw_stderr=completed.stderr,
     )
     if check and completed.returncode != 0:
         raise ValidationError(
@@ -173,6 +179,34 @@ def _git_output(repo: Path, *args: str) -> str:
 
 def _validate_relative_test_path(test_path: str, *, examples_root: Path) -> str:
     return assert_relative_path(test_path, root=examples_root, label="example pytest path")
+
+
+def _example_project_dir(project_path: str, *, examples_root: Path) -> Path:
+    assert_relative_path(project_path, root=examples_root, label="example project path")
+    resolved = _validate_contained_path(
+        examples_root / Path(project_path),
+        allowed_roots=(examples_root,),
+        label=f"example project path {project_path!r}",
+    )
+    examples_dir = (examples_root / "examples").resolve()
+    if resolved == examples_dir or not resolved.is_relative_to(examples_dir):
+        raise ValidationError(
+            "example project path must be inside examples/, "
+            f"got {project_path!r}"
+        )
+    if not resolved.is_dir():
+        raise ValidationError(f"example project path does not exist: {resolved}")
+    return resolved
+
+
+def _example_db_path(db_path: str, *, project_dir: Path) -> Path:
+    assert_relative_path(db_path, root=project_dir, label="example transaction database path")
+    resolved = _validate_contained_path(
+        project_dir / Path(db_path),
+        allowed_roots=(project_dir,),
+        label=f"example transaction database path {db_path!r}",
+    )
+    return resolved
 
 
 def _require_git_repo(path: Path, *, name: str) -> None:
@@ -335,8 +369,9 @@ def _pytest_counts(output: str) -> dict[str, int]:
 
 
 def _parse_json_output(evidence: CommandEvidence) -> dict[str, Any]:
+    stdout = evidence.raw_stdout if evidence.raw_stdout is not None else evidence.stdout
     try:
-        parsed = json.loads(evidence.stdout)
+        parsed = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise ValidationError(f"{evidence.name} did not produce valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
@@ -346,7 +381,8 @@ def _parse_json_output(evidence: CommandEvidence) -> dict[str, Any]:
 
 def _parse_ndjson_output(evidence: CommandEvidence) -> list[dict[str, Any]]:
     records = []
-    for line_number, line in enumerate(evidence.stdout.splitlines(), start=1):
+    stdout = evidence.raw_stdout if evidence.raw_stdout is not None else evidence.stdout
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -424,6 +460,102 @@ def _python_version_info(python: Path) -> dict[str, str]:
     }
 
 
+def _command_record(evidence: CommandEvidence) -> dict[str, Any]:
+    record = asdict(evidence)
+    record.pop("raw_stdout", None)
+    record.pop("raw_stderr", None)
+    return record
+
+
+def _transaction_command(
+    rpacore_cli: Path,
+    *args: str,
+    db_path: Path | None,
+) -> list[str]:
+    command = [str(rpacore_cli), "transaction", *args]
+    if db_path is not None:
+        command.extend(["--db", str(db_path)])
+    return command
+
+
+def _append_cli_transaction_inspection(
+    commands: list[CommandEvidence],
+    *,
+    name_prefix: str,
+    rpacore_cli: Path,
+    cwd: Path,
+    db_path: Path | None,
+    allowed_roots: tuple[Path, ...],
+    env: dict[str, str],
+) -> None:
+    inspection_commands: list[CommandEvidence] = []
+    inspection_commands.append(
+        _run(
+            f"{name_prefix}_transaction_list",
+            _transaction_command(rpacore_cli, "list", db_path=db_path),
+            cwd=cwd,
+            allowed_roots=allowed_roots,
+            env=env,
+        )
+    )
+
+    list_json = _run(
+        f"{name_prefix}_transaction_list_json",
+        _transaction_command(rpacore_cli, "list", "--json", db_path=db_path),
+        cwd=cwd,
+        allowed_roots=allowed_roots,
+        env=env,
+    )
+    list_payload = _parse_json_output(list_json)
+    transactions = _transactions_from_list_payload(list_payload)
+    list_json.parsed = {"transaction_count": len(transactions)}
+    tx_ids = _transaction_ids(transactions)
+    inspection_commands.append(list_json)
+
+    inspection_commands.append(
+        _run(
+            f"{name_prefix}_transaction_show",
+            _transaction_command(rpacore_cli, "show", tx_ids[0], db_path=db_path),
+            cwd=cwd,
+            allowed_roots=allowed_roots,
+            env=env,
+        )
+    )
+    show_json = _run(
+        f"{name_prefix}_transaction_show_json",
+        _transaction_command(rpacore_cli, "show", tx_ids[0], "--json", db_path=db_path),
+        cwd=cwd,
+        allowed_roots=allowed_roots,
+        env=env,
+    )
+    show_json.parsed = {"transaction_id": _parse_json_output(show_json)["transaction"]["id"]}
+    inspection_commands.append(show_json)
+
+    export_json = _run(
+        f"{name_prefix}_transaction_export_json",
+        _transaction_command(rpacore_cli, "export", "--format", "json", db_path=db_path),
+        cwd=cwd,
+        allowed_roots=allowed_roots,
+        env=env,
+    )
+    export_payload = _parse_json_output(export_json)
+    export_json.parsed = {
+        "transaction_count": len(_transactions_from_list_payload(export_payload))
+    }
+    inspection_commands.append(export_json)
+
+    export_ndjson = _run(
+        f"{name_prefix}_transaction_export_ndjson",
+        _transaction_command(rpacore_cli, "export", "--format", "ndjson", db_path=db_path),
+        cwd=cwd,
+        allowed_roots=allowed_roots,
+        env=env,
+    )
+    export_ndjson.parsed = {"record_count": len(_parse_ndjson_output(export_ndjson))}
+    inspection_commands.append(export_ndjson)
+    commands.extend(inspection_commands)
+
+
 def validate_release_candidate(
     *,
     repo_root: Path,
@@ -431,6 +563,8 @@ def validate_release_candidate(
     work_dir: Path,
     output_dir: Path,
     examples_pytest: list[str],
+    example_cli_project: str | None,
+    example_cli_db: str,
 ) -> dict[str, Any]:
     """Run release-candidate validation and return the evidence manifest."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -446,8 +580,10 @@ def validate_release_candidate(
     for generated_dir in generated_dirs:
         if generated_dir.exists():
             _remove_tree(generated_dir)
-    if examples_repo is not None and not examples_pytest:
-        raise ValidationError("--examples-pytest is required when --examples-repo is provided")
+    if examples_repo is not None and not examples_pytest and example_cli_project is None:
+        raise ValidationError("--examples-pytest or --example-cli-project is required when --examples-repo is provided")
+    if example_cli_project is not None and examples_repo is None:
+        raise ValidationError("--examples-repo is required when --example-cli-project is used")
     cleanup_failures: list[Path] = []
     try:
         source_dir.mkdir(parents=True)
@@ -503,64 +639,42 @@ def validate_release_candidate(
             _remove_tree(generated_project)
         commands.append(_run("cli_init", [str(rpacore_cli), "init", "installed_project"], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
         commands.append(_run("cli_run_generated_project", [str(rpacore_cli), "run"], cwd=generated_project, allowed_roots=allowed_run_roots, env=env))
-        commands.append(
-            _run(
-                "cli_transaction_list",
-                [str(rpacore_cli), "transaction", "list"],
-                cwd=generated_project,
+        _append_cli_transaction_inspection(
+            commands,
+            name_prefix="cli",
+            rpacore_cli=rpacore_cli,
+            cwd=generated_project,
+            db_path=None,
+            allowed_roots=allowed_run_roots,
+            env=env,
+        )
+
+        if example_cli_project is not None:
+            example_project_dir = _example_project_dir(
+                example_cli_project,
+                examples_root=examples_copy,
+            )
+            example_db_path = _example_db_path(example_cli_db, project_dir=example_project_dir)
+            commands.append(
+                _run(
+                    "example_cli_run",
+                    [str(python), "main.py"],
+                    cwd=example_project_dir,
+                    allowed_roots=allowed_run_roots,
+                    env=env,
+                )
+            )
+            if not example_db_path.exists():
+                raise ValidationError(f"example transaction database was not created: {example_db_path}")
+            _append_cli_transaction_inspection(
+                commands,
+                name_prefix="example_cli",
+                rpacore_cli=rpacore_cli,
+                cwd=example_project_dir,
+                db_path=example_db_path,
                 allowed_roots=allowed_run_roots,
                 env=env,
             )
-        )
-
-        list_json = _run("cli_transaction_list_json", [str(rpacore_cli), "transaction", "list", "--json"], cwd=generated_project, allowed_roots=allowed_run_roots, env=env)
-        list_payload = _parse_json_output(list_json)
-        transactions = _transactions_from_list_payload(list_payload)
-        list_json.parsed = {"transaction_count": len(transactions)}
-        commands.append(list_json)
-        tx_ids = _transaction_ids(transactions)
-
-        commands.append(
-            _run(
-                "cli_transaction_show",
-                [str(rpacore_cli), "transaction", "show", tx_ids[0]],
-                cwd=generated_project,
-                allowed_roots=allowed_run_roots,
-                env=env,
-            )
-        )
-        show_json = _run(
-            "cli_transaction_show_json",
-            [str(rpacore_cli), "transaction", "show", tx_ids[0], "--json"],
-            cwd=generated_project,
-            allowed_roots=allowed_run_roots,
-            env=env,
-        )
-        show_json.parsed = {"transaction_id": _parse_json_output(show_json)["transaction"]["id"]}
-        commands.append(show_json)
-
-        export_json = _run(
-            "cli_transaction_export_json",
-            [str(rpacore_cli), "transaction", "export", "--format", "json"],
-            cwd=generated_project,
-            allowed_roots=allowed_run_roots,
-            env=env,
-        )
-        export_payload = _parse_json_output(export_json)
-        export_json.parsed = {
-            "transaction_count": len(_transactions_from_list_payload(export_payload))
-        }
-        commands.append(export_json)
-
-        export_ndjson = _run(
-            "cli_transaction_export_ndjson",
-            [str(rpacore_cli), "transaction", "export", "--format", "ndjson"],
-            cwd=generated_project,
-            allowed_roots=allowed_run_roots,
-            env=env,
-        )
-        export_ndjson.parsed = {"record_count": len(_parse_ndjson_output(export_ndjson))}
-        commands.append(export_ndjson)
 
         if examples_pytest:
             if examples_repo is None:
@@ -600,7 +714,7 @@ def validate_release_candidate(
             "python": _python_version_info(Path(sys.executable)),
             "repositories": [asdict(repo) for repo in repos],
             "artifacts": artifacts,
-            "commands": [asdict(command) for command in commands],
+            "commands": [_command_record(command) for command in commands],
             "work_dir": str(work_dir),
         }
         _write_manifest(manifest, output_dir)
@@ -690,6 +804,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--examples-pytest", action="append", default=[])
+    parser.add_argument(
+        "--example-cli-project",
+        default=None,
+        help="Optional relative example project path to run with the installed wheel.",
+    )
+    parser.add_argument(
+        "--example-cli-db",
+        default="rpacore.db",
+        help="Transaction database path, relative to --example-cli-project.",
+    )
     return parser
 
 
@@ -706,6 +830,8 @@ def main(argv: list[str] | None = None) -> int:
             work_dir=work_dir.resolve(),
             output_dir=output_dir.resolve(),
             examples_pytest=list(args.examples_pytest),
+            example_cli_project=args.example_cli_project,
+            example_cli_db=args.example_cli_db,
         )
         print(f"Wrote release-candidate evidence to {output_dir.resolve()}")
     finally:

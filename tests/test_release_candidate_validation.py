@@ -91,6 +91,42 @@ class TestReleaseCandidateValidationScript:
         else:
             raise AssertionError("Expected ValidationError")
 
+    def test_parse_json_output_uses_untruncated_stdout(self) -> None:
+        module = _load_script()
+        raw_stdout = json.dumps({
+            "transactions": [{"id": str(index)} for index in range(1500)]
+        })
+        evidence = module.CommandEvidence(
+            name="json",
+            command=["cmd"],
+            cwd=".",
+            exit_code=0,
+            duration_seconds=0.0,
+            stdout=raw_stdout[:12_000] + "\n...[truncated]...",
+            raw_stdout=raw_stdout,
+        )
+
+        assert len(module._parse_json_output(evidence)["transactions"]) == 1500
+
+    def test_parse_json_output_preserves_explicit_empty_raw_stdout(self) -> None:
+        module = _load_script()
+        evidence = module.CommandEvidence(
+            name="json",
+            command=["cmd"],
+            cwd=".",
+            exit_code=0,
+            duration_seconds=0.0,
+            stdout='{"ok": true}',
+            raw_stdout="",
+        )
+
+        try:
+            module._parse_json_output(evidence)
+        except module.ValidationError as exc:
+            assert "valid JSON" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
     def test_parse_ndjson_output_parses_every_line(self) -> None:
         module = _load_script()
         evidence = module.CommandEvidence(
@@ -103,6 +139,43 @@ class TestReleaseCandidateValidationScript:
         )
 
         assert module._parse_ndjson_output(evidence) == [{"id": 1}, {"id": 2}]
+
+    def test_parse_ndjson_output_uses_untruncated_stdout(self) -> None:
+        module = _load_script()
+        raw_stdout = "".join(
+            json.dumps({"id": str(index)}) + "\n"
+            for index in range(1500)
+        )
+        evidence = module.CommandEvidence(
+            name="ndjson",
+            command=["cmd"],
+            cwd=".",
+            exit_code=0,
+            duration_seconds=0.0,
+            stdout=raw_stdout[:12_000] + "\n...[truncated]...",
+            raw_stdout=raw_stdout,
+        )
+
+        assert len(module._parse_ndjson_output(evidence)) == 1500
+
+    def test_command_record_omits_raw_output(self) -> None:
+        module = _load_script()
+        evidence = module.CommandEvidence(
+            name="json",
+            command=["cmd"],
+            cwd=".",
+            exit_code=0,
+            duration_seconds=0.0,
+            stdout="short",
+            raw_stdout="full",
+            raw_stderr="full err",
+        )
+
+        record = module._command_record(evidence)
+
+        assert record["stdout"] == "short"
+        assert "raw_stdout" not in record
+        assert "raw_stderr" not in record
 
     def test_run_raises_validation_error_on_failed_command(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -170,6 +243,51 @@ class TestReleaseCandidateValidationScript:
         else:
             raise AssertionError("Expected ValidationError")
 
+    def test_example_project_dir_validates_example_project(self, tmp_path: Path) -> None:
+        module = _load_script()
+        examples_root = tmp_path / "rpacore-examples"
+        project_dir = examples_root / "examples" / "demo"
+        project_dir.mkdir(parents=True)
+
+        assert module._example_project_dir(
+            "examples/demo",
+            examples_root=examples_root,
+        ) == project_dir.resolve()
+
+    def test_example_project_dir_rejects_invalid_paths(self, tmp_path: Path) -> None:
+        module = _load_script()
+        examples_root = tmp_path / "rpacore-examples"
+        (examples_root / "examples" / "demo").mkdir(parents=True)
+
+        cases = [
+            ("../outside", "outside allowed roots"),
+            ("examples", "inside examples/"),
+            ("docs/demo", "inside examples/"),
+            ("examples/missing", "does not exist"),
+        ]
+        for project_path, expected_message in cases:
+            try:
+                module._example_project_dir(project_path, examples_root=examples_root)
+            except module.ValidationError as exc:
+                assert expected_message in str(exc)
+            else:
+                raise AssertionError(f"Expected ValidationError for {project_path}")
+
+    def test_example_db_path_rejects_escaped_paths(self, tmp_path: Path) -> None:
+        module = _load_script()
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+
+        assert module._example_db_path("rpacore.db", project_dir=project_dir) == (
+            project_dir / "rpacore.db"
+        ).resolve()
+        try:
+            module._example_db_path("../outside.db", project_dir=project_dir)
+        except module.ValidationError as exc:
+            assert "outside allowed roots" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
     def test_example_pytest_target_uses_standalone_project_cwd(
         self,
         tmp_path: Path,
@@ -220,6 +338,70 @@ class TestReleaseCandidateValidationScript:
 
         assert module._transaction_ids([{"id": "not a uuid"}]) == ["not a uuid"]
         assert module._transaction_ids([{"id": "abc123-000"}]) == ["abc123-000"]
+
+    def test_transaction_command_adds_db_only_when_explicit(self, tmp_path: Path) -> None:
+        module = _load_script()
+        rpacore_cli = tmp_path / "venv" / "Scripts" / "rpacore.exe"
+        db_path = tmp_path / "project" / "rpacore.db"
+
+        assert module._transaction_command(rpacore_cli, "list", db_path=None) == [
+            str(rpacore_cli),
+            "transaction",
+            "list",
+        ]
+        assert module._transaction_command(
+            rpacore_cli,
+            "export",
+            "--format",
+            "json",
+            db_path=db_path,
+        ) == [
+            str(rpacore_cli),
+            "transaction",
+            "export",
+            "--format",
+            "json",
+            "--db",
+            str(db_path),
+        ]
+
+    def test_append_cli_transaction_inspection_appends_only_after_success(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module = _load_script()
+        commands: list[object] = []
+
+        def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+            stdout = ""
+            if name == "demo_transaction_list_json":
+                stdout = '{"transactions": []}'
+            return module.CommandEvidence(
+                name=name,
+                command=command,
+                cwd=str(cwd),
+                exit_code=0,
+                duration_seconds=0.01,
+                stdout=stdout,
+            )
+
+        with patch.object(module, "_run", side_effect=fake_run):
+            try:
+                module._append_cli_transaction_inspection(
+                    commands,  # type: ignore[arg-type]
+                    name_prefix="demo",
+                    rpacore_cli=tmp_path / "rpacore",
+                    cwd=tmp_path,
+                    db_path=None,
+                    allowed_roots=(tmp_path,),
+                    env={},
+                )
+            except module.ValidationError as exc:
+                assert "created no transactions" in str(exc)
+            else:
+                raise AssertionError("Expected ValidationError")
+
+        assert commands == []
 
     def test_validation_error_uses_shared_base(self) -> None:
         module = _load_script()
@@ -403,32 +585,39 @@ class TestReleaseCandidateValidationScript:
         def fake_copy_tree(source: Path, destination: Path) -> None:
             if source == examples_repo:
                 (destination / "examples" / "demo" / "tests").mkdir(parents=True)
+                (destination / "examples" / "demo" / "main.py").write_text("", encoding="utf-8")
             else:
                 destination.mkdir(parents=True)
+
+        transaction_list_json = '{"transactions": [{"id": "12345678-1234-1234-1234-123456789abc"}]}'
+        transaction_show_json = '{"transaction": {"id": "12345678-1234-1234-1234-123456789abc"}}'
+        transaction_export_ndjson = '{"id": "12345678-1234-1234-1234-123456789abc"}\n'
+        stdout_by_name = {
+            "installed_import_smoke": '{"version": "0.1.0", "module_file": "venv/rpacore/__init__.py", "exports": []}',
+            "framework_tests": "1 passed in 0.01s",
+            "cli_transaction_list_json": transaction_list_json,
+            "cli_transaction_show_json": transaction_show_json,
+            "cli_transaction_export_json": transaction_list_json,
+            "cli_transaction_export_ndjson": transaction_export_ndjson,
+            "example_cli_transaction_list_json": transaction_list_json,
+            "example_cli_transaction_show_json": transaction_show_json,
+            "example_cli_transaction_export_json": transaction_list_json,
+            "example_cli_transaction_export_ndjson": transaction_export_ndjson,
+            "example_pytest:examples/demo/tests": "1 passed in 0.01s",
+        }
 
         def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
             commands.append(name)
             command_details[name] = (command, cwd)
-            stdout = ""
-            if name == "installed_import_smoke":
-                stdout = '{"version": "0.1.0", "module_file": "venv/rpacore/__init__.py", "exports": []}'
-            elif name == "cli_transaction_list_json":
-                stdout = '{"transactions": [{"id": "12345678-1234-1234-1234-123456789abc"}]}'
-            elif name == "cli_transaction_show_json":
-                stdout = '{"transaction": {"id": "12345678-1234-1234-1234-123456789abc"}}'
-            elif name == "cli_transaction_export_json":
-                stdout = '{"transactions": [{"id": "12345678-1234-1234-1234-123456789abc"}]}'
-            elif name == "cli_transaction_export_ndjson":
-                stdout = '{"id": "12345678-1234-1234-1234-123456789abc"}\n'
-            elif name in {"framework_tests", "example_pytest:examples/demo/tests"}:
-                stdout = "1 passed in 0.01s"
+            if name == "example_cli_run":
+                (cwd / "rpacore.db").write_text("", encoding="utf-8")
             return module.CommandEvidence(
                 name=name,
                 command=command,
                 cwd=str(cwd),
                 exit_code=0,
                 duration_seconds=0.01,
-                stdout=stdout,
+                stdout=stdout_by_name.get(name, ""),
             )
 
         def fake_artifacts(wheelhouse: Path):
@@ -481,6 +670,8 @@ class TestReleaseCandidateValidationScript:
                                         work_dir=work_dir,
                                         output_dir=output_dir,
                                         examples_pytest=["examples/demo/tests"],
+                                        example_cli_project="examples/demo",
+                                        example_cli_db="rpacore.db",
                                     )
 
         assert commands == [
@@ -499,11 +690,22 @@ class TestReleaseCandidateValidationScript:
             "cli_transaction_show_json",
             "cli_transaction_export_json",
             "cli_transaction_export_ndjson",
+            "example_cli_run",
+            "example_cli_transaction_list",
+            "example_cli_transaction_list_json",
+            "example_cli_transaction_show",
+            "example_cli_transaction_show_json",
+            "example_cli_transaction_export_json",
+            "example_cli_transaction_export_ndjson",
             "install_pytest_for_examples",
             "example_pytest:examples/demo/tests",
         ]
         assert manifest["commands"][10]["parsed"] == {"transaction_count": 1}
         assert manifest["artifacts"][0]["contains_examples"] is False
+        assert "--db" not in command_details["cli_transaction_export_json"][0]
+        example_cli_command, example_cli_cwd = command_details["example_cli_transaction_export_json"]
+        assert example_cli_command[-2:] == ["--db", str(example_cli_cwd / "rpacore.db")]
+        assert example_cli_cwd == work_dir / "source" / "rpacore-examples" / "examples" / "demo"
         example_command, example_cwd = command_details["example_pytest:examples/demo/tests"]
         assert example_command[-2:] == ["tests", "-q"]
         assert example_cwd == work_dir / "source" / "rpacore-examples" / "examples" / "demo"
@@ -537,6 +739,8 @@ class TestReleaseCandidateValidationScript:
                             work_dir=work_dir,
                             output_dir=output_dir,
                             examples_pytest=[],
+                            example_cli_project=None,
+                            example_cli_db="rpacore.db",
                         )
                     except module.ValidationError as exc:
                         assert "boom" in str(exc)
@@ -566,9 +770,32 @@ class TestReleaseCandidateValidationScript:
                 work_dir=work_dir,
                 output_dir=output_dir,
                 examples_pytest=[],
+                example_cli_project=None,
+                example_cli_db="rpacore.db",
             )
         except module.ValidationError as exc:
-            assert str(exc) == "--examples-pytest is required when --examples-repo is provided"
+            assert str(exc) == "--examples-pytest or --example-cli-project is required when --examples-repo is provided"
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_validate_release_candidate_requires_examples_repo_with_example_cli_project(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module = _load_script()
+
+        try:
+            module.validate_release_candidate(
+                repo_root=tmp_path,
+                examples_repo=None,
+                work_dir=tmp_path / "work",
+                output_dir=tmp_path / "evidence",
+                examples_pytest=[],
+                example_cli_project="examples/demo",
+                example_cli_db="rpacore.db",
+            )
+        except module.ValidationError as exc:
+            assert str(exc) == "--examples-repo is required when --example-cli-project is used"
         else:
             raise AssertionError("Expected ValidationError")
 
@@ -598,6 +825,8 @@ class TestReleaseCandidateValidationScript:
                                 work_dir=work_dir,
                                 output_dir=output_dir,
                                 examples_pytest=[],
+                                example_cli_project=None,
+                                example_cli_db="rpacore.db",
                             )
                         except module.ValidationError as exc:
                             assert exc is failure
@@ -630,6 +859,8 @@ class TestReleaseCandidateValidationScript:
                                 work_dir=work_dir,
                                 output_dir=output_dir,
                                 examples_pytest=[],
+                                example_cli_project=None,
+                                example_cli_db="rpacore.db",
                             )
                         except KeyboardInterrupt as exc:
                             assert exc is interrupt
