@@ -50,6 +50,7 @@ class TestInstalledWheelValidationScript:
         args = module.build_parser().parse_args([])
 
         assert args.examples_repo is None
+        assert args.wheel_dir is None
 
     def test_smoke_code_checks_import_is_not_from_checkout(self) -> None:
         module = _load_script()
@@ -161,6 +162,7 @@ class TestInstalledWheelValidationScript:
                     module.validate_installed_wheel(
                         repo_root=repo_root,
                         work_dir=work_dir,
+                        wheel_dir=None,
                         examples_repo=None,
                         examples_pytest=[],
                     )
@@ -176,6 +178,37 @@ class TestInstalledWheelValidationScript:
         assert calls[6][1] == work_dir / "outside" / "installed_project"
         assert calls[7][0][-2:] == ["transaction", "list"]
         assert calls[8][0][-3:] == ["transaction", "list", "--json"]
+
+    def test_validate_installed_wheel_uses_prebuilt_wheel_dir(self, tmp_path: Path) -> None:
+        module = _load_script()
+        repo_root = tmp_path / "repo"
+        work_dir = tmp_path / "work"
+        wheel_dir = tmp_path / "dist"
+        repo_root.mkdir()
+        wheel_dir.mkdir()
+        wheel = wheel_dir / "rpacore-0.1.0-py3-none-any.whl"
+        wheel.write_text("", encoding="utf-8")
+        calls: list[tuple[list[str], Path]] = []
+
+        def fake_run(command: list[str], *, cwd: Path, allowed_roots: tuple[Path, ...]) -> None:
+            calls.append((command, cwd))
+
+        with patch.object(module, "_run", side_effect=fake_run):
+            with patch.object(module, "_venv_python", return_value=work_dir / "venv" / "Scripts" / "python.exe"):
+                with patch.object(module, "_venv_script", return_value=work_dir / "venv" / "Scripts" / "rpacore.exe"):
+                    module.validate_installed_wheel(
+                        repo_root=repo_root,
+                        work_dir=work_dir,
+                        wheel_dir=wheel_dir,
+                        examples_repo=None,
+                        examples_pytest=[],
+                    )
+
+        assert len(calls) == 8
+        assert all(command[1:3] != ["-m", "build"] for command, _cwd in calls)
+        assert calls[0][0][1:3] == ["-m", "venv"]
+        assert calls[1][0][1:4] == ["-m", "pip", "install"]
+        assert calls[1][0][-1] == str(wheel)
 
     def test_validate_installed_wheel_removes_existing_generated_project(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -197,6 +230,7 @@ class TestInstalledWheelValidationScript:
                     module.validate_installed_wheel(
                         repo_root=repo_root,
                         work_dir=work_dir,
+                        wheel_dir=None,
                         examples_repo=None,
                         examples_pytest=[],
                     )
@@ -226,6 +260,7 @@ class TestInstalledWheelValidationScript:
                     module.validate_installed_wheel(
                         repo_root=repo_root,
                         work_dir=work_dir,
+                        wheel_dir=None,
                         examples_repo=examples_repo,
                         examples_pytest=["examples/rest_api_batch/tests"],
                     )
@@ -258,6 +293,7 @@ class TestInstalledWheelValidationScript:
                         module.validate_installed_wheel(
                             repo_root=repo_root,
                             work_dir=work_dir,
+                            wheel_dir=None,
                             examples_repo=examples_repo,
                             examples_pytest=["../outside"],
                         )
@@ -273,6 +309,7 @@ class TestInstalledWheelValidationScript:
             module.validate_installed_wheel(
                 repo_root=tmp_path,
                 work_dir=tmp_path / "work",
+                wheel_dir=None,
                 examples_repo=tmp_path / "examples",
                 examples_pytest=[],
             )
@@ -288,6 +325,7 @@ class TestInstalledWheelValidationScript:
             module.validate_installed_wheel(
                 repo_root=tmp_path,
                 work_dir=tmp_path / "work",
+                wheel_dir=None,
                 examples_repo=None,
                 examples_pytest=["tests"],
             )
@@ -307,6 +345,7 @@ class TestInstalledWheelValidationScript:
                 module.validate_installed_wheel(
                     repo_root=repo_root,
                     work_dir=work_dir,
+                    wheel_dir=None,
                     examples_repo=None,
                     examples_pytest=[],
                 )
@@ -334,6 +373,7 @@ class TestInstalledWheelValidationScript:
                     module.validate_installed_wheel(
                         repo_root=repo_root,
                         work_dir=work_dir,
+                        wheel_dir=None,
                         examples_repo=None,
                         examples_pytest=[],
                     )
@@ -363,6 +403,7 @@ class TestInstalledWheelValidationScript:
                         module.validate_installed_wheel(
                             repo_root=repo_root,
                             work_dir=work_dir,
+                            wheel_dir=None,
                             examples_repo=None,
                             examples_pytest=[],
                         )

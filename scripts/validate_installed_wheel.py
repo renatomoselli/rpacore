@@ -126,13 +126,15 @@ def validate_installed_wheel(
     *,
     repo_root: Path,
     work_dir: Path,
+    wheel_dir: Path | None,
     examples_repo: Path | None,
     examples_pytest: list[str],
 ) -> None:
-    wheelhouse = work_dir / "wheelhouse"
+    generated_wheelhouse = work_dir / "wheelhouse"
+    wheelhouse = wheel_dir if wheel_dir is not None else generated_wheelhouse
     venv_dir = work_dir / "venv"
     outside_dir = work_dir / "outside"
-    generated_dirs = (wheelhouse, venv_dir, outside_dir)
+    generated_dirs = (venv_dir, outside_dir) if wheel_dir is not None else (generated_wheelhouse, venv_dir, outside_dir)
 
     if examples_repo is not None and not examples_pytest:
         raise ValidationError("--examples-pytest is required when --examples-repo is provided")
@@ -144,11 +146,12 @@ def validate_installed_wheel(
         wheelhouse.mkdir(parents=True, exist_ok=True)
         outside_dir.mkdir(parents=True, exist_ok=True)
 
-        _run(
-            [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheelhouse)],
-            cwd=repo_root,
-            allowed_roots=allowed_run_roots,
-        )
+        if wheel_dir is None:
+            _run(
+                [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheelhouse)],
+                cwd=repo_root,
+                allowed_roots=allowed_run_roots,
+            )
         wheel = _latest_wheel(wheelhouse)
 
         _run([sys.executable, "-m", "venv", str(venv_dir)], cwd=outside_dir, allowed_roots=allowed_run_roots)
@@ -201,6 +204,12 @@ def build_parser() -> argparse.ArgumentParser:
     default_repo_root = Path(__file__).resolve().parents[1]
     parser.add_argument("--repo-root", type=Path, default=default_repo_root)
     parser.add_argument("--work-dir", type=Path, default=None)
+    parser.add_argument(
+        "--wheel-dir",
+        type=Path,
+        default=None,
+        help="Directory containing a prebuilt rpacore wheel. Defaults to building one into --work-dir.",
+    )
     parser.add_argument("--keep-work-dir", action="store_true")
     parser.add_argument("--examples-repo", type=Path, default=None)
     parser.add_argument(
@@ -222,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
         validate_installed_wheel(
             repo_root=args.repo_root.resolve(),
             work_dir=work_dir.resolve(),
+            wheel_dir=args.wheel_dir.resolve() if args.wheel_dir else None,
             examples_repo=args.examples_repo.resolve() if args.examples_repo else None,
             examples_pytest=list(args.examples_pytest),
         )

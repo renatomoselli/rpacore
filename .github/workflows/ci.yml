@@ -48,27 +48,6 @@ jobs:
       - name: Check dist metadata
         run: twine check dist/*
 
-      - name: Install wheel into clean environment
-        run: |
-          python -m venv .venv-check
-          .venv-check/bin/pip install --no-index --find-links=dist rpacore
-          .venv-check/bin/rpacore version
-
-      - name: Smoke import public API
-        run: |
-          .venv-check/bin/python - <<'EOF'
-          import rpacore
-          assert hasattr(rpacore, 'Engine')
-          assert hasattr(rpacore, 'Transaction')
-          assert hasattr(rpacore, 'Skill')
-          assert hasattr(rpacore, 'BusinessException')
-          assert hasattr(rpacore, 'SystemException')
-          assert hasattr(rpacore, 'Status')
-          assert hasattr(rpacore, 'QueueRunSummary')
-          assert hasattr(rpacore, 'run_queue_loop')
-          print('smoke import OK')
-          EOF
-
       - name: Verify examples/ absent from wheel
         run: |
           python - <<'EOF'
@@ -83,3 +62,50 @@ jobs:
               sys.exit(1)
           print('wheel contents OK — examples/ absent')
           EOF
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpacore-dist
+          path: dist/*
+
+  installed-artifact:
+    runs-on: ${{ matrix.os }}
+    needs: package
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: rpacore-dist
+          path: dist
+
+      - name: Validate installed wheel
+        run: python scripts/validate_installed_wheel.py --repo-root . --wheel-dir dist
+
+      - name: Install checkpoint test dependencies
+        if: runner.os == 'Windows'
+        run: pip install -e ".[dev]"
+
+      - name: Validate Windows checkpoint/resume subset
+        if: runner.os == 'Windows'
+        run: >
+          python -m pytest
+          tests/test_engine.py::TestEngineCheckpointing::test_checkpoint_runs_after_each_state_transition
+          tests/test_engine.py::TestEngineCheckpointing::test_checkpoint_failure_stops_before_skill_code_runs
+          tests/test_engine.py::TestEngineCheckpointing::test_checkpoint_validates_durable_state_before_saving
+          tests/test_engine.py::TestEngineCheckpointing::test_memory_error_is_not_masked_by_checkpoint_error
+          tests/test_engine.py::TestEngineCheckpointing::test_stopping_business_exception_checkpoints_downstream_skips_as_batch
+          tests/test_engine.py::TestEngineCheckpointing::test_in_memory_run_still_works_without_checkpoint
+          tests/test_engine.py::TestEngineCheckpointing::test_subprocess_exit_after_successful_skill_leaves_checkpoint
+          tests/test_engine.py::TestEngineCheckpointing::test_subprocess_resume_after_crash_does_not_repeat_successful_skill
