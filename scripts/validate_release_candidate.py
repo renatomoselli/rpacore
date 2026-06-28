@@ -384,6 +384,21 @@ def _aggregate_pytest_counts(commands: list[CommandEvidence]) -> dict[str, int]:
     return dict(sorted(totals.items()))
 
 
+def _manifest_result(
+    *,
+    commands: list[CommandEvidence],
+    repos: list[RepoEvidence],
+) -> dict[str, int | str]:
+    failed_command_count = sum(1 for command in commands if command.exit_code != 0)
+    dirty_repository_count = sum(1 for repo in repos if repo.dirty)
+    return {
+        "status": "fail" if failed_command_count else "pass",
+        "command_count": len(commands),
+        "failed_command_count": failed_command_count,
+        "dirty_repository_count": dirty_repository_count,
+    }
+
+
 def _parse_json_output(evidence: CommandEvidence) -> dict[str, Any]:
     stdout = evidence.raw_stdout if evidence.raw_stdout is not None else evidence.stdout
     try:
@@ -730,6 +745,7 @@ def validate_release_candidate(
             "python": _python_version_info(Path(sys.executable)),
             "repositories": [asdict(repo) for repo in repos],
             "artifacts": artifacts,
+            "result": _manifest_result(commands=commands, repos=repos),
             "pytest_totals": _aggregate_pytest_counts(commands),
             "commands": [_command_record(command) for command in commands],
             "work_dir": str(work_dir),
@@ -764,6 +780,9 @@ def _write_manifest(manifest: dict[str, Any], output_dir: Path) -> None:
         "# Release Candidate Evidence Summary",
         "",
         f"- Generated at: `{manifest['generated_at']}`",
+        f"- Result: `{manifest['result']['status']}`",
+        f"- Commands: `{manifest['result']['command_count']}` total, `{manifest['result']['failed_command_count']}` failed",
+        f"- Dirty repositories: `{manifest['result']['dirty_repository_count']}`",
         f"- Platform: `{manifest['platform']['system']} {manifest['platform']['release']} {manifest['platform']['machine']}`",
         f"- Finding IDs: `{', '.join(manifest['finding_ids'])}`",
         "",

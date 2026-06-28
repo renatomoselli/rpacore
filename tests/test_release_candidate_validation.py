@@ -471,6 +471,36 @@ class TestReleaseCandidateValidationScript:
             "skipped": 1,
         }
 
+    def test_manifest_result_counts_commands_and_dirty_repositories(self) -> None:
+        module = _load_script()
+        commands = [
+            module.CommandEvidence(
+                name="passed",
+                command=["cmd"],
+                cwd=".",
+                exit_code=0,
+                duration_seconds=0.01,
+            ),
+            module.CommandEvidence(
+                name="failed",
+                command=["cmd"],
+                cwd=".",
+                exit_code=2,
+                duration_seconds=0.01,
+            ),
+        ]
+        repos = [
+            module.RepoEvidence("rpacore", ".", "abc", "main", False, []),
+            module.RepoEvidence("rpacore-examples", ".", "def", "main", True, ["M file"]),
+        ]
+
+        assert module._manifest_result(commands=commands, repos=repos) == {
+            "status": "fail",
+            "command_count": 2,
+            "failed_command_count": 1,
+            "dirty_repository_count": 1,
+        }
+
     def test_sha256_hashes_file_contents(self, tmp_path: Path) -> None:
         module = _load_script()
         path = tmp_path / "payload.txt"
@@ -495,6 +525,12 @@ class TestReleaseCandidateValidationScript:
             "commands": [
                 {"name": "framework_tests", "exit_code": 0, "duration_seconds": 1.2}
             ],
+            "result": {
+                "status": "pass",
+                "command_count": 1,
+                "failed_command_count": 0,
+                "dirty_repository_count": 0,
+            },
             "pytest_totals": {"passed": 10, "skipped": 2},
             "artifacts": [{"name": "rpacore.whl", "sha256": "abc"}],
         }
@@ -503,8 +539,12 @@ class TestReleaseCandidateValidationScript:
 
         written = json.loads((tmp_path / "release-candidate-evidence.json").read_text())
         assert written["finding_ids"] == ["G2-001"]
+        assert written["result"]["status"] == "pass"
         assert written["pytest_totals"] == {"passed": 10, "skipped": 2}
         summary = (tmp_path / "release-candidate-summary.md").read_text()
+        assert "Result: `pass`" in summary
+        assert "Commands: `1` total, `0` failed" in summary
+        assert "Dirty repositories: `0`" in summary
         assert "## Pytest Totals" in summary
         assert "passed=10, skipped=2" in summary
         assert "framework_tests" in summary
@@ -521,6 +561,12 @@ class TestReleaseCandidateValidationScript:
             "platform": {"system": "Windows", "release": "10", "machine": "AMD64"},
             "repositories": [],
             "commands": [],
+            "result": {
+                "status": "pass",
+                "command_count": 0,
+                "failed_command_count": 0,
+                "dirty_repository_count": 0,
+            },
             "pytest_totals": {},
             "artifacts": [],
         }
@@ -542,6 +588,12 @@ class TestReleaseCandidateValidationScript:
             "platform": {"system": "Windows", "release": "10", "machine": "AMD64"},
             "repositories": [],
             "commands": [],
+            "result": {
+                "status": "pass",
+                "command_count": 0,
+                "failed_command_count": 0,
+                "dirty_repository_count": 0,
+            },
             "artifacts": [],
         }
         real_replace = Path.replace
@@ -570,6 +622,12 @@ class TestReleaseCandidateValidationScript:
             "platform": {"system": "Windows", "release": "10", "machine": "AMD64"},
             "repositories": [],
             "commands": [],
+            "result": {
+                "status": "pass",
+                "command_count": 0,
+                "failed_command_count": 0,
+                "dirty_repository_count": 0,
+            },
             "artifacts": [],
         }
         real_replace = Path.replace
@@ -608,6 +666,12 @@ class TestReleaseCandidateValidationScript:
             "platform": {"system": "Windows", "release": "10", "machine": "AMD64"},
             "repositories": [],
             "commands": [],
+            "result": {
+                "status": "pass",
+                "command_count": 0,
+                "failed_command_count": 0,
+                "dirty_repository_count": 0,
+            },
             "artifacts": [],
         }
         summary_path = tmp_path / "release-candidate-summary.md"
