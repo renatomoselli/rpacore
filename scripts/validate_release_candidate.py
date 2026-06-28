@@ -162,12 +162,6 @@ def _run(
         raw_stdout=completed.stdout,
         raw_stderr=completed.stderr,
     )
-    if check and completed.returncode != 0:
-        raise ValidationError(
-            f"{name} failed with exit code {completed.returncode}\n"
-            f"stdout:\n{evidence.stdout}\n"
-            f"stderr:\n{evidence.stderr}"
-        )
     return evidence
 
 
@@ -399,6 +393,29 @@ def _manifest_result(
     }
 
 
+def _evidence_index(commands: list[CommandEvidence]) -> dict[str, list[str]]:
+    command_names = {command.name for command in commands}
+    index = {
+        "G2-001": ["framework_tests"],
+        "G2-002": ["installed_import_smoke", "example_cli_run"],
+        "G2-004": [
+            "example_cli_transaction_list_json",
+            "example_cli_transaction_show_json",
+            "example_cli_transaction_export_json",
+            "example_cli_transaction_export_ndjson",
+        ],
+        "G2-007": ["installed_import_smoke"],
+        "G2-008": ["installed_import_smoke"],
+        "G2-013": sorted(
+            name for name in command_names if name.startswith("example_pytest:")
+        ),
+    }
+    return {
+        finding_id: [name for name in names if name in command_names]
+        for finding_id, names in index.items()
+    }
+
+
 def _parse_json_output(evidence: CommandEvidence) -> dict[str, Any]:
     stdout = evidence.raw_stdout if evidence.raw_stdout is not None else evidence.stdout
     try:
@@ -478,6 +495,12 @@ print(json.dumps({{
 
 
 def _python_version_info(python: Path) -> dict[str, str]:
+    version_result = subprocess.run(
+        [str(python), "-c", "import sys; print(sys.version)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     result = subprocess.run(
         [str(python), "-m", "pip", "--version"],
         capture_output=True,
@@ -486,7 +509,7 @@ def _python_version_info(python: Path) -> dict[str, str]:
     )
     return {
         "executable": str(python),
-        "version": sys.version,
+        "version": version_result.stdout.strip(),
         "pip": result.stdout.strip(),
     }
 
@@ -747,6 +770,7 @@ def validate_release_candidate(
             "artifacts": artifacts,
             "result": _manifest_result(commands=commands, repos=repos),
             "pytest_totals": _aggregate_pytest_counts(commands),
+            "evidence_index": _evidence_index(commands),
             "commands": [_command_record(command) for command in commands],
             "work_dir": str(work_dir),
         }
@@ -798,6 +822,11 @@ def _write_manifest(manifest: dict[str, Any], output_dir: Path) -> None:
             for status, count in manifest["pytest_totals"].items()
         ) or "(none)"
         lines.extend(["", "## Pytest Totals", "", f"- {totals}"])
+    lines.extend(["", "## Evidence Index", ""])
+    for finding_id in manifest.get("finding_ids", []):
+        command_names = manifest.get("evidence_index", {}).get(finding_id, [])
+        evidence = ", ".join(f"`{name}`" for name in command_names) or "(none)"
+        lines.append(f"- `{finding_id}`: {evidence}")
     lines.extend(["", "## Commands", ""])
     for command in manifest["commands"]:
         status = "pass" if command["exit_code"] == 0 else "fail"

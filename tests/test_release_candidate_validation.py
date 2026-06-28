@@ -6,6 +6,7 @@ import importlib.util
 import errno
 import json
 import os
+import subprocess
 import sys
 from hashlib import sha256
 from pathlib import Path
@@ -501,12 +502,83 @@ class TestReleaseCandidateValidationScript:
             "dirty_repository_count": 1,
         }
 
+    def test_evidence_index_maps_findings_to_present_commands(self) -> None:
+        module = _load_script()
+        commands = [
+            module.CommandEvidence(
+                name="framework_tests",
+                command=["pytest"],
+                cwd=".",
+                exit_code=0,
+                duration_seconds=0.01,
+            ),
+            module.CommandEvidence(
+                name="example_cli_transaction_export_json",
+                command=["rpacore"],
+                cwd=".",
+                exit_code=0,
+                duration_seconds=0.01,
+            ),
+            module.CommandEvidence(
+                name="example_cli_transaction_export_ndjson",
+                command=["rpacore"],
+                cwd=".",
+                exit_code=0,
+                duration_seconds=0.01,
+            ),
+            module.CommandEvidence(
+                name="example_pytest:examples/demo/tests",
+                command=["pytest"],
+                cwd=".",
+                exit_code=0,
+                duration_seconds=0.01,
+            ),
+        ]
+
+        assert module._evidence_index(commands) == {
+            "G2-001": ["framework_tests"],
+            "G2-002": [],
+            "G2-004": [
+                "example_cli_transaction_export_json",
+                "example_cli_transaction_export_ndjson",
+            ],
+            "G2-007": [],
+            "G2-008": [],
+            "G2-013": ["example_pytest:examples/demo/tests"],
+        }
+
     def test_sha256_hashes_file_contents(self, tmp_path: Path) -> None:
         module = _load_script()
         path = tmp_path / "payload.txt"
         path.write_text("payload", encoding="utf-8")
 
         assert module._sha256(path) == sha256(b"payload").hexdigest()
+
+    def test_python_version_info_uses_requested_interpreter(self, tmp_path: Path) -> None:
+        module = _load_script()
+        python = tmp_path / "venv" / "Scripts" / "python.exe"
+        calls: list[list[str]] = []
+
+        def fake_run(command, *, capture_output, text, check):
+            calls.append(command)
+            if command[1:3] == ["-c", "import sys; print(sys.version)"]:
+                return subprocess.CompletedProcess(command, 0, stdout="venv python\n")
+            if command[1:3] == ["-m", "pip"]:
+                return subprocess.CompletedProcess(command, 0, stdout="pip from venv\n")
+            raise AssertionError(f"Unexpected command: {command}")
+
+        with patch.object(module.subprocess, "run", side_effect=fake_run):
+            info = module._python_version_info(python)
+
+        assert calls == [
+            [str(python), "-c", "import sys; print(sys.version)"],
+            [str(python), "-m", "pip", "--version"],
+        ]
+        assert info == {
+            "executable": str(python),
+            "version": "venv python",
+            "pip": "pip from venv",
+        }
 
     def test_write_manifest_writes_json_and_summary(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -532,6 +604,7 @@ class TestReleaseCandidateValidationScript:
                 "dirty_repository_count": 0,
             },
             "pytest_totals": {"passed": 10, "skipped": 2},
+            "evidence_index": {"G2-001": ["framework_tests"]},
             "artifacts": [{"name": "rpacore.whl", "sha256": "abc"}],
         }
 
@@ -547,6 +620,8 @@ class TestReleaseCandidateValidationScript:
         assert "Dirty repositories: `0`" in summary
         assert "## Pytest Totals" in summary
         assert "passed=10, skipped=2" in summary
+        assert "## Evidence Index" in summary
+        assert "`G2-001`: `framework_tests`" in summary
         assert "framework_tests" in summary
         assert "rpacore.whl" in summary
 
@@ -568,6 +643,7 @@ class TestReleaseCandidateValidationScript:
                 "dirty_repository_count": 0,
             },
             "pytest_totals": {},
+            "evidence_index": {},
             "artifacts": [],
         }
 
@@ -594,6 +670,7 @@ class TestReleaseCandidateValidationScript:
                 "failed_command_count": 0,
                 "dirty_repository_count": 0,
             },
+            "evidence_index": {},
             "artifacts": [],
         }
         real_replace = Path.replace
@@ -628,6 +705,7 @@ class TestReleaseCandidateValidationScript:
                 "failed_command_count": 0,
                 "dirty_repository_count": 0,
             },
+            "evidence_index": {},
             "artifacts": [],
         }
         real_replace = Path.replace
@@ -672,6 +750,7 @@ class TestReleaseCandidateValidationScript:
                 "failed_command_count": 0,
                 "dirty_repository_count": 0,
             },
+            "evidence_index": {},
             "artifacts": [],
         }
         summary_path = tmp_path / "release-candidate-summary.md"
@@ -840,6 +919,15 @@ class TestReleaseCandidateValidationScript:
         ]
         assert manifest["commands"][10]["parsed"] == {"transaction_count": 1}
         assert manifest["pytest_totals"] == {"passed": 2}
+        assert manifest["evidence_index"]["G2-004"] == [
+            "example_cli_transaction_list_json",
+            "example_cli_transaction_show_json",
+            "example_cli_transaction_export_json",
+            "example_cli_transaction_export_ndjson",
+        ]
+        assert manifest["evidence_index"]["G2-013"] == [
+            "example_pytest:examples/demo/tests"
+        ]
         assert manifest["artifacts"][0]["contains_examples"] is False
         assert "--db" not in command_details["cli_transaction_export_json"][0]
         example_cli_command, example_cli_cwd = command_details["example_cli_transaction_export_json"]

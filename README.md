@@ -58,6 +58,22 @@ To validate the installed-wheel path used for release gates:
 python scripts/validate_installed_wheel.py
 ```
 
+To produce the full release-candidate evidence manifest used by maintainers:
+
+```bash
+python scripts/validate_release_candidate.py ^
+  --repo-root . ^
+  --examples-repo ..\rpacore-examples ^
+  --example-cli-project examples/json_event_log_processor ^
+  --example-cli-db rpacore.db ^
+  --output-dir .rpiv\artifacts\validation
+```
+
+The command writes `release-candidate-evidence.json` and
+`release-candidate-summary.md`. The JSON manifest records repository state,
+artifact hashes, command outcomes, pytest totals, and the command evidence that
+supports each validation finding.
+
 ## Quick Start
 
 ```python
