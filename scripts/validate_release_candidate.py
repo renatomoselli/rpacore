@@ -32,6 +32,7 @@ from rpacore._validation import (
     PRERELEASE_WHEEL_PATTERN,
     ValidationError,
     assert_relative_path,
+    example_pytest_target as _example_pytest_target,
     validate_contained_path as _validate_contained_path,
 )
 
@@ -564,11 +565,25 @@ def validate_release_candidate(
         if examples_pytest:
             if examples_repo is None:
                 raise ValidationError("--examples-repo is required when --examples-pytest is used")
-            commands.append(_run("install_pytest_for_examples", [str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
+            commands.append(
+                _run(
+                    "install_pytest_for_examples",
+                    [str(python), "-m", "pip", "install", "pytest"],
+                    cwd=outside_dir,
+                    allowed_roots=allowed_run_roots,
+                    env=env,
+                )
+            )
             for test_path in examples_pytest:
-                test_path = _validate_relative_test_path(test_path, examples_root=examples_copy)
-                command = [str(python), "-m", "pytest", test_path, "-q"]
-                evidence = _run(f"example_pytest:{test_path}", command, cwd=examples_copy, allowed_roots=allowed_run_roots, env=env)
+                target = _example_pytest_target(test_path, examples_root=examples_copy)
+                command = [str(python), "-m", "pytest", target.pytest_path, "-q"]
+                evidence = _run(
+                    f"example_pytest:{target.manifest_path}",
+                    command,
+                    cwd=target.project_dir,
+                    allowed_roots=allowed_run_roots,
+                    env=env,
+                )
                 evidence.parsed = _pytest_counts(evidence.stdout + "\n" + evidence.stderr)
                 commands.append(evidence)
 

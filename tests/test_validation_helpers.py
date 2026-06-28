@@ -8,6 +8,7 @@ from rpacore._validation import (
     ValidationError,
     ValidationFailure,
     assert_relative_path,
+    example_pytest_target,
     type_error,
     validate_contained_path,
     value_error,
@@ -86,5 +87,89 @@ class TestValidationHelpers:
             assert_relative_path(tmp_path, root=tmp_path, label="test path")  # type: ignore[arg-type]
         except ValidationError as exc:
             assert "must be a string" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_example_pytest_target_uses_standalone_project_cwd(self, tmp_path: Path) -> None:
+        examples_root = tmp_path / "rpacore-examples"
+        tests_dir = examples_root / "examples" / "demo" / "tests"
+        tests_dir.mkdir(parents=True)
+
+        target = example_pytest_target(
+            "examples/demo/tests",
+            examples_root=examples_root,
+        )
+
+        assert target.manifest_path == "examples/demo/tests"
+        assert target.project_dir == examples_root / "examples" / "demo"
+        assert target.pytest_path == "tests"
+
+    def test_example_pytest_target_normalizes_relative_components(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        examples_root = tmp_path / "rpacore-examples"
+        tests_dir = examples_root / "examples" / "other" / "tests"
+        tests_dir.mkdir(parents=True)
+
+        target = example_pytest_target(
+            "examples/demo/../other/tests",
+            examples_root=examples_root,
+        )
+
+        assert target.manifest_path == "examples/other/tests"
+        assert target.project_dir == examples_root / "examples" / "other"
+        assert target.pytest_path == "tests"
+
+    def test_example_pytest_target_supports_deeper_targets(self, tmp_path: Path) -> None:
+        examples_root = tmp_path / "rpacore-examples"
+        tests_dir = examples_root / "examples" / "demo" / "nested" / "tests"
+        tests_dir.mkdir(parents=True)
+
+        target = example_pytest_target(
+            "examples/demo/nested/tests",
+            examples_root=examples_root,
+        )
+
+        assert target.manifest_path == "examples/demo/nested/tests"
+        assert target.project_dir == examples_root / "examples" / "demo"
+        assert target.pytest_path == "nested/tests"
+
+    def test_example_pytest_target_rejects_non_example_paths(self, tmp_path: Path) -> None:
+        examples_root = tmp_path / "rpacore-examples"
+        tests_dir = examples_root / "docs" / "demo" / "tests"
+        tests_dir.mkdir(parents=True)
+
+        try:
+            example_pytest_target("docs/demo/tests", examples_root=examples_root)
+        except ValidationError as exc:
+            assert "inside one example project" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_example_pytest_target_rejects_project_without_target(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        examples_root = tmp_path / "rpacore-examples"
+        project_dir = examples_root / "examples" / "demo"
+        project_dir.mkdir(parents=True)
+
+        try:
+            example_pytest_target("examples/demo", examples_root=examples_root)
+        except ValidationError as exc:
+            assert "must include a target" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_example_pytest_target_rejects_missing_target(self, tmp_path: Path) -> None:
+        examples_root = tmp_path / "rpacore-examples"
+        project_dir = examples_root / "examples" / "demo"
+        project_dir.mkdir(parents=True)
+
+        try:
+            example_pytest_target("examples/demo/tests", examples_root=examples_root)
+        except ValidationError as exc:
+            assert "does not exist" in str(exc)
         else:
             raise AssertionError("Expected ValidationError")

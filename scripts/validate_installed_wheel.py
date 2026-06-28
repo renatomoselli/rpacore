@@ -19,7 +19,7 @@ if str(REPO_ROOT_FOR_IMPORTS) not in sys.path:
 from rpacore._validation import (
     PRERELEASE_WHEEL_PATTERN,
     ValidationError,
-    assert_relative_path,
+    example_pytest_target as _example_pytest_target,
     validate_contained_path as _validate_contained_path,
 )
 
@@ -38,10 +38,6 @@ def _run(
         raise ValidationError(
             f"command failed with exit code {exc.returncode}: {' '.join(command)}"
         ) from exc
-
-
-def _validate_relative_test_path(test_path: str, *, examples_root: Path) -> str:
-    return assert_relative_path(test_path, root=examples_root, label="example pytest path")
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -171,10 +167,10 @@ def validate_installed_wheel(
         if examples_pytest:
             _run([str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir, allowed_roots=allowed_run_roots)
             for test_path in examples_pytest:
-                test_path = _validate_relative_test_path(test_path, examples_root=examples_repo)
+                target = _example_pytest_target(test_path, examples_root=examples_repo)
                 _run(
-                    [str(python), "-m", "pytest", test_path],
-                    cwd=examples_repo,
+                    [str(python), "-m", "pytest", target.pytest_path, "-q"],
+                    cwd=target.project_dir,
                     allowed_roots=(examples_repo,),
                 )
     except BaseException:

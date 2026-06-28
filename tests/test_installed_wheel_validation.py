@@ -245,6 +245,7 @@ class TestInstalledWheelValidationScript:
         repo_root.mkdir()
         work_dir.mkdir()
         examples_repo.mkdir()
+        (examples_repo / "examples" / "rest_api_batch" / "tests").mkdir(parents=True)
         calls: list[tuple[list[str], Path]] = []
 
         def fake_run(command: list[str], *, cwd: Path, allowed_roots: tuple[Path, ...]) -> None:
@@ -268,8 +269,8 @@ class TestInstalledWheelValidationScript:
         assert len(calls) == 11
         assert calls[-2][0][-2:] == ["install", "pytest"]
         assert calls[-2][1] == work_dir / "outside"
-        assert calls[-1][0][-2:] == ["pytest", "examples/rest_api_batch/tests"]
-        assert calls[-1][1] == examples_repo
+        assert calls[-1][0][-3:] == ["pytest", "tests", "-q"]
+        assert calls[-1][1] == examples_repo / "examples" / "rest_api_batch"
 
     def test_validate_installed_wheel_rejects_escaped_example_test_path(self, tmp_path: Path) -> None:
         module = _load_script()

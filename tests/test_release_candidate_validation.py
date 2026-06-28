@@ -170,6 +170,37 @@ class TestReleaseCandidateValidationScript:
         else:
             raise AssertionError("Expected ValidationError")
 
+    def test_example_pytest_target_uses_standalone_project_cwd(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module = _load_script()
+        examples_root = tmp_path / "rpacore-examples"
+        (examples_root / "examples" / "demo" / "tests").mkdir(parents=True)
+
+        target = module._example_pytest_target(
+            "examples/demo/tests",
+            examples_root=examples_root,
+        )
+
+        assert target.manifest_path == "examples/demo/tests"
+        assert target.project_dir == examples_root / "examples" / "demo"
+        assert target.pytest_path == "tests"
+
+    def test_example_pytest_target_rejects_root_level_paths(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module = _load_script()
+        examples_root = tmp_path / "rpacore-examples"
+
+        try:
+            module._example_pytest_target("tests", examples_root=examples_root)
+        except module.ValidationError as exc:
+            assert "inside one example project" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
     def test_transactions_payload_validation_reports_shape_errors(self) -> None:
         module = _load_script()
 
@@ -367,9 +398,17 @@ class TestReleaseCandidateValidationScript:
         repo_root.mkdir()
         examples_repo.mkdir()
         commands: list[str] = []
+        command_details: dict[str, tuple[list[str], Path]] = {}
+
+        def fake_copy_tree(source: Path, destination: Path) -> None:
+            if source == examples_repo:
+                (destination / "examples" / "demo" / "tests").mkdir(parents=True)
+            else:
+                destination.mkdir(parents=True)
 
         def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
             commands.append(name)
+            command_details[name] = (command, cwd)
             stdout = ""
             if name == "installed_import_smoke":
                 stdout = '{"version": "0.1.0", "module_file": "venv/rpacore/__init__.py", "exports": []}'
@@ -422,7 +461,7 @@ class TestReleaseCandidateValidationScript:
                 module.RepoEvidence("rpacore", str(repo_root), "abc", "main", False, []),
                 module.RepoEvidence("rpacore-examples", str(examples_repo), "def", "main", False, []),
             ]
-            with patch.object(module, "_copy_tree"):
+            with patch.object(module, "_copy_tree", side_effect=fake_copy_tree):
                 with patch.object(module, "_run", side_effect=fake_run):
                     with patch.object(module, "_artifact_records", side_effect=fake_artifacts):
                         with patch.object(module, "_venv_python", return_value=work_dir / "venv" / "python"):
@@ -465,6 +504,9 @@ class TestReleaseCandidateValidationScript:
         ]
         assert manifest["commands"][10]["parsed"] == {"transaction_count": 1}
         assert manifest["artifacts"][0]["contains_examples"] is False
+        example_command, example_cwd = command_details["example_pytest:examples/demo/tests"]
+        assert example_command[-2:] == ["tests", "-q"]
+        assert example_cwd == work_dir / "source" / "rpacore-examples" / "examples" / "demo"
         assert (output_dir / "release-candidate-evidence.json").exists()
 
     def test_validate_release_candidate_cleans_generated_dirs_after_failure(
