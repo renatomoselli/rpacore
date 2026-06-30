@@ -86,15 +86,17 @@ python scripts/validate_examples_against_wheel.py ^
 ```
 
 The script recreates each example virtual environment by default, installs the
-new wheel, installs example requirements, runs available tests, and runs
-deterministic local `main.py` entry points. Browser, desktop, network, and
-credentialed examples are tested but their `main.py` execution is skipped unless
-`--run-main all` is passed. Pass `--install-playwright-browsers` when a browser
-example should also provision Chromium in its example environment. Pass
-`--reuse-venvs` to avoid recreating existing example environments, or
-`--allow-failures` when you want a complete matrix without a non-zero process
-exit. With the default `--run-main deterministic` mode, examples outside the
-deterministic allowlist still run tests but skip `main.py`.
+new wheel, installs example requirements, copies each example into `--work-dir`,
+runs available tests, and runs deterministic local `main.py` entry points from
+that copied workspace so validation does not mutate the examples checkout.
+Browser, desktop, network, and credentialed examples are tested but their
+`main.py` execution is skipped unless `--run-main all` is passed. Pass
+`--install-playwright-browsers` when a browser example should also provision
+Chromium in its example environment. Pass `--reuse-venvs` to avoid recreating
+existing example environments, or `--allow-failures` when you want a complete
+matrix without a non-zero process exit. With the default `--run-main
+deterministic` mode, examples outside the deterministic allowlist still run
+tests but skip `main.py`.
 
 ## Quick Start
 

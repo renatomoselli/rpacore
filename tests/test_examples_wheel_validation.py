@@ -200,6 +200,24 @@ class TestExamplesWheelValidationScript:
             else:
                 raise AssertionError("expected OSError")
 
+    def test_copy_example_workspace_ignores_generated_directories(self, tmp_path: Path) -> None:
+        script = _load_script()
+        source = tmp_path / "source"
+        destination = tmp_path / "workspace"
+        source.mkdir()
+        (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        (source / ".venv").mkdir()
+        (source / ".venv" / "pyvenv.cfg").write_text("stale\n", encoding="utf-8")
+        (source / "build").mkdir()
+        (source / "build" / "artifact.txt").write_text("stale\n", encoding="utf-8")
+
+        copied = script._copy_example_workspace(source, destination)
+
+        assert copied == destination
+        assert (destination / "main.py").exists()
+        assert not (destination / ".venv").exists()
+        assert not (destination / "build").exists()
+
     def test_cleanup_failed_setup_venv_logs_cleanup_failure(self, tmp_path: Path) -> None:
         script = _load_script()
         venv_path = tmp_path / ".venv"
@@ -374,6 +392,7 @@ class TestExamplesWheelValidationScript:
             "path": None,
             "sha256": None,
         }
+        assert not (tmp_path / "work" / "wheelhouse" / ".rpacore-build-failed").match("rpacore-*.whl")
 
     def test_upgrade_pip_failure_skips_remaining_setup(self, tmp_path: Path) -> None:
         script = _load_script()
@@ -744,6 +763,32 @@ class TestExamplesWheelValidationScript:
         assert result.commands[2].skipped is True
         assert result.commands[1].skip_reason == "dependency setup failed at install_requirements:repo:requirements.txt"
 
+    def test_requirement_install_records_skip_when_no_requirements_exist(self, tmp_path: Path) -> None:
+        script = _load_script()
+        examples_repo = tmp_path / "rpacore-examples"
+        example_dir = examples_repo / "examples" / "checkpoint_resume"
+        example_dir.mkdir(parents=True)
+        result = script.ExampleResult(
+            name="checkpoint_resume",
+            path=str(example_dir),
+            venv_path=str(example_dir / ".venv"),
+            category="deterministic",
+        )
+
+        with patch.object(script, "_run") as run:
+            script._pip_install_requirements(
+                result,
+                tmp_path / "python.exe",
+                example_dir,
+                examples_repo,
+                timeout_seconds=300,
+            )
+
+        run.assert_not_called()
+        assert [command.name for command in result.commands] == ["install_requirements"]
+        assert result.commands[0].skipped is True
+        assert result.commands[0].skip_reason == "no requirements files"
+
     def test_requirement_install_success_runs_all_requirement_files(self, tmp_path: Path) -> None:
         script = _load_script()
         examples_repo = tmp_path / "rpacore-examples"
@@ -1044,6 +1089,8 @@ class TestExamplesWheelValidationScript:
         assert manifest["examples"][0]["venv_path"] == str(
             script._example_venv_path(example_dir, venv_mode="work-dir", venv_root=work_dir / "venvs")
         )
+        assert manifest["examples"][0]["path"] == str(work_dir / "examples" / "json_event_log_processor")
+        assert not (work_dir / "examples" / "json_event_log_processor" / ".venv").exists()
         assert (output_dir / "examples-wheel-validation.json").exists()
         assert (output_dir / "examples-wheel-validation.md").exists()
 

@@ -228,6 +228,16 @@ def _remove_tree(path: Path) -> None:
         raise OSError(f"cleanup left directory behind: {path}")
 
 
+def _copy_example_workspace(source: Path, destination: Path) -> Path:
+    _remove_tree(destination)
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns(*GENERATED_DIR_NAMES),
+    )
+    return destination
+
+
 def _venv_python(venv_path: Path) -> Path:
     if os.name == "nt":
         return venv_path / "Scripts" / "python.exe"
@@ -375,6 +385,15 @@ def _pip_install_requirements(
     timeout_seconds: int,
 ) -> None:
     requirements_files = _requirements_files(example_dir, examples_repo)
+    if not requirements_files:
+        result.commands.append(
+            _skipped(
+                "install_requirements",
+                cwd=example_dir,
+                reason="no requirements files",
+            )
+        )
+        return
     for index, requirements in enumerate(requirements_files):
         command_name = _requirements_command_name(
             requirements,
@@ -844,13 +863,18 @@ def validate_examples_against_wheel(
         wheel, build_command = _build_wheel(repo_root, wheelhouse, timeout_seconds=timeout_seconds)
     except BuildValidationError as exc:
         build_command = exc.evidence
-        wheel = wheelhouse / "rpacore-build-failed.whl"
+        wheel = wheelhouse / ".rpacore-build-failed"
     build_failed = not build_command.passed
 
     results: list[ExampleResult] = []
     if not build_failed:
-        for example_dir in _example_dirs(examples_repo):
-            venv_path = _example_venv_path(example_dir, venv_mode=venv_mode, venv_root=venv_root)
+        workspace_root = work_dir / "examples"
+        for source_example_dir in _example_dirs(examples_repo):
+            example_dir = _copy_example_workspace(
+                source_example_dir,
+                workspace_root / source_example_dir.name,
+            )
+            venv_path = _example_venv_path(source_example_dir, venv_mode=venv_mode, venv_root=venv_root)
             results.append(
                 _validate_example(
                     example_dir,
