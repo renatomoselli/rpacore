@@ -42,64 +42,10 @@ Core traits:
 pip install rpacore
 ```
 
-If you are contributing to the framework itself:
-
-```bash
-git clone https://github.com/renatomoselli/rpacore.git
-cd rpacore
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e ".[dev]"
-```
-
-To validate the installed-wheel path used for release gates:
-
-```bash
-python scripts/validate_installed_wheel.py
-```
-
-To produce the full release-candidate evidence manifest used by maintainers:
-
-```bash
-python scripts/validate_release_candidate.py ^
-  --repo-root . ^
-  --examples-repo ..\rpacore-examples ^
-  --example-cli-project examples/json_event_log_processor ^
-  --example-cli-db rpacore.db ^
-  --output-dir .rpiv\artifacts\validation
-```
-
-The command writes `release-candidate-evidence.json` and
-`release-candidate-summary.md`. The JSON manifest records repository state,
-artifact hashes, command outcomes, pytest totals, and the command evidence that
-supports each validation finding.
-
-To validate every external example against a freshly built wheel:
-
-```bash
-python scripts/validate_examples_against_wheel.py ^
-  --repo-root . ^
-  --examples-repo ..\rpacore-examples ^
-  --output-dir .rpiv\artifacts\examples-wheel-validation ^
-  --venv-mode in-place ^
-  --timeout-seconds 300
-```
-
-The script recreates each example virtual environment by default, installs the
-new wheel, installs example requirements, copies each example into `--work-dir`,
-runs available tests, and runs deterministic local `main.py` entry points from
-that copied workspace so validation does not mutate the examples checkout.
-Browser, desktop, network, and credentialed examples are tested but their
-`main.py` execution is skipped unless `--run-main all` is passed. Pass
-`--install-playwright-browsers` when a browser example should also provision
-Chromium in its example environment. Pass `--reuse-venvs` to avoid recreating
-existing example environments, or `--allow-failures` when you want a complete
-matrix without a non-zero process exit. With the default `--run-main
-deterministic` mode, examples outside the deterministic allowlist still run
-tests but skip `main.py`. Pass `--example NAME` to run a bounded subset. Unknown
-included examples fail fast. Pass `--exclude-example NAME` to skip a known
-manual/problem example while preserving the rest of the matrix; excludes that no
-longer exist in the examples repository are ignored.
+For complete documentation, start at [docs/README.md](docs/README.md). See
+[CHANGELOG.md](CHANGELOG.md) for the v0.1.0 compatibility baseline. For
+maintainer validation and release scripts, see [scripts/](scripts/); these
+scripts are intentionally separate from the runtime package.
 
 ## Quick Start
 
@@ -297,10 +243,12 @@ as a retryable runtime failure. The same validation applies to loaded
 transactions before resume, so persisted malformed skill wiring must be fixed
 rather than silently re-run.
 
-Persistence is normally written by user wiring or the queue runner after
-`Engine.run()` finishes. Loading a persisted transaction resets any
-`IN_PROGRESS` transaction or skill to `FAILED`, but ordinary in-process
-execution is not yet crash-durable at each successful skill boundary.
+Persistence is written by user wiring through `save_transaction()`. For strict
+crash boundaries, pass that persistence call as `Engine.run(checkpoint=...)`;
+the engine checkpoints after each transaction or skill state transition. Without
+a checkpoint callback, user code may still save only after `Engine.run()`
+returns. Loading a persisted transaction resets any `IN_PROGRESS` transaction or
+skill to `FAILED`.
 
 ## Configuration
 
@@ -402,7 +350,8 @@ integration-style tests for the framework itself:
 For a step-by-step beginner guide, see [docs/tutorial.md](docs/tutorial.md).
 
 For persistence, migrations, and crash-behavior details, see
-[docs/durability.md](docs/durability.md).
+[docs/durability.md](docs/durability.md). For CLI, API, config, export, and
+import-boundary references, see [docs/README.md](docs/README.md).
 
 For fuller showcase automations, see the examples repository:
 
@@ -418,7 +367,8 @@ itself must stay useful without it:
 - logs, reports, queues, transactions, and artifacts stay readable
 - future worker/orchestrator contracts should be documented and exportable
 
-See `book/notes/future-rpacore-cloud-thesis.md` for the private planning note.
+Cloud and remote orchestration are not part of v0.1.0; see
+[docs/non-goals.md](docs/non-goals.md).
 
 ## Compatibility Baseline
 

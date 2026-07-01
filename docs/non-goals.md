@@ -1,0 +1,19 @@
+# Non-Goals
+
+RPA Core v0.1.0 intentionally does not ship:
+
+- runtime AI behavior or AI service calls
+- a cloud orchestrator or remote worker protocol
+- automatic skill discovery or configuration-defined pipelines
+- generic per-skill hard timeouts or arbitrary cancellation
+- async execution
+- an event bus
+- a custom skill test framework
+- CLI resume/restart commands
+- distributed queue backends
+- artifact content storage or upload
+- browser, desktop, PDF, spreadsheet, or HTTP action wrappers
+
+These omissions are part of the local-first v0.1.0 contract. User automations
+remain ordinary Python projects, and side-effecting work belongs in user-authored
+skills.

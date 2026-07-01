@@ -198,7 +198,7 @@ python scripts/validate_installed_wheel.py
 
 The script builds a wheel, installs it into a clean virtual environment outside
 the checkout, verifies import/version/CLI behavior, and can optionally run
-selected `oref-examples` pytest paths via `--examples-pytest`.
+selected external example pytest paths via `--examples-pytest`.
 
 ## Vision
 

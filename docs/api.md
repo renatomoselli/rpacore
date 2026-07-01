@@ -1,0 +1,84 @@
+# API Reference
+
+The supported v0.1.0 public API is the top-level `rpacore` package. Prefer
+imports such as:
+
+```python
+from rpacore import Engine, ProcessContext, Skill, Transaction
+```
+
+Only symbols exported by `rpacore.__all__` are covered by the public compatibility
+contract. Public submodules remain implementation locations; see
+[Public Submodule Policy](public-submodules.md).
+
+## Execution
+
+| Symbol | Purpose | Durable mutations and side effects |
+| --- | --- | --- |
+| `Engine` | Executes ordered skills in a `Transaction`. | Mutates transaction, skill statuses, history, timestamps, retry count, state, metadata, and artifacts in memory. Persists only when `checkpoint` calls a persistence function. |
+| `ProcessContext` | Runtime context passed to skills. | Carries durable `state`, runtime-only `resources`, config, and transaction reference. Resources are not serialized. |
+| `Skill` | Base class for user-authored work units. | User subclasses implement `execute(ctx)`. Side effects belong to user code. |
+| `Transaction` | Unit of execution and persistence. | Stores reference, status, skills, durable state, metadata, artifacts, and history. |
+| `Status` | Transaction and skill status enum. | No side effects. |
+
+`Engine.run(ctx, checkpoint=...)` validates wiring before user skill code runs.
+When a checkpoint callback is supplied, it is called after each transaction or
+skill state transition. Checkpoint failures propagate and stop execution.
+
+## Exceptions
+
+| Symbol | Purpose | Retry classification |
+| --- | --- | --- |
+| `BusinessException` | Expected business-rule failure. | Terminal for that skill unless user data or code changes. Downstream skills continue unless `stop=True`. |
+| `SystemException` | Technical failure such as file, network, or service errors. | Retryable by `Engine(max_retries=...)`. |
+| `ExecutionValidationError` | Invalid transaction wiring or invalid durable state. | Not retryable; fix code or persisted state. |
+
+Unhandled exceptions from skill code are recorded as system failures.
+`MemoryError` is not masked by checkpoint errors.
+
+## Persistence, Serialization, and Recovery
+
+| Symbol | Purpose | Side effects |
+| --- | --- | --- |
+| `save_transaction(transaction, db_path)` | Save one transaction to SQLite. | Creates or migrates the SQLite database and writes transaction rows. |
+| `load_transaction(transaction_id, db_path)` | Load one transaction from SQLite. | Reads SQLite; resets in-progress persisted state to failed for safe recovery. |
+| `list_transactions(db_path)` | List persisted transactions. | Reads SQLite. |
+| `resume_transaction(transaction)` | Prepare a loaded transaction for retry. | Mutates in-memory statuses and appends resume history when needed. |
+| `serialize_transaction(transaction)` | Convert a transaction to JSON-safe data. | No I/O. |
+| `TRANSACTION_FORMAT_VERSION` | Current serialized transaction format version. | No side effects. |
+
+## Configuration and Paths
+
+| Symbol | Purpose | Side effects |
+| --- | --- | --- |
+| `load_config(path)` | Load and validate TOML configuration. | Reads a TOML file and resolves configured paths relative to it. |
+| `optional_config`, `require_config`, `require_section` | Validate config dictionaries. | No I/O. |
+| `resolve_config_path`, `resolve_config_paths` | Resolve path values from config. | No I/O beyond path normalization. |
+
+## Credentials, Logging, Reports, and Notifications
+
+| Symbol | Purpose | Side effects |
+| --- | --- | --- |
+| `CredentialProvider`, `EnvCredentialProvider`, `KeyringCredentialProvider`, `CredentialNotFoundError`, `build_credential_provider` | Resolve credentials from documented providers. | Environment/keyring reads depending on provider. Credentials are not persisted by RPA Core. |
+| `configure_logger`, `get_logger` | Configure stdlib logging. | Mutates logger handlers/formatters. |
+| `ArtifactReport`, `SkillReport`, `TransactionReport`, `generate_report`, `render_html`, `render_text` | Build and render transaction reports. | Report generation reads transaction data; rendering has no file I/O. |
+| `Notifier`, `EmailNotifier`, `WebhookNotifier`, `build_notifiers`, `dispatch` | Send notifications. | SMTP or HTTP requests when configured. Payloads can contain sensitive transaction data. |
+
+## Queue Processing
+
+| Symbol | Purpose | Side effects |
+| --- | --- | --- |
+| `QueueItem`, `QueueStatus`, `QueueLeaseLostError`, `QueueProvider`, `SqliteQueue` | Queue item model, statuses, provider contract, and SQLite implementation. | `SqliteQueue` creates/migrates and mutates SQLite queue state. |
+| `QueueRunSummary`, `run_queue_loop` | Process claimed queue items through user factories and `Engine`. | Mutates queue and transaction SQLite databases; renews leases; checkpoints transactions when `transaction_db_path` is configured. |
+
+## Manifest and Project Entrypoints
+
+| Symbol | Purpose | Side effects |
+| --- | --- | --- |
+| `ProjectManifest`, `find_project_manifest`, `load_project_manifest`, `resolve_project_entrypoint` | Locate and load `rpacore.toml` and resolve the configured Python entrypoint. | Reads files and imports the configured module during entrypoint resolution. |
+
+## Artifacts and History
+
+| Symbol | Purpose | Side effects |
+| --- | --- | --- |
+| `Artifact`, `HistoryEntry`, `HistoryEvent` | Durable records attached to transactions. | No I/O. Artifact records store paths and metadata, not file contents. |
