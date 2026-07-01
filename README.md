@@ -96,7 +96,10 @@ Chromium in its example environment. Pass `--reuse-venvs` to avoid recreating
 existing example environments, or `--allow-failures` when you want a complete
 matrix without a non-zero process exit. With the default `--run-main
 deterministic` mode, examples outside the deterministic allowlist still run
-tests but skip `main.py`.
+tests but skip `main.py`. Pass `--example NAME` to run a bounded subset. Unknown
+included examples fail fast. Pass `--exclude-example NAME` to skip a known
+manual/problem example while preserving the rest of the matrix; excludes that no
+longer exist in the examples repository are ignored.
 
 ## Quick Start
 

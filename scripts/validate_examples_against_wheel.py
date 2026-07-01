@@ -229,12 +229,20 @@ def _remove_tree(path: Path) -> None:
 
 
 def _copy_example_workspace(source: Path, destination: Path) -> Path:
-    _remove_tree(destination)
-    shutil.copytree(
-        source,
-        destination,
-        ignore=shutil.ignore_patterns(*GENERATED_DIR_NAMES),
-    )
+    try:
+        _remove_tree(destination)
+        shutil.copytree(
+            source,
+            destination,
+            ignore=shutil.ignore_patterns(*GENERATED_DIR_NAMES),
+        )
+    except (OSError, shutil.Error) as exc:
+        try:
+            _remove_tree(destination)
+        except OSError as cleanup_exc:
+            cleanup_exc.add_note(f"original copy failure: {exc}")
+            raise OSError(f"copy failed and partial workspace cleanup failed: {destination}") from cleanup_exc
+        raise
     return destination
 
 
@@ -289,6 +297,21 @@ def _example_dirs(examples_repo: Path) -> list[Path]:
             continue
         example_dirs.append(path)
     return example_dirs
+
+
+def _filter_example_dirs(
+    example_dirs: list[Path],
+    *,
+    include_examples: set[str],
+    exclude_examples: set[str],
+) -> list[Path]:
+    names = {path.name for path in example_dirs}
+    missing_includes = sorted(include_examples - names)
+    if missing_includes:
+        raise ValidationError(f"requested examples do not exist: {missing_includes}")
+    if include_examples:
+        example_dirs = [path for path in example_dirs if path.name in include_examples]
+    return [path for path in example_dirs if path.name not in exclude_examples]
 
 
 def _validated_examples_repo(examples_repo: Path) -> Path:
@@ -388,7 +411,7 @@ def _pip_install_requirements(
     if not requirements_files:
         result.commands.append(
             _skipped(
-                "install_requirements",
+                "install_requirements:skip:no_files",
                 cwd=example_dir,
                 reason="no requirements files",
             )
@@ -848,6 +871,8 @@ def validate_examples_against_wheel(
     recreate_venvs: bool,
     run_main: str,
     install_playwright_browsers: bool,
+    include_examples: set[str] | None = None,
+    exclude_examples: set[str] | None = None,
     timeout_seconds: int,
 ) -> dict[str, Any]:
     """Build the current wheel and validate every example against it."""
@@ -869,7 +894,12 @@ def validate_examples_against_wheel(
     results: list[ExampleResult] = []
     if not build_failed:
         workspace_root = work_dir / "examples"
-        for source_example_dir in _example_dirs(examples_repo):
+        source_example_dirs = _filter_example_dirs(
+            _example_dirs(examples_repo),
+            include_examples=include_examples or set(),
+            exclude_examples=exclude_examples or set(),
+        )
+        for source_example_dir in source_example_dirs:
             example_dir = _copy_example_workspace(
                 source_example_dir,
                 workspace_root / source_example_dir.name,
@@ -911,6 +941,8 @@ def validate_examples_against_wheel(
             "recreate_venvs": recreate_venvs,
             "run_main": run_main,
             "install_playwright_browsers": install_playwright_browsers,
+            "include_examples": sorted(include_examples or []),
+            "exclude_examples": sorted(exclude_examples or []),
             "timeout_seconds": timeout_seconds,
         },
         "result": {
@@ -960,6 +992,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install Chromium for examples that declare Playwright.",
     )
     parser.add_argument(
+        "--example",
+        action="append",
+        default=[],
+        dest="examples",
+        metavar="NAME",
+        help="Validate only the named example. Repeat to include multiple examples.",
+    )
+    parser.add_argument(
+        "--exclude-example",
+        action="append",
+        default=[],
+        dest="excluded_examples",
+        metavar="NAME",
+        help="Skip the named example. Repeat to exclude multiple examples.",
+    )
+    parser.add_argument(
         "--allow-failures",
         action="store_true",
         help="Always exit 0 after writing the matrix, even when required commands fail.",
@@ -985,6 +1033,8 @@ def main(argv: list[str] | None = None) -> int:
         recreate_venvs=not args.reuse_venvs,
         run_main=args.run_main,
         install_playwright_browsers=args.install_playwright_browsers,
+        include_examples=set(args.examples),
+        exclude_examples=set(args.excluded_examples),
         timeout_seconds=args.timeout_seconds,
     )
     print(f"Wrote examples wheel validation to {args.output_dir.resolve()}")

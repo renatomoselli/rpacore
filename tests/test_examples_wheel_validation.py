@@ -62,6 +62,48 @@ class TestExamplesWheelValidationScript:
         else:
             raise AssertionError("expected ValidationError")
 
+    def test_filter_example_dirs_includes_and_excludes_by_name(self, tmp_path: Path) -> None:
+        script = _load_script()
+        example_dirs = [
+            tmp_path / "checkpoint_resume",
+            tmp_path / "json_event_log_processor",
+            tmp_path / "rpa_challenge",
+        ]
+
+        filtered = script._filter_example_dirs(
+            example_dirs,
+            include_examples={"checkpoint_resume", "json_event_log_processor"},
+            exclude_examples={"checkpoint_resume"},
+        )
+
+        assert [path.name for path in filtered] == ["json_event_log_processor"]
+
+    def test_filter_example_dirs_rejects_unknown_includes(self, tmp_path: Path) -> None:
+        script = _load_script()
+
+        try:
+            script._filter_example_dirs(
+                [tmp_path / "checkpoint_resume"],
+                include_examples={"missing_example"},
+                exclude_examples=set(),
+            )
+        except script.ValidationError as exc:
+            assert "requested examples do not exist" in str(exc)
+        else:
+            raise AssertionError("expected ValidationError")
+
+    def test_filter_example_dirs_ignores_unknown_excludes(self, tmp_path: Path) -> None:
+        script = _load_script()
+        example_dirs = [tmp_path / "checkpoint_resume"]
+
+        filtered = script._filter_example_dirs(
+            example_dirs,
+            include_examples=set(),
+            exclude_examples={"renamed_example"},
+        )
+
+        assert filtered == example_dirs
+
     def test_validated_examples_repo_requires_examples_directory(self, tmp_path: Path) -> None:
         script = _load_script()
         examples_repo = tmp_path / "rpacore-examples"
@@ -217,6 +259,55 @@ class TestExamplesWheelValidationScript:
         assert (destination / "main.py").exists()
         assert not (destination / ".venv").exists()
         assert not (destination / "build").exists()
+
+    def test_copy_example_workspace_removes_partial_destination_on_failure(self, tmp_path: Path) -> None:
+        script = _load_script()
+        source = tmp_path / "source"
+        destination = tmp_path / "workspace"
+        source.mkdir()
+        (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+        def fail_copytree(*args, **kwargs):
+            destination.mkdir(parents=True)
+            (destination / "partial.txt").write_text("partial\n", encoding="utf-8")
+            raise OSError("copy failed")
+
+        with patch.object(script.shutil, "copytree", side_effect=fail_copytree):
+            try:
+                script._copy_example_workspace(source, destination)
+            except OSError as exc:
+                assert str(exc) == "copy failed"
+            else:
+                raise AssertionError("expected OSError")
+
+        assert not destination.exists()
+
+    def test_copy_example_workspace_reports_cleanup_failure_after_copy_failure(self, tmp_path: Path) -> None:
+        script = _load_script()
+        source = tmp_path / "source"
+        destination = tmp_path / "workspace"
+        source.mkdir()
+        (source / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        destination.mkdir()
+
+        def fail_remove_tree(path: Path) -> None:
+            if path == destination and getattr(fail_remove_tree, "calls", 0) > 0:
+                raise OSError("cleanup locked")
+            fail_remove_tree.calls = getattr(fail_remove_tree, "calls", 0) + 1
+
+        def fail_copytree(*args, **kwargs):
+            raise OSError("copy failed")
+
+        with patch.object(script, "_remove_tree", side_effect=fail_remove_tree):
+            with patch.object(script.shutil, "copytree", side_effect=fail_copytree):
+                try:
+                    script._copy_example_workspace(source, destination)
+                except OSError as exc:
+                    assert str(exc).startswith("copy failed and partial workspace cleanup failed:")
+                    assert isinstance(exc.__cause__, OSError)
+                    assert exc.__cause__.__notes__ == ["original copy failure: copy failed"]
+                else:
+                    raise AssertionError("expected OSError")
 
     def test_cleanup_failed_setup_venv_logs_cleanup_failure(self, tmp_path: Path) -> None:
         script = _load_script()
@@ -785,7 +876,7 @@ class TestExamplesWheelValidationScript:
             )
 
         run.assert_not_called()
-        assert [command.name for command in result.commands] == ["install_requirements"]
+        assert [command.name for command in result.commands] == ["install_requirements:skip:no_files"]
         assert result.commands[0].skipped is True
         assert result.commands[0].skip_reason == "no requirements files"
 
@@ -1030,10 +1121,12 @@ class TestExamplesWheelValidationScript:
         repo_root = tmp_path / "rpacore"
         examples_repo = tmp_path / "rpacore-examples"
         example_dir = examples_repo / "examples" / "json_event_log_processor"
+        skipped_example_dir = examples_repo / "examples" / "rpa_challenge"
         output_dir = tmp_path / "out"
         work_dir = tmp_path / "work"
         repo_root.mkdir()
         example_dir.mkdir(parents=True)
+        skipped_example_dir.mkdir(parents=True)
         (example_dir / "tests").mkdir()
 
         wheel = work_dir / "wheelhouse" / "rpacore-0.1.0-py3-none-any.whl"
@@ -1081,6 +1174,8 @@ class TestExamplesWheelValidationScript:
                     recreate_venvs=True,
                     run_main="deterministic",
                     install_playwright_browsers=True,
+                    include_examples={"json_event_log_processor"},
+                    exclude_examples=set(),
                     timeout_seconds=300,
                 )
 
@@ -1090,6 +1185,7 @@ class TestExamplesWheelValidationScript:
             script._example_venv_path(example_dir, venv_mode="work-dir", venv_root=work_dir / "venvs")
         )
         assert manifest["examples"][0]["path"] == str(work_dir / "examples" / "json_event_log_processor")
+        assert not (work_dir / "examples" / "rpa_challenge").exists()
         assert not (work_dir / "examples" / "json_event_log_processor" / ".venv").exists()
         assert (output_dir / "examples-wheel-validation.json").exists()
         assert (output_dir / "examples-wheel-validation.md").exists()
@@ -1112,6 +1208,8 @@ class TestExamplesWheelValidationScript:
                     recreate_venvs=True,
                     run_main="deterministic",
                     install_playwright_browsers=False,
+                    include_examples=None,
+                    exclude_examples=None,
                     timeout_seconds=300,
                 )
             except script.ValidationError as exc:
