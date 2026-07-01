@@ -7,6 +7,24 @@ on:
     branches: ["main"]
 
 jobs:
+  docs:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # scripts/verify_docs.py is a release gate; keep this path in sync with its tests.
+      - name: Verify docs
+        run: python scripts/verify_docs.py --repo-root .
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -29,7 +47,8 @@ jobs:
 
   package:
     runs-on: ubuntu-latest
-    needs: test
+    # Public docs ship with the release, so packaging waits for both docs and tests.
+    needs: [docs, test]
 
     steps:
       - uses: actions/checkout@v4
