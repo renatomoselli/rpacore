@@ -11,6 +11,7 @@ from urllib.parse import unquote, urlparse
 
 
 API_REFERENCE_DOC = Path("docs/api.md")
+ROOT_MARKDOWN_DOCS = (Path("README.md"), Path("CHANGELOG.md"), Path("SECURITY.md"))
 SENSITIVE_PATTERNS = {
     r"\b[A-Za-z]:\\repos\\": "local checkout path",
     r"\.internal": "private notes path",
@@ -43,7 +44,7 @@ def _slug(text: str) -> str:
 
 
 def _markdown_files(root: Path) -> list[Path]:
-    candidates = [root / "README.md", root / "CHANGELOG.md", *sorted((root / "docs").glob("*.md"))]
+    candidates = [*(root / path for path in ROOT_MARKDOWN_DOCS), *sorted((root / "docs").glob("*.md"))]
     return [path for path in candidates if path.is_file()]
 
 

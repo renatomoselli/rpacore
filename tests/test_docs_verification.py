@@ -22,6 +22,7 @@ def _write_minimal_repo(root: Path) -> None:
     (root / "rpacore").mkdir()
     (root / "README.md").write_text("# Root\n\n[Docs](docs/README.md)\n", encoding="utf-8")
     (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+    (root / "SECURITY.md").write_text("# Security\n", encoding="utf-8")
     (root / "docs" / "README.md").write_text("# Docs\n\n[API](api.md)\n", encoding="utf-8")
     (root / "docs" / "api.md").write_text("# API Reference\n\n`Engine`\n", encoding="utf-8")
     (root / "rpacore" / "__init__.py").write_text('__all__ = ["Engine"]\n', encoding="utf-8")
@@ -140,6 +141,20 @@ def test_verify_docs_scans_all_markdown_for_sensitive_local_paths(tmp_path: Path
 
     assert [finding.message for finding in findings] == [
         "forbidden public-doc pattern: local checkout path"
+    ]
+
+
+def test_verify_docs_scans_root_security_policy(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path)
+    (tmp_path / "SECURITY.md").write_text(
+        "# Security\n\nUse `pip install -e .` before reporting issues.\n",
+        encoding="utf-8",
+    )
+
+    findings = verify_docs(tmp_path)
+
+    assert [finding.message for finding in findings] == [
+        "forbidden public-doc pattern: editable install instruction"
     ]
 
 

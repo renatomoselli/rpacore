@@ -23,6 +23,7 @@ classifiers = [
 Homepage = "https://github.com/renatomoselli/rpacore"
 Repository = "https://github.com/renatomoselli/rpacore"
 Issues = "https://github.com/renatomoselli/rpacore/issues"
+Security = "https://github.com/renatomoselli/rpacore/security/advisories/new"
 
 [project.optional-dependencies]
 dev = [

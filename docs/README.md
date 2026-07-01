@@ -19,6 +19,10 @@ Use this documentation map as the public v0.1.0 entry point:
   CLI entrypoint resolution.
 - [Export Format Reference](export-format.md): JSON and NDJSON transaction
   export envelopes and data-sensitivity notes.
+- [Security and Privacy](security.md): local trust model, sensitive data
+  surfaces, credentials, paths, notifications, and review checklist.
+- [Supply Chain](supply-chain.md): dependency inventory, artifact checks,
+  publishing posture, and dependency update policy.
 - [Testing Skills](testing.md): plain pytest patterns for user-authored skills.
 - [Public Submodule Policy](public-submodules.md): supported import boundary for
   v0.1.0.

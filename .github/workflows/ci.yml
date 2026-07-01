@@ -48,6 +48,7 @@ jobs:
   package:
     runs-on: ubuntu-latest
     # Public docs ship with the release, so packaging waits for both docs and tests.
+    # If docs fail, GitHub marks this job skipped by design; the docs job is the gate signal.
     needs: [docs, test]
 
     steps:

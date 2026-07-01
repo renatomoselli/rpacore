@@ -352,6 +352,8 @@ For a step-by-step beginner guide, see [docs/tutorial.md](docs/tutorial.md).
 For persistence, migrations, and crash-behavior details, see
 [docs/durability.md](docs/durability.md). For CLI, API, config, export, and
 import-boundary references, see [docs/README.md](docs/README.md).
+For vulnerability reporting and local security posture, see
+[SECURITY.md](SECURITY.md) and [docs/security.md](docs/security.md).
 
 For fuller showcase automations, see the examples repository:
 

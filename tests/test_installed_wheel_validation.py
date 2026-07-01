@@ -52,12 +52,14 @@ class TestInstalledWheelValidationScript:
         assert args.examples_repo is None
         assert args.wheel_dir is None
 
-    def test_smoke_code_checks_import_is_not_from_checkout(self) -> None:
+    def test_smoke_code_checks_import_is_not_from_checkout(self, tmp_path: Path) -> None:
         module = _load_script()
+        repo_root = tmp_path / "rpacore-checkout"
 
-        code = module._smoke_code(Path("D:/repos/oref"))
+        code = module._smoke_code(repo_root)
 
         assert "imported rpacore from checkout" in code
+        assert repr(str(repo_root.resolve())) in code
         assert "Engine().run(ctx)" in code
         assert "ctx.state" in code
 
