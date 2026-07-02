@@ -36,6 +36,14 @@ Record SHA-256 hashes for every wheel and source distribution that will be
 published. Publication should upload the prebuilt, checked artifacts; do not
 rebuild during upload.
 
+The release-candidate validator accepts wheels and `.tar.gz` source
+distributions, then records artifact hashes, dependency inventory, package
+metadata presence, wheel `RECORD`, wheel entry points, license files, and
+private-path checks in its evidence manifest. Validation is fail-fast and cleans
+up its generated working directories on failure, so preserve the terminal or CI
+log for diagnosis because the final evidence manifest is written only after all
+validation steps pass.
+
 Inspect archive contents so generated examples, private notes, local caches,
 credentials, and review artifacts do not ship in the package. The wheel should
 contain the `rpacore` package, metadata, license information, and the `rpacore`

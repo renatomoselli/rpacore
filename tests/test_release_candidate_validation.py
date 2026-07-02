@@ -8,6 +8,8 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
+import zipfile
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
@@ -554,6 +556,207 @@ class TestReleaseCandidateValidationScript:
 
         assert module._sha256(path) == sha256(b"payload").hexdigest()
 
+    def test_artifact_records_include_supply_chain_metadata(self, tmp_path: Path) -> None:
+        module = _load_script()
+        wheel = tmp_path / "rpacore-0.1.0-py3-none-any.whl"
+        sdist = tmp_path / "rpacore-0.1.0.tar.gz"
+
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("rpacore/__init__.py", "")
+            archive.writestr("rpacore-0.1.0.dist-info/METADATA", "")
+            archive.writestr("rpacore-0.1.0.dist-info/RECORD", "")
+            archive.writestr("rpacore-0.1.0.dist-info/entry_points.txt", "")
+            archive.writestr("rpacore-0.1.0.dist-info/licenses/LICENSE", "")
+        sdist_root = tmp_path / "sdist" / "rpacore-0.1.0"
+        sdist_root.mkdir(parents=True)
+        (sdist_root / "PKG-INFO").write_text("", encoding="utf-8")
+        (sdist_root / "LICENSE").write_text("", encoding="utf-8")
+        with tarfile.open(sdist, "w:gz") as archive:
+            archive.add(sdist_root, arcname="rpacore-0.1.0")
+
+        records = {record["name"]: record for record in module._artifact_records(tmp_path)}
+
+        assert records[wheel.name]["contains_metadata"] is True
+        assert records[wheel.name]["contains_record"] is True
+        assert records[wheel.name]["contains_entry_points"] is True
+        assert records[wheel.name]["contains_license"] is True
+        assert records[wheel.name]["contains_private_paths"] is False
+        assert records[wheel.name]["private_paths"] == []
+        assert records[sdist.name]["contains_metadata"] is True
+        assert records[sdist.name]["contains_license"] is True
+
+    def test_private_archive_path_detection_matches_copy_ignore_names(self) -> None:
+        module = _load_script()
+
+        for private_name in module.COPY_IGNORE_NAMES:
+            assert module._is_private_archive_path(f"rpacore-0.1.0/{private_name}/file.txt") is True
+            assert module._private_archive_path_match(f"rpacore-0.1.0/{private_name}/file.txt") == private_name
+        assert module._is_private_archive_path("rpacore-0.1.0/rpacore/__init__.py") is False
+        assert module._private_archive_path_match("rpacore-0.1.0/rpacore/__init__.py") is None
+
+    def test_artifact_records_reject_unsupported_artifact_types(self, tmp_path: Path) -> None:
+        module = _load_script()
+        (tmp_path / "rpacore-0.1.0.zip").write_text("zip", encoding="utf-8")
+
+        try:
+            module._artifact_records(tmp_path)
+        except module.ValidationError as exc:
+            assert str(exc) == "unsupported release artifact type: rpacore-0.1.0.zip"
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_contains_package_metadata_detects_wheel_and_sdist_metadata(self) -> None:
+        module = _load_script()
+
+        assert module._contains_package_metadata(
+            ["rpacore-0.1.0.dist-info/METADATA"],
+            is_wheel=True,
+        ) is True
+        assert module._contains_package_metadata(
+            ["rpacore-0.1.0/PKG-INFO"],
+            is_wheel=False,
+        ) is True
+        assert module._contains_package_metadata(["rpacore/__init__.py"], is_wheel=True) is False
+        assert module._contains_package_metadata(["rpacore/__init__.py"], is_wheel=False) is False
+
+    def test_validate_artifact_records_rejects_private_paths(self) -> None:
+        module = _load_script()
+
+        try:
+            module._validate_artifact_records(
+                [
+                    {
+                        "name": "rpacore-0.1.0.tar.gz",
+                        "contains_private_paths": True,
+                        "contains_license": True,
+                        "contains_metadata": True,
+                        "private_paths": ["rpacore-0.1.0/__pycache__/module.pyc"],
+                    }
+                ]
+            )
+        except module.ValidationError as exc:
+            assert str(exc) == (
+                "release artifact contains private paths: "
+                "rpacore-0.1.0.tar.gz: rpacore-0.1.0/__pycache__/module.pyc"
+            )
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_validate_artifact_records_rejects_wheel_without_entry_points(self) -> None:
+        module = _load_script()
+
+        try:
+            module._validate_artifact_records(
+                [
+                    {
+                        "name": "rpacore-0.1.0-py3-none-any.whl",
+                        "contains_private_paths": False,
+                        "contains_license": True,
+                        "contains_metadata": True,
+                        "contains_record": True,
+                        "contains_entry_points": False,
+                    }
+                ]
+            )
+        except module.ValidationError as exc:
+            assert str(exc) == "wheel missing console entry point metadata: rpacore-0.1.0-py3-none-any.whl"
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_dependency_inventory_reads_pyproject(self, tmp_path: Path) -> None:
+        module = _load_script()
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+name = "demo"
+dependencies = ["runtime-b>=1", "runtime-a"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+screenshots = ["mss"]
+""",
+            encoding="utf-8",
+        )
+
+        assert module._dependency_inventory(tmp_path) == {
+            "runtime_dependencies": ["runtime-a", "runtime-b>=1"],
+            "optional_dependencies": {
+                "dev": ["pytest"],
+                "screenshots": ["mss"],
+            },
+        }
+
+    def test_dependency_inventory_reports_missing_pyproject_as_validation_error(self, tmp_path: Path) -> None:
+        module = _load_script()
+
+        try:
+            module._dependency_inventory(tmp_path)
+        except module.ValidationError as exc:
+            assert str(exc).startswith("cannot read dependency inventory from")
+            assert exc.__cause__ is not None
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_dependency_inventory_reports_invalid_toml_as_validation_error(self, tmp_path: Path) -> None:
+        module = _load_script()
+        (tmp_path / "pyproject.toml").write_text("[project\n", encoding="utf-8")
+
+        try:
+            module._dependency_inventory(tmp_path)
+        except module.ValidationError as exc:
+            assert str(exc).startswith("cannot parse dependency inventory from")
+            assert exc.__cause__ is not None
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_dependency_inventory_rejects_missing_project_section(self, tmp_path: Path) -> None:
+        module = _load_script()
+        (tmp_path / "pyproject.toml").write_text("[build-system]\nrequires = []\n", encoding="utf-8")
+
+        try:
+            module._dependency_inventory(tmp_path)
+        except module.ValidationError as exc:
+            assert str(exc) == "pyproject missing [project] section"
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_dependency_inventory_rejects_non_list_optional_group(self, tmp_path: Path) -> None:
+        module = _load_script()
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+name = "demo"
+
+[project.optional-dependencies]
+dev = "pytest"
+""",
+            encoding="utf-8",
+        )
+
+        try:
+            module._dependency_inventory(tmp_path)
+        except module.ValidationError as exc:
+            assert str(exc) == "pyproject optional dependency group must be a list: dev"
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_dependency_inventory_supports_empty_optional_dependencies(self, tmp_path: Path) -> None:
+        module = _load_script()
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+name = "demo"
+
+[project.optional-dependencies]
+""",
+            encoding="utf-8",
+        )
+
+        assert module._dependency_inventory(tmp_path) == {
+            "runtime_dependencies": [],
+            "optional_dependencies": {},
+        }
+
     def test_python_version_info_uses_requested_interpreter(self, tmp_path: Path) -> None:
         module = _load_script()
         python = tmp_path / "venv" / "Scripts" / "python.exe"
@@ -606,6 +809,10 @@ class TestReleaseCandidateValidationScript:
             "pytest_totals": {"passed": 10, "skipped": 2},
             "evidence_index": {"G2-001": ["framework_tests"]},
             "artifacts": [{"name": "rpacore.whl", "sha256": "abc"}],
+            "dependency_inventory": {
+                "runtime_dependencies": [],
+                "optional_dependencies": {"dev": ["pytest"]},
+            },
         }
 
         module._write_manifest(manifest, tmp_path)
@@ -624,6 +831,9 @@ class TestReleaseCandidateValidationScript:
         assert "`G2-001`: `framework_tests`" in summary
         assert "framework_tests" in summary
         assert "rpacore.whl" in summary
+        assert "## Dependency Inventory" in summary
+        assert "Runtime dependencies: (none)" in summary
+        assert "`dev` extra: `pytest`" in summary
 
     def test_write_manifest_includes_empty_pytest_totals_when_present(
         self,
@@ -805,6 +1015,16 @@ class TestReleaseCandidateValidationScript:
                 (destination / "examples" / "demo" / "main.py").write_text("", encoding="utf-8")
             else:
                 destination.mkdir(parents=True)
+                (destination / "pyproject.toml").write_text(
+                    """
+[project]
+name = "rpacore"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+""",
+                    encoding="utf-8",
+                )
 
         transaction_list_json = '{"transactions": [{"id": "12345678-1234-1234-1234-123456789abc"}]}'
         transaction_show_json = '{"transaction": {"id": "12345678-1234-1234-1234-123456789abc"}}'
@@ -850,7 +1070,12 @@ class TestReleaseCandidateValidationScript:
                     "sha256": "wheel-sha",
                     "size_bytes": 5,
                     "contains_license": True,
+                    "contains_metadata": True,
+                    "contains_record": True,
+                    "contains_entry_points": True,
                     "contains_examples": False,
+                    "contains_private_paths": False,
+                    "private_paths": [],
                 },
                 {
                     "name": sdist.name,
@@ -858,7 +1083,12 @@ class TestReleaseCandidateValidationScript:
                     "sha256": "sdist-sha",
                     "size_bytes": 5,
                     "contains_license": True,
+                    "contains_metadata": True,
+                    "contains_record": False,
+                    "contains_entry_points": False,
                     "contains_examples": False,
+                    "contains_private_paths": False,
+                    "private_paths": [],
                 },
             ]
 
@@ -929,6 +1159,8 @@ class TestReleaseCandidateValidationScript:
             "example_pytest:examples/demo/tests"
         ]
         assert manifest["artifacts"][0]["contains_examples"] is False
+        assert manifest["dependency_inventory"]["runtime_dependencies"] == []
+        assert "dev" in manifest["dependency_inventory"]["optional_dependencies"]
         assert "--db" not in command_details["cli_transaction_export_json"][0]
         example_cli_command, example_cli_cwd = command_details["example_cli_transaction_export_json"]
         assert example_cli_command[-2:] == ["--db", str(example_cli_cwd / "rpacore.db")]
@@ -937,6 +1169,74 @@ class TestReleaseCandidateValidationScript:
         assert example_command[-2:] == ["tests", "-q"]
         assert example_cwd == work_dir / "source" / "rpacore-examples" / "examples" / "demo"
         assert (output_dir / "release-candidate-evidence.json").exists()
+
+    def test_validate_release_candidate_rejects_invalid_artifact_records(self, tmp_path: Path) -> None:
+        module = _load_script()
+        repo_root = tmp_path / "repo"
+        work_dir = tmp_path / "work"
+        output_dir = tmp_path / "evidence"
+        repo_root.mkdir()
+
+        def fake_copy_tree(source: Path, destination: Path) -> None:
+            destination.mkdir(parents=True)
+            (destination / "pyproject.toml").write_text(
+                """
+[project]
+name = "rpacore"
+""",
+                encoding="utf-8",
+            )
+
+        def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+            return module.CommandEvidence(
+                name=name,
+                command=command,
+                cwd=str(cwd),
+                exit_code=0,
+                duration_seconds=0.01,
+            )
+
+        def fake_artifacts(wheelhouse: Path):
+            wheel = wheelhouse / "rpacore-0.1.0-py3-none-any.whl"
+            wheel.write_text("wheel", encoding="utf-8")
+            return [
+                {
+                    "name": wheel.name,
+                    "path": str(wheel),
+                    "sha256": "wheel-sha",
+                    "size_bytes": 5,
+                    "contains_license": False,
+                    "contains_metadata": True,
+                    "contains_record": True,
+                    "contains_entry_points": True,
+                    "contains_examples": False,
+                    "contains_private_paths": False,
+                    "private_paths": [],
+                }
+            ]
+
+        with patch.object(
+            module,
+            "_repo_evidence",
+            return_value=module.RepoEvidence("rpacore", str(repo_root), "abc", "main", False, []),
+        ):
+            with patch.object(module, "_copy_tree", side_effect=fake_copy_tree):
+                with patch.object(module, "_run", side_effect=fake_run):
+                    with patch.object(module, "_artifact_records", side_effect=fake_artifacts):
+                        try:
+                            module.validate_release_candidate(
+                                repo_root=repo_root,
+                                examples_repo=None,
+                                work_dir=work_dir,
+                                output_dir=output_dir,
+                                examples_pytest=[],
+                                example_cli_project=None,
+                                example_cli_db="rpacore.db",
+                            )
+                        except module.ValidationError as exc:
+                            assert str(exc) == "release artifact missing license file: rpacore-0.1.0-py3-none-any.whl"
+                        else:
+                            raise AssertionError("Expected ValidationError")
 
     def test_validate_release_candidate_cleans_generated_dirs_after_failure(
         self,

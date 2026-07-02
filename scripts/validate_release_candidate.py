@@ -17,10 +17,11 @@ import sys
 import tempfile
 import time
 import tarfile
+import tomllib
 import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
@@ -307,9 +308,16 @@ def _sha256(path: Path) -> str:
 def _artifact_records(wheelhouse: Path) -> list[dict[str, Any]]:
     records = []
     for path in sorted(wheelhouse.glob("rpacore-*")):
-        if path.suffix not in {".whl", ".gz"}:
-            continue
+        is_wheel = path.suffix == ".whl"
+        is_sdist = path.name.endswith(".tar.gz")
+        if not is_wheel and not is_sdist:
+            raise ValidationError(f"unsupported release artifact type: {path.name}")
         names = _archive_names(path)
+        private_paths = sorted(
+            name
+            for name in names
+            if _private_archive_path_match(name) is not None
+        )
         records.append(
             {
                 "name": path.name,
@@ -317,13 +325,84 @@ def _artifact_records(wheelhouse: Path) -> list[dict[str, Any]]:
                 "sha256": _sha256(path),
                 "size_bytes": path.stat().st_size,
                 "contains_license": any(name.endswith("LICENSE") for name in names),
+                "contains_metadata": _contains_package_metadata(names, is_wheel=is_wheel),
+                "contains_record": any(name.endswith(".dist-info/RECORD") for name in names),
+                "contains_entry_points": any(name.endswith(".dist-info/entry_points.txt") for name in names),
                 "contains_examples": any(
                     name.startswith("examples/") or "/examples/" in name
                     for name in names
                 ),
+                "contains_private_paths": bool(private_paths),
+                "private_paths": private_paths,
             }
         )
     return records
+
+
+def _is_private_archive_path(name: str) -> bool:
+    return _private_archive_path_match(name) is not None
+
+
+def _private_archive_path_match(name: str) -> str | None:
+    for part in PurePosixPath(name).parts:
+        if part in COPY_IGNORE_NAMES:
+            return part
+    return None
+
+
+def _contains_package_metadata(names: list[str], *, is_wheel: bool) -> bool:
+    if is_wheel:
+        return any(name.endswith(".dist-info/METADATA") for name in names)
+    return any(name.endswith("PKG-INFO") for name in names)
+
+
+def _validate_artifact_records(records: list[dict[str, Any]]) -> None:
+    if not records:
+        raise ValidationError("no release artifacts were recorded")
+    for record in records:
+        name = str(record["name"])
+        if record["contains_private_paths"]:
+            private_paths = ", ".join(str(path) for path in record.get("private_paths", []))
+            detail = f": {private_paths}" if private_paths else ""
+            raise ValidationError(f"release artifact contains private paths: {name}{detail}")
+        if not record["contains_license"]:
+            raise ValidationError(f"release artifact missing license file: {name}")
+        if not record["contains_metadata"]:
+            raise ValidationError(f"release artifact missing package metadata: {name}")
+        if name.endswith(".whl"):
+            if not record["contains_record"]:
+                raise ValidationError(f"wheel missing RECORD metadata: {name}")
+            if not record["contains_entry_points"]:
+                raise ValidationError(f"wheel missing console entry point metadata: {name}")
+
+
+def _dependency_inventory(source_root: Path) -> dict[str, Any]:
+    pyproject_path = source_root / "pyproject.toml"
+    try:
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValidationError(f"cannot read dependency inventory from {pyproject_path}: {exc}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ValidationError(f"cannot parse dependency inventory from {pyproject_path}: {exc}") from exc
+    project = pyproject.get("project", {})
+    if not isinstance(project, dict) or not project:
+        raise ValidationError("pyproject missing [project] section")
+    dependencies = project.get("dependencies", [])
+    optional_dependencies = project.get("optional-dependencies", {})
+    if not isinstance(dependencies, list):
+        raise ValidationError("pyproject project.dependencies must be a list when present")
+    if not isinstance(optional_dependencies, dict):
+        raise ValidationError("pyproject project.optional-dependencies must be a table")
+    for extra, values in optional_dependencies.items():
+        if not isinstance(values, list):
+            raise ValidationError(f"pyproject optional dependency group must be a list: {extra}")
+    return {
+        "runtime_dependencies": sorted(str(dependency) for dependency in dependencies),
+        "optional_dependencies": {
+            str(extra): sorted(str(dependency) for dependency in values)
+            for extra, values in sorted(optional_dependencies.items())
+        },
+    }
 
 
 def _archive_names(path: Path) -> list[str]:
@@ -668,6 +747,9 @@ def validate_release_candidate(
             )
         )
         artifacts = _artifact_records(wheelhouse)
+        _validate_artifact_records(artifacts)
+        # Read dependency metadata from the isolated source copy used for builds.
+        dependency_inventory = _dependency_inventory(framework_copy)
         twine_inputs = [str(path) for path in sorted(wheelhouse.glob("rpacore-*"))]
         commands.append(
             _run(
@@ -768,6 +850,7 @@ def validate_release_candidate(
             "python": _python_version_info(Path(sys.executable)),
             "repositories": [asdict(repo) for repo in repos],
             "artifacts": artifacts,
+            "dependency_inventory": dependency_inventory,
             "result": _manifest_result(commands=commands, repos=repos),
             "pytest_totals": _aggregate_pytest_counts(commands),
             "evidence_index": _evidence_index(commands),
@@ -836,6 +919,14 @@ def _write_manifest(manifest: dict[str, Any], output_dir: Path) -> None:
     lines.extend(["", "## Artifacts", ""])
     for artifact in manifest["artifacts"]:
         lines.append(f"- `{artifact['name']}` sha256 `{artifact['sha256']}`")
+    inventory = manifest.get("dependency_inventory")
+    if inventory is not None:
+        runtime_dependencies = inventory.get("runtime_dependencies", [])
+        runtime = ", ".join(f"`{dependency}`" for dependency in runtime_dependencies) or "(none)"
+        lines.extend(["", "## Dependency Inventory", "", f"- Runtime dependencies: {runtime}"])
+        for extra, dependencies in inventory.get("optional_dependencies", {}).items():
+            listed = ", ".join(f"`{dependency}`" for dependency in dependencies) or "(none)"
+            lines.append(f"- `{extra}` extra: {listed}")
     manifest_replaced = False
     summary_replaced = False
     try:
