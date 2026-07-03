@@ -46,6 +46,7 @@ class TestPackageVersion:
     def test_public_repository_readiness_files_exist(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         required_files = [
+            ".gitattributes",
             "AUTHORS.md",
             "CODE_OF_CONDUCT.md",
             "CONTRIBUTING.md",
@@ -64,6 +65,28 @@ class TestPackageVersion:
         missing = [path for path in required_files if not (repo_root / path).is_file()]
 
         assert missing == []
+
+    def test_repository_hygiene_attributes_are_present(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        attributes = (repo_root / ".gitattributes").read_text(encoding="utf-8").splitlines()
+
+        assert "* text=auto" in attributes
+        for binary_pattern in [
+            "*.db binary",
+            "*.gif binary",
+            "*.gz binary",
+            "*.ico binary",
+            "*.jpeg binary",
+            "*.jpg binary",
+            "*.pdf binary",
+            "*.png binary",
+            "*.sqlite binary",
+            "*.tar binary",
+            "*.tgz binary",
+            "*.whl binary",
+            "*.zip binary",
+        ]:
+            assert binary_pattern in attributes
 
     def test_public_repository_readiness_files_have_content(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

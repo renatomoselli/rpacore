@@ -1,0 +1,17 @@
+# Normalize text while keeping binary release and evidence artifacts untouched.
+* text=auto
+
+# Common binary assets and generated archives.
+*.db binary
+*.gif binary
+*.gz binary
+*.ico binary
+*.jpeg binary
+*.jpg binary
+*.pdf binary
+*.png binary
+*.sqlite binary
+*.tar binary
+*.tgz binary
+*.whl binary
+*.zip binary

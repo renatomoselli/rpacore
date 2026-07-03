@@ -57,10 +57,27 @@ The release branch should require the CI jobs that prove the public product:
 - Windows checkpoint/resume validation subset
 - security policy, sensitive-data surfaces, dependency posture, and package
   content review before release approval
+- tracked-file and archive-content hygiene checks for private paths, stale
+  names, local-machine paths, and accidental large binaries
 
 Local release rehearsal may run stricter checks than CI. Publication still uses
 the frozen prebuilt artifacts and the release manifest evidence; do not rebuild
 artifacts during upload.
+
+## Repository Hygiene
+
+Before a release freeze or public visibility change, maintainers should verify:
+
+- `.gitignore` excludes private notes, review artifacts, local validation
+  workspaces, virtual environments, caches, and build outputs
+- `.gitattributes` defines repository-wide text normalization and binary
+  artifact handling without relying on one developer's Git configuration
+- tracked files and built archives contain no credentials, private planning or
+  review artifacts, local checkout paths, stale project names, or accidental
+  large binaries
+- package metadata, repository description, topics, documentation URL, issue
+  URL, and security URL point to the intended public project
+- branch protection and required checks match the release branch policy above
 
 ## Release Ownership
 
