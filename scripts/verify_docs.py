@@ -11,7 +11,16 @@ from urllib.parse import unquote, urlparse
 
 
 API_REFERENCE_DOC = Path("docs/api.md")
-ROOT_MARKDOWN_DOCS = (Path("README.md"), Path("CHANGELOG.md"), Path("SECURITY.md"))
+ROOT_MARKDOWN_DOCS = (
+    Path("README.md"),
+    Path("CHANGELOG.md"),
+    Path("SECURITY.md"),
+    Path("CONTRIBUTING.md"),
+    Path("CODE_OF_CONDUCT.md"),
+    Path("SUPPORT.md"),
+    Path("AUTHORS.md"),
+    Path("MAINTAINERS.md"),
+)
 SENSITIVE_PATTERNS = {
     r"\b[A-Za-z]:\\repos\\": "local checkout path",
     r"\.internal": "private notes path",

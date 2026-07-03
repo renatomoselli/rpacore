@@ -47,6 +47,14 @@ For complete documentation, start at [docs/README.md](docs/README.md). See
 maintainer validation and release scripts, see [scripts/](scripts/); these
 scripts are intentionally separate from the runtime package.
 
+Community and release-readiness routes:
+
+- [Security Policy](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- [Support](SUPPORT.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Maintainers](MAINTAINERS.md)
+
 ## Quick Start
 
 ```python

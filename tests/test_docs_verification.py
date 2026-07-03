@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse
 from pathlib import Path
 
 from scripts.verify_docs import (
+    ROOT_MARKDOWN_DOCS,
     _anchors,
     _check_api_reference,
     _check_forbidden_patterns,
@@ -23,6 +25,11 @@ def _write_minimal_repo(root: Path) -> None:
     (root / "README.md").write_text("# Root\n\n[Docs](docs/README.md)\n", encoding="utf-8")
     (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
     (root / "SECURITY.md").write_text("# Security\n", encoding="utf-8")
+    (root / "CONTRIBUTING.md").write_text("# Contributing\n", encoding="utf-8")
+    (root / "CODE_OF_CONDUCT.md").write_text("# Code of Conduct\n", encoding="utf-8")
+    (root / "SUPPORT.md").write_text("# Support\n", encoding="utf-8")
+    (root / "AUTHORS.md").write_text("# Authors\n", encoding="utf-8")
+    (root / "MAINTAINERS.md").write_text("# Maintainers\n", encoding="utf-8")
     (root / "docs" / "README.md").write_text("# Docs\n\n[API](api.md)\n", encoding="utf-8")
     (root / "docs" / "api.md").write_text("# API Reference\n\n`Engine`\n", encoding="utf-8")
     (root / "rpacore" / "__init__.py").write_text('__all__ = ["Engine"]\n', encoding="utf-8")
@@ -156,6 +163,41 @@ def test_verify_docs_scans_root_security_policy(tmp_path: Path) -> None:
     assert [finding.message for finding in findings] == [
         "forbidden public-doc pattern: editable install instruction"
     ]
+
+
+def test_verify_docs_scans_root_governance_docs(tmp_path: Path) -> None:
+    governance_docs = [path.as_posix() for path in ROOT_MARKDOWN_DOCS]
+    for index, doc_name in enumerate(governance_docs):
+        root = tmp_path / str(index)
+        root.mkdir()
+        _write_minimal_repo(root)
+        (root / doc_name).write_text(
+            "# Governance\n\nUse `pip install -e .` for setup.\n",
+            encoding="utf-8",
+        )
+
+        findings = verify_docs(root)
+
+        assert [finding.message for finding in findings] == [
+            "forbidden public-doc pattern: editable install instruction"
+        ]
+
+
+def test_maintainers_verifier_scope_matches_root_markdown_docs() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    text = (repo_root / "MAINTAINERS.md").read_text(encoding="utf-8")
+
+    for path in ROOT_MARKDOWN_DOCS:
+        assert f"`{path.as_posix()}`" in text
+    assert "`docs/*.md`" in text
+
+    normalized_text = re.sub(r"\s+", " ", text)
+    scope_section = normalized_text.split("The docs verifier checks markdown links in ", 1)[1]
+    scope_section = scope_section.split(" ## Release Ownership", 1)[0]
+    documented_paths = set(re.findall(r"`([^`]+)`", scope_section))
+    expected_paths = {path.as_posix() for path in ROOT_MARKDOWN_DOCS} | {"docs/*.md"}
+
+    assert documented_paths == expected_paths
 
 
 def test_check_forbidden_patterns_scans_new_docs_for_public_patterns(tmp_path: Path) -> None:

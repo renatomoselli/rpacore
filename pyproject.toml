@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "RPA Core — deterministic, stateful RPA in Python"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "Renato Moselli" },
 ]
@@ -21,6 +22,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/renatomoselli/rpacore"
+Documentation = "https://github.com/renatomoselli/rpacore/tree/main/docs"
 Repository = "https://github.com/renatomoselli/rpacore"
 Issues = "https://github.com/renatomoselli/rpacore/issues"
 Security = "https://github.com/renatomoselli/rpacore/security/advisories/new"
