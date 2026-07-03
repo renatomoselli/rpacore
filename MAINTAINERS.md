@@ -28,3 +28,6 @@ verifier checks markdown links in `README.md`, `CHANGELOG.md`, `SECURITY.md`,
 A release owner must verify the release manifest, artifact hashes, package
 metadata, documentation checks, installed-wheel validation, and rollback or
 hotfix path before publication.
+
+See [Governance and Release Process](docs/governance.md) for decision records,
+required checks, examples alignment, and release ownership details.

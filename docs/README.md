@@ -23,6 +23,9 @@ Use this documentation map as the public v0.1.0 entry point:
   surfaces, credentials, paths, notifications, and review checklist.
 - [Supply Chain](supply-chain.md): dependency inventory, artifact checks,
   publishing posture, and dependency update policy.
+- [Governance and Release Process](governance.md): decision records, review
+  areas, required checks, release ownership, examples-repo alignment, and
+  compatibility policy.
 - [Testing Skills](testing.md): plain pytest patterns for user-authored skills.
 - [Public Submodule Policy](public-submodules.md): supported import boundary for
   v0.1.0.

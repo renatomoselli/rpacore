@@ -34,6 +34,8 @@ On POSIX shells, use `.venv/bin/python` instead of `.venv\Scripts\python`.
   notes in `CHANGELOG.md` when user-visible.
 - Generated-project changes must keep strict checkpoint persistence clear.
 - Runtime dependency changes require a documented dependency decision.
+- Release-impacting public API, schema, export, CLI, dependency, or generated
+  project changes should follow [Governance and Release Process](docs/governance.md).
 
 ## Validation
 

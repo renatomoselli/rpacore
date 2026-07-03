@@ -36,3 +36,6 @@ Before v1.0, compatibility is still conservative: documented v0.1 public APIs,
 storage schemas, export formats, and CLI behavior should not break without a
 documented correctness, security, or release-blocking reason. Additive changes
 should include tests and public documentation.
+
+See [Governance and Release Process](docs/governance.md) for the decision and
+release-readiness process behind compatibility-impacting changes.

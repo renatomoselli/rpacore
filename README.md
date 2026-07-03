@@ -54,6 +54,7 @@ Community and release-readiness routes:
 - [Support](SUPPORT.md)
 - [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Maintainers](MAINTAINERS.md)
+- [Governance and Release Process](docs/governance.md)
 
 ## Quick Start
 
