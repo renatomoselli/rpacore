@@ -967,7 +967,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--examples-repo", type=Path, default=Path.cwd().parent / "rpacore-examples")
-    parser.add_argument("--output-dir", type=Path, default=Path(".rpiv/artifacts/examples-wheel-validation"))
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("validation-artifacts/examples-wheel-validation"),
+        help="Directory for the JSON and Markdown validation evidence.",
+    )
     parser.add_argument("--work-dir", type=Path, default=Path(tempfile.gettempdir()) / "rpacore-examples-wheel-validation")
     parser.add_argument(
         "--venv-mode",

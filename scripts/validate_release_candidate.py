@@ -68,6 +68,7 @@ WINDOWS_RESERVED_NAMES = {
     "NUL",
     "PRN",
 }
+# Glob-based private path rules used by source-copy ignores and archive checks.
 COPY_IGNORE_PATTERNS = ("*.egg-info", "*.pyc", "*.pyo")
 PYTEST_COUNT_PATTERN = re.compile(
     r"\b(?P<count>\d+)\s+(?P<status>passed|failed|skipped|xfailed|xpassed|errors?)\b"
@@ -325,6 +326,7 @@ def _artifact_records(wheelhouse: Path) -> list[dict[str, Any]]:
                 "sha256": _sha256(path),
                 "size_bytes": path.stat().st_size,
                 "contains_license": any(name.endswith("LICENSE") for name in names),
+                "contains_notice": any(name.endswith("NOTICE") for name in names),
                 "contains_metadata": _contains_package_metadata(names, is_wheel=is_wheel),
                 "contains_record": any(name.endswith(".dist-info/RECORD") for name in names),
                 "contains_entry_points": any(name.endswith(".dist-info/entry_points.txt") for name in names),
@@ -347,6 +349,8 @@ def _private_archive_path_match(name: str) -> str | None:
     for part in PurePosixPath(name).parts:
         if part in COPY_IGNORE_NAMES:
             return part
+        if any(fnmatch.fnmatch(part, pattern) for pattern in COPY_IGNORE_PATTERNS):
+            return part
     return None
 
 
@@ -367,8 +371,12 @@ def _validate_artifact_records(records: list[dict[str, Any]]) -> None:
             raise ValidationError(f"release artifact contains private paths: {name}{detail}")
         if not record["contains_license"]:
             raise ValidationError(f"release artifact missing license file: {name}")
+        if not record["contains_notice"]:
+            raise ValidationError(f"release artifact missing notice file: {name}")
         if not record["contains_metadata"]:
             raise ValidationError(f"release artifact missing package metadata: {name}")
+        if record["contains_examples"]:
+            raise ValidationError(f"release artifact contains examples directory: {name}")
         if name.endswith(".whl"):
             if not record["contains_record"]:
                 raise ValidationError(f"wheel missing RECORD metadata: {name}")

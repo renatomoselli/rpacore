@@ -46,7 +46,7 @@ validation steps pass.
 
 Inspect archive contents so generated examples, private notes, local caches,
 credentials, and review artifacts do not ship in the package. The wheel should
-contain the `rpacore` package, metadata, license information, and the `rpacore`
+contain the `rpacore` package, metadata, `LICENSE`, `NOTICE`, and the `rpacore`
 console entry point.
 
 ## CI and Publishing

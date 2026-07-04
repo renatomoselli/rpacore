@@ -37,5 +37,28 @@ storage schemas, export formats, and CLI behavior should not break without a
 documented correctness, security, or release-blocking reason. Additive changes
 should include tests and public documentation.
 
+RPA Core uses semantic-versioned releases beginning with v0.1.0:
+
+- patch releases should preserve documented public APIs, CLI behavior, storage
+  schemas, export formats, and generated-project persistence patterns
+- minor releases may add documented APIs or behavior, but should avoid breaking
+  existing v0.1 users without a recorded migration reason
+- breaking changes before v1.0 require a changelog entry, public migration
+  guidance, and focused validation evidence
+
+Deprecations should remain documented for at least one patch release when that
+is practical. A deprecation can be shortened only for correctness, security,
+data-loss, or release-blocking reasons.
+
+SQLite schemas and JSON/NDJSON export formats use explicit version fields.
+Readers should reject newer unsupported versions loudly rather than silently
+misinterpreting data. Additive fields are preferred when they preserve existing
+records and documented parsing behavior.
+
+Optional dependencies and platform-specific examples are supported only within
+their documented scope. A problem in an optional library, browser driver,
+desktop application, external service, or manual account may be redirected when
+the RPA Core framework contract is not the failing component.
+
 See [Governance and Release Process](docs/governance.md) for the decision and
 release-readiness process behind compatibility-impacting changes.

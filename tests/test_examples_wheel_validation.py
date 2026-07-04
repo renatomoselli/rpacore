@@ -1237,6 +1237,14 @@ class TestExamplesWheelValidationScript:
         assert command.timed_out is True
         assert "timed out" in command.stderr
 
+    def test_parser_defaults_write_to_public_validation_artifacts_dir(self) -> None:
+        script = _load_script()
+
+        args = script.build_parser().parse_args([])
+
+        assert args.output_dir == Path("validation-artifacts/examples-wheel-validation")
+        assert ".rpiv" not in args.output_dir.parts
+
     def test_main_returns_failure_when_required_command_fails(self, tmp_path: Path) -> None:
         script = _load_script()
 

@@ -37,6 +37,8 @@ Thumbs.db
 .pytest-tmp/
 .coverage
 htmlcov/
+# Default output from scripts/validate_examples_against_wheel.py.
+validation-artifacts/
 
 # SQLite databases (created at runtime)
 *.db

@@ -18,6 +18,11 @@ The generated `main.py` uses `Engine.run(checkpoint=...)` and
 `save_transaction()` so the scaffold demonstrates strict checkpoint persistence
 with public APIs.
 
+RPA Core distributions include the framework's `LICENSE` and `NOTICE`. The
+generated project does not copy those files or add a package license field,
+because the generated automation is user-owned project code. Add your own
+license or provenance files when you publish or share it.
+
 Exit codes:
 
 - `0`: project created

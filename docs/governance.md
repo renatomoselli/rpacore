@@ -77,6 +77,8 @@ Before a release freeze or public visibility change, maintainers should verify:
   large binaries
 - package metadata, repository description, topics, documentation URL, issue
   URL, and security URL point to the intended public project
+- generated project scaffolds do not inherit framework legal files or impose a
+  license on user-owned automation
 - branch protection and required checks match the release branch policy above
 
 ## Release Ownership

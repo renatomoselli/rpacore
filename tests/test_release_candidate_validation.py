@@ -567,10 +567,12 @@ class TestReleaseCandidateValidationScript:
             archive.writestr("rpacore-0.1.0.dist-info/RECORD", "")
             archive.writestr("rpacore-0.1.0.dist-info/entry_points.txt", "")
             archive.writestr("rpacore-0.1.0.dist-info/licenses/LICENSE", "")
+            archive.writestr("rpacore-0.1.0.dist-info/licenses/NOTICE", "")
         sdist_root = tmp_path / "sdist" / "rpacore-0.1.0"
         sdist_root.mkdir(parents=True)
         (sdist_root / "PKG-INFO").write_text("", encoding="utf-8")
         (sdist_root / "LICENSE").write_text("", encoding="utf-8")
+        (sdist_root / "NOTICE").write_text("", encoding="utf-8")
         with tarfile.open(sdist, "w:gz") as archive:
             archive.add(sdist_root, arcname="rpacore-0.1.0")
 
@@ -580,10 +582,12 @@ class TestReleaseCandidateValidationScript:
         assert records[wheel.name]["contains_record"] is True
         assert records[wheel.name]["contains_entry_points"] is True
         assert records[wheel.name]["contains_license"] is True
+        assert records[wheel.name]["contains_notice"] is True
         assert records[wheel.name]["contains_private_paths"] is False
         assert records[wheel.name]["private_paths"] == []
         assert records[sdist.name]["contains_metadata"] is True
         assert records[sdist.name]["contains_license"] is True
+        assert records[sdist.name]["contains_notice"] is True
 
     def test_private_archive_path_detection_matches_copy_ignore_names(self) -> None:
         module = _load_script()
@@ -591,6 +595,10 @@ class TestReleaseCandidateValidationScript:
         for private_name in module.COPY_IGNORE_NAMES:
             assert module._is_private_archive_path(f"rpacore-0.1.0/{private_name}/file.txt") is True
             assert module._private_archive_path_match(f"rpacore-0.1.0/{private_name}/file.txt") == private_name
+        for private_pattern in module.COPY_IGNORE_PATTERNS:
+            private_name = private_pattern.replace("*", "module")
+            assert module._is_private_archive_path(f"rpacore-0.1.0/{private_name}") is True
+            assert module._private_archive_path_match(f"rpacore-0.1.0/{private_name}") == private_name
         assert module._is_private_archive_path("rpacore-0.1.0/rpacore/__init__.py") is False
         assert module._private_archive_path_match("rpacore-0.1.0/rpacore/__init__.py") is None
 
@@ -629,7 +637,9 @@ class TestReleaseCandidateValidationScript:
                         "name": "rpacore-0.1.0.tar.gz",
                         "contains_private_paths": True,
                         "contains_license": True,
+                        "contains_notice": True,
                         "contains_metadata": True,
+                        "contains_examples": False,
                         "private_paths": ["rpacore-0.1.0/__pycache__/module.pyc"],
                     }
                 ]
@@ -652,7 +662,9 @@ class TestReleaseCandidateValidationScript:
                         "name": "rpacore-0.1.0-py3-none-any.whl",
                         "contains_private_paths": False,
                         "contains_license": True,
+                        "contains_notice": True,
                         "contains_metadata": True,
+                        "contains_examples": False,
                         "contains_record": True,
                         "contains_entry_points": False,
                     }
@@ -660,6 +672,48 @@ class TestReleaseCandidateValidationScript:
             )
         except module.ValidationError as exc:
             assert str(exc) == "wheel missing console entry point metadata: rpacore-0.1.0-py3-none-any.whl"
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_validate_artifact_records_rejects_missing_notice(self) -> None:
+        module = _load_script()
+
+        try:
+            module._validate_artifact_records(
+                [
+                    {
+                        "name": "rpacore-0.1.0.tar.gz",
+                        "contains_private_paths": False,
+                        "contains_license": True,
+                        "contains_notice": False,
+                        "contains_metadata": True,
+                        "contains_examples": False,
+                    }
+                ]
+            )
+        except module.ValidationError as exc:
+            assert str(exc) == "release artifact missing notice file: rpacore-0.1.0.tar.gz"
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_validate_artifact_records_rejects_examples_directory(self) -> None:
+        module = _load_script()
+
+        try:
+            module._validate_artifact_records(
+                [
+                    {
+                        "name": "rpacore-0.1.0.tar.gz",
+                        "contains_private_paths": False,
+                        "contains_license": True,
+                        "contains_notice": True,
+                        "contains_metadata": True,
+                        "contains_examples": True,
+                    }
+                ]
+            )
+        except module.ValidationError as exc:
+            assert str(exc) == "release artifact contains examples directory: rpacore-0.1.0.tar.gz"
         else:
             raise AssertionError("Expected ValidationError")
 
@@ -1070,6 +1124,7 @@ dev = ["pytest"]
                     "sha256": "wheel-sha",
                     "size_bytes": 5,
                     "contains_license": True,
+                    "contains_notice": True,
                     "contains_metadata": True,
                     "contains_record": True,
                     "contains_entry_points": True,
@@ -1083,6 +1138,7 @@ dev = ["pytest"]
                     "sha256": "sdist-sha",
                     "size_bytes": 5,
                     "contains_license": True,
+                    "contains_notice": True,
                     "contains_metadata": True,
                     "contains_record": False,
                     "contains_entry_points": False,
@@ -1206,6 +1262,7 @@ name = "rpacore"
                     "sha256": "wheel-sha",
                     "size_bytes": 5,
                     "contains_license": False,
+                    "contains_notice": True,
                     "contains_metadata": True,
                     "contains_record": True,
                     "contains_entry_points": True,

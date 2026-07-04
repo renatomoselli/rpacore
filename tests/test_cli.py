@@ -206,6 +206,8 @@ class TestCliInit:
         assert (project / "skills" / "greeting.py").exists()
         assert (project / "tests" / "test_greeting_skill.py").exists()
         assert (project / ".gitignore").exists()
+        assert not (project / "LICENSE").exists()
+        assert not (project / "NOTICE").exists()
 
         run_result = run_cli("run", cwd=project)
 
