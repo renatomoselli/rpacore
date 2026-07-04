@@ -34,7 +34,8 @@ python scripts/validate_installed_wheel.py --repo-root . --wheel-dir dist
 
 Record SHA-256 hashes for every wheel and source distribution that will be
 published. Publication should upload the prebuilt, checked artifacts; do not
-rebuild during upload.
+rebuild during upload. The release manifest and go/no-go decision are described
+in [Release Rehearsal](release-rehearsal.md).
 
 The release-candidate validator accepts wheels and `.tar.gz` source
 distributions, then records artifact hashes, dependency inventory, package

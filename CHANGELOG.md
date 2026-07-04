@@ -28,6 +28,10 @@ deterministic Python automation.
 - Optional OS credential-store integration via the `keyring` extra.
 - Repository settings documentation for release metadata, branch
   protection, required checks, and issue/security routes.
+- Release rehearsal documentation for freeze inputs, evidence, examples
+  validation, and go/no-go decisions.
+- Release manifest preparation script for combining framework and examples
+  rehearsal evidence into a go/no-go draft.
 
 ### Compatibility
 

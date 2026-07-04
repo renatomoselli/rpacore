@@ -28,6 +28,8 @@ Use this documentation map as the public v0.1.0 entry point:
   compatibility policy.
 - [Repository Settings](repository-settings.md): public repository metadata,
   branch protection, required checks, and issue/security routes.
+- [Release Rehearsal](release-rehearsal.md): freeze inputs, release manifest,
+  required checks, examples evidence, and go/no-go decision.
 - [Testing Skills](testing.md): plain pytest patterns for user-authored skills.
 - [Public Submodule Policy](public-submodules.md): supported import boundary for
   v0.1.0.

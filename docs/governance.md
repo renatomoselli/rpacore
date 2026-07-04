@@ -62,7 +62,8 @@ The release branch should require the CI jobs that prove the public product:
 
 Local release rehearsal may run stricter checks than CI. Publication still uses
 the frozen prebuilt artifacts and the release manifest evidence; do not rebuild
-artifacts during upload.
+artifacts during upload. See [Release Rehearsal](release-rehearsal.md) for the
+manifest and go/no-go decision shape.
 
 ## Repository Hygiene
 
