@@ -76,7 +76,8 @@ Before a release freeze or public visibility change, maintainers should verify:
   review artifacts, local checkout paths, stale project names, or accidental
   large binaries
 - package metadata, repository description, topics, documentation URL, issue
-  URL, and security URL point to the intended public project
+  URL, and security URL point to the intended public project; see
+  [Repository Settings](repository-settings.md)
 - generated project scaffolds do not inherit framework legal files or impose a
   license on user-owned automation
 - branch protection and required checks match the release branch policy above

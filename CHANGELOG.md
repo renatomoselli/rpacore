@@ -26,6 +26,8 @@ deterministic Python automation.
 - JSON-safe durable transaction state, metadata, history, and artifact records.
 - Optional screenshot capture via the `screenshots` extra.
 - Optional OS credential-store integration via the `keyring` extra.
+- Repository settings documentation for release metadata, branch
+  protection, required checks, and issue/security routes.
 
 ### Compatibility
 
