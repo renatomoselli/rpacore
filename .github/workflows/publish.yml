@@ -1,0 +1,121 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_confirm:
+        description: "Type: publish rpacore <pyproject version> to pypi"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  confirm:
+    name: Confirm release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read package version
+        id: version
+        run: |
+          version="$(python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          print(pyproject["project"]["version"])
+          PY
+          )"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Confirm publish request
+        run: |
+          expected="publish rpacore ${{ steps.version.outputs.version }} to pypi"
+          if [ "${{ github.event.inputs.publish_confirm }}" != "$expected" ]; then
+            echo "Expected confirmation: $expected"
+            exit 1
+          fi
+
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    needs: confirm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade ".[dev]"
+
+      - name: Verify docs
+        run: python scripts/verify_docs.py --repo-root .
+
+      - name: Run tests
+        run: python -m pytest
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Check distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Validate installed wheel
+        run: python scripts/validate_installed_wheel.py --repo-root . --wheel-dir dist
+
+      - name: Generate SHA-256 checksums
+        run: |
+          mkdir checksums
+          python - <<'PY'
+          from hashlib import sha256
+          from pathlib import Path
+
+          lines = []
+          for path in sorted(Path("dist").iterdir()):
+              if path.is_file():
+                  lines.append(f"{sha256(path.read_bytes()).hexdigest()}  {path.name}")
+          Path("checksums/SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+          cp checksums/SHA256SUMS.txt "checksums/rpacore-${{ needs.confirm.outputs.version }}-SHA256SUMS.txt"
+
+      - name: Upload checked distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpacore-dist
+          path: dist/*
+
+      - name: Upload distribution checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpacore-dist-checksums
+          path: checksums/*
+
+  publish:
+    name: Publish checked distributions
+    runs-on: ubuntu-latest
+    needs: build
+    environment: pypi
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download checked distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: rpacore-dist
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
