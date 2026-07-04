@@ -68,8 +68,9 @@ WINDOWS_RESERVED_NAMES = {
     "NUL",
     "PRN",
 }
-# Glob-based private path rules used by source-copy ignores and archive checks.
+# Glob-based generated file rules used by source-copy ignores.
 COPY_IGNORE_PATTERNS = ("*.egg-info", "*.pyc", "*.pyo")
+ARCHIVE_PRIVATE_PATTERNS = ("*.pyc", "*.pyo")
 PYTEST_COUNT_PATTERN = re.compile(
     r"\b(?P<count>\d+)\s+(?P<status>passed|failed|skipped|xfailed|xpassed|errors?)\b"
 )
@@ -317,7 +318,7 @@ def _artifact_records(wheelhouse: Path) -> list[dict[str, Any]]:
         private_paths = sorted(
             name
             for name in names
-            if _private_archive_path_match(name) is not None
+            if _private_archive_path_match(name, is_wheel=is_wheel) is not None
         )
         records.append(
             {
@@ -342,14 +343,16 @@ def _artifact_records(wheelhouse: Path) -> list[dict[str, Any]]:
 
 
 def _is_private_archive_path(name: str) -> bool:
-    return _private_archive_path_match(name) is not None
+    return _private_archive_path_match(name, is_wheel=True) is not None
 
 
-def _private_archive_path_match(name: str) -> str | None:
+def _private_archive_path_match(name: str, *, is_wheel: bool) -> str | None:
     for part in PurePosixPath(name).parts:
         if part in COPY_IGNORE_NAMES:
             return part
-        if any(fnmatch.fnmatch(part, pattern) for pattern in COPY_IGNORE_PATTERNS):
+        if is_wheel and fnmatch.fnmatch(part, "*.egg-info"):
+            return part
+        if any(fnmatch.fnmatch(part, pattern) for pattern in ARCHIVE_PRIVATE_PATTERNS):
             return part
     return None
 
@@ -557,16 +560,29 @@ def _transaction_ids(transactions: list[dict[str, Any]]) -> list[str]:
     return tx_ids
 
 
-def _installed_smoke_code(repo_root: Path) -> str:
+def _installed_smoke_code(
+    *,
+    repo_root: Path,
+    source_copy: Path,
+    allowed_install_root: Path,
+) -> str:
     return f"""
 import json
 from pathlib import Path
 
 import rpacore
 
-repo_root = Path({str(repo_root.resolve())!r})
+forbidden_roots = [
+    Path({str(repo_root.resolve())!r}),
+    Path({str(source_copy.resolve())!r}),
+]
+allowed_install_root = Path({str(allowed_install_root.resolve())!r})
 module_file = Path(rpacore.__file__).resolve()
-if module_file.is_relative_to(repo_root.resolve()):
+if any(
+    module_file.is_relative_to(root.resolve())
+    and not module_file.is_relative_to(allowed_install_root.resolve())
+    for root in forbidden_roots
+):
     raise SystemExit(f"imported rpacore from checkout: {{module_file}}")
 
 missing = [name for name in rpacore.__all__ if not hasattr(rpacore, name)]
@@ -773,7 +789,23 @@ def validate_release_candidate(
         commands.append(_run("create_venv", [sys.executable, "-m", "venv", str(venv_dir)], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
         python = _venv_python(venv_dir)
         commands.append(_run("install_wheel", [str(python), "-m", "pip", "install", str(wheel)], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
-        commands.append(_run("installed_import_smoke", [str(python), "-c", _installed_smoke_code(repo_root)], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
+        commands.append(
+            _run(
+                "installed_import_smoke",
+                [
+                    str(python),
+                    "-c",
+                    _installed_smoke_code(
+                        repo_root=repo_root,
+                        source_copy=framework_copy,
+                        allowed_install_root=venv_dir,
+                    ),
+                ],
+                cwd=outside_dir,
+                allowed_roots=allowed_run_roots,
+                env=env,
+            )
+        )
         commands[-1].parsed = _parse_json_output(commands[-1])
 
         rpacore_cli = _venv_script(venv_dir, "rpacore")

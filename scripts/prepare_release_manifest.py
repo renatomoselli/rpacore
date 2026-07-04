@@ -17,6 +17,7 @@ MANIFEST_NAME = "release-manifest.json"
 SUMMARY_NAME = "release-go-no-go.md"
 GIT_TIMEOUT_SECONDS = 30
 EVIDENCE_STATUSES = frozenset({"pass", "fail"})
+EXPECTED_LICENSE = "Apache-2.0"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -159,6 +160,42 @@ def _optional_dict(mapping: dict[str, Any], key: str, *, label: str) -> dict[str
     return value
 
 
+def _metadata_license_files(pyproject: dict[str, Any], project: dict[str, Any]) -> list[Any]:
+    if "license-files" in project:
+        license_files = _optional_list(project, "license-files", label="pyproject.toml project")
+    else:
+        tool = _optional_dict(pyproject, "tool", label="pyproject.toml")
+        setuptools = _optional_dict(tool, "setuptools", label="pyproject.toml tool")
+        if "license-files" not in setuptools:
+            raise ManifestError("pyproject.toml missing license-files")
+        license_files = _optional_list(
+            setuptools,
+            "license-files",
+            label="pyproject.toml tool.setuptools",
+        )
+    if not license_files:
+        raise ManifestError("pyproject.toml license-files must not be empty")
+    return license_files
+
+
+def _metadata_license(project: dict[str, Any]) -> str:
+    value = project.get("license")
+    license_text: str | None = None
+    if isinstance(value, str) and value:
+        license_text = value
+    elif isinstance(value, dict):
+        text = value.get("text")
+        if isinstance(text, str) and text:
+            license_text = text
+    if license_text is None:
+        raise ManifestError("pyproject.toml project missing license")
+    if license_text != EXPECTED_LICENSE:
+        raise ManifestError(
+            f"pyproject.toml project license must be {EXPECTED_LICENSE!r}, got {license_text!r}"
+        )
+    return license_text
+
+
 def _release_environment(release_candidate: dict[str, Any]) -> dict[str, Any]:
     platform_info = release_candidate.get("platform")
     python_info = release_candidate.get("python")
@@ -166,11 +203,16 @@ def _release_environment(release_candidate: dict[str, Any]) -> dict[str, Any]:
         raise ManifestError("release-candidate evidence missing platform object")
     if not isinstance(python_info, dict):
         raise ManifestError("release-candidate evidence missing python object")
+    machine = platform_info.get("machine")
+    if not isinstance(machine, str) or not machine:
+        machine = platform_info.get("architecture")
+    if not isinstance(machine, str) or not machine:
+        machine = "unknown"
     return {
         "platform": {
             "system": _require_string(platform_info, "system", label="release-candidate platform"),
             "release": _require_string(platform_info, "release", label="release-candidate platform"),
-            "machine": _require_string(platform_info, "machine", label="release-candidate platform"),
+            "machine": machine,
             "architecture": platform_info.get("architecture"),
         },
         "python": {
@@ -201,8 +243,8 @@ def _expected_pypi_metadata(repo_root: Path) -> dict[str, Any]:
         "version": version,
         "description": project.get("description"),
         "requires_python": project.get("requires-python"),
-        "license": project.get("license"),
-        "license_files": _optional_list(project, "license-files", label="pyproject.toml project"),
+        "license": _metadata_license(project),
+        "license_files": _metadata_license_files(pyproject, project),
         "urls": _optional_dict(project, "urls", label="pyproject.toml project"),
     }
 

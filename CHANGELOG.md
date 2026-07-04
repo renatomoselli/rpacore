@@ -37,6 +37,8 @@ deterministic Python automation.
 
 - Python 3.11, 3.12, and 3.13 are supported.
 - Runtime dependencies remain empty by default.
+- Package license metadata uses the PEP 621 table form, with license file
+  inclusion configured through the current build backend.
 - The supported import boundary is the top-level `rpacore` package.
 - `transaction_db_path` is the public transaction database config key.
 - `ProcessContext.state` stores durable shared state; `ProcessContext.resources`

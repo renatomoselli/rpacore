@@ -434,6 +434,74 @@ class TestReleaseCandidateValidationScript:
         assert issubclass(module.ValidationError, ValidationFailure)
         assert module.ValidationError is SharedValidationError
 
+    def test_installed_smoke_code_allows_owned_venv_inside_repo_and_rejects_source_copy(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module = _load_script()
+        repo_root = tmp_path / "repo"
+        source_copy = tmp_path / "source-copy" / "rpacore"
+        install_root = repo_root / ".rpiv" / "work" / "venv"
+        site_packages = (
+            install_root
+            / "lib"
+            / f"python{sys.version_info.major}.{sys.version_info.minor}"
+            / "site-packages"
+        )
+        system_site_packages = tmp_path / "system-site-packages"
+        installed_package = site_packages / "rpacore"
+        system_installed_package = system_site_packages / "rpacore"
+        source_package = source_copy / "rpacore"
+        installed_package.mkdir(parents=True)
+        system_installed_package.mkdir(parents=True)
+        source_package.mkdir(parents=True)
+        package_text = "__version__ = '0.1.0'\n__all__ = []\n"
+        (installed_package / "__init__.py").write_text(package_text, encoding="utf-8")
+        (system_installed_package / "__init__.py").write_text(package_text, encoding="utf-8")
+        (source_package / "__init__.py").write_text(package_text, encoding="utf-8")
+        code = module._installed_smoke_code(
+            repo_root=repo_root,
+            source_copy=source_copy,
+            allowed_install_root=install_root,
+        )
+
+        env = {**os.environ, "PYTHONPATH": str(site_packages)}
+        installed_result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=tmp_path,
+            check=False,
+        )
+
+        assert installed_result.returncode == 0
+
+        env["PYTHONPATH"] = str(system_site_packages)
+        system_result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=tmp_path,
+            check=False,
+        )
+
+        assert system_result.returncode == 0
+
+        env["PYTHONPATH"] = str(source_copy)
+        source_result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=tmp_path,
+            check=False,
+        )
+
+        assert source_result.returncode == 1
+        assert "imported rpacore from checkout" in source_result.stderr
+
     def test_pytest_counts_handles_common_summary_forms(self) -> None:
         module = _load_script()
 
@@ -573,6 +641,9 @@ class TestReleaseCandidateValidationScript:
         (sdist_root / "PKG-INFO").write_text("", encoding="utf-8")
         (sdist_root / "LICENSE").write_text("", encoding="utf-8")
         (sdist_root / "NOTICE").write_text("", encoding="utf-8")
+        sdist_egg_info = sdist_root / "rpacore.egg-info"
+        sdist_egg_info.mkdir()
+        (sdist_egg_info / "PKG-INFO").write_text("", encoding="utf-8")
         with tarfile.open(sdist, "w:gz") as archive:
             archive.add(sdist_root, arcname="rpacore-0.1.0")
 
@@ -588,19 +659,79 @@ class TestReleaseCandidateValidationScript:
         assert records[sdist.name]["contains_metadata"] is True
         assert records[sdist.name]["contains_license"] is True
         assert records[sdist.name]["contains_notice"] is True
+        assert records[sdist.name]["contains_private_paths"] is False
+        assert records[sdist.name]["private_paths"] == []
 
     def test_private_archive_path_detection_matches_copy_ignore_names(self) -> None:
         module = _load_script()
 
         for private_name in module.COPY_IGNORE_NAMES:
             assert module._is_private_archive_path(f"rpacore-0.1.0/{private_name}/file.txt") is True
-            assert module._private_archive_path_match(f"rpacore-0.1.0/{private_name}/file.txt") == private_name
-        for private_pattern in module.COPY_IGNORE_PATTERNS:
+            assert (
+                module._private_archive_path_match(
+                    f"rpacore-0.1.0/{private_name}/file.txt",
+                    is_wheel=True,
+                )
+                == private_name
+            )
+        for private_pattern in module.ARCHIVE_PRIVATE_PATTERNS:
             private_name = private_pattern.replace("*", "module")
             assert module._is_private_archive_path(f"rpacore-0.1.0/{private_name}") is True
-            assert module._private_archive_path_match(f"rpacore-0.1.0/{private_name}") == private_name
+            assert (
+                module._private_archive_path_match(
+                    f"rpacore-0.1.0/{private_name}",
+                    is_wheel=True,
+                )
+                == private_name
+            )
+        assert module._is_private_archive_path("rpacore-0.1.0/rpacore.egg-info/PKG-INFO") is True
+        assert (
+            module._private_archive_path_match(
+                "rpacore-0.1.0/rpacore.egg-info/PKG-INFO",
+                is_wheel=True,
+            )
+            == "rpacore.egg-info"
+        )
+        assert (
+            module._private_archive_path_match(
+                "rpacore-0.1.0/rpacore.egg-info/PKG-INFO",
+                is_wheel=False,
+            )
+            is None
+        )
         assert module._is_private_archive_path("rpacore-0.1.0/rpacore/__init__.py") is False
-        assert module._private_archive_path_match("rpacore-0.1.0/rpacore/__init__.py") is None
+        assert (
+            module._private_archive_path_match(
+                "rpacore-0.1.0/rpacore/__init__.py",
+                is_wheel=True,
+            )
+            is None
+        )
+
+    def test_artifact_records_reject_wheel_egg_info_metadata(self, tmp_path: Path) -> None:
+        module = _load_script()
+        wheel = tmp_path / "rpacore-0.1.0-py3-none-any.whl"
+
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr("rpacore/__init__.py", "")
+            archive.writestr("rpacore-0.1.0.dist-info/METADATA", "")
+            archive.writestr("rpacore-0.1.0.dist-info/RECORD", "")
+            archive.writestr("rpacore-0.1.0.dist-info/entry_points.txt", "")
+            archive.writestr("rpacore-0.1.0.dist-info/licenses/LICENSE", "")
+            archive.writestr("rpacore-0.1.0.dist-info/licenses/NOTICE", "")
+            archive.writestr("rpacore.egg-info/PKG-INFO", "")
+
+        records = module._artifact_records(tmp_path)
+
+        assert records[0]["contains_private_paths"] is True
+        assert records[0]["private_paths"] == ["rpacore.egg-info/PKG-INFO"]
+        try:
+            module._validate_artifact_records(records)
+        except module.ValidationError as exc:
+            assert "release artifact contains private paths" in str(exc)
+            assert "rpacore.egg-info/PKG-INFO" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
 
     def test_artifact_records_reject_unsupported_artifact_types(self, tmp_path: Path) -> None:
         module = _load_script()

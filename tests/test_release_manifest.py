@@ -48,12 +48,14 @@ name = "rpacore"
 version = "0.1.0"
 description = "RPA Core — deterministic, stateful RPA in Python"
 requires-python = ">=3.11"
-license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE"]
+license = { text = "Apache-2.0" }
 
 [project.urls]
 Homepage = "https://github.com/renatomoselli/rpacore"
 Repository = "https://github.com/renatomoselli/rpacore"
+
+[tool.setuptools]
+license-files = ["LICENSE", "NOTICE"]
 """,
         encoding="utf-8",
     )
@@ -64,6 +66,10 @@ def _write_pyproject_without_version(path: Path) -> None:
         """
 [project]
 name = "rpacore"
+license = { text = "Apache-2.0" }
+
+[tool.setuptools]
+license-files = ["LICENSE", "NOTICE"]
 """,
         encoding="utf-8",
     )
@@ -74,21 +80,38 @@ def _write_pyproject_without_name(path: Path) -> None:
         """
 [project]
 version = "0.1.0"
+license = { text = "Apache-2.0" }
+
+[tool.setuptools]
+license-files = ["LICENSE", "NOTICE"]
 """,
         encoding="utf-8",
     )
 
 
-def _write_pyproject_with_invalid_license_files(path: Path, value: str) -> None:
+def _write_pyproject_with_invalid_license_files(path: Path, value: str, *, location: str) -> None:
+    if location == "project":
+        license_files = f"license-files = {value}\n"
+        setuptools_section = ""
+    elif location == "tool.setuptools":
+        license_files = ""
+        setuptools_section = f"""
+[tool.setuptools]
+license-files = {value}
+"""
+    else:
+        raise AssertionError(f"Unsupported license-files location: {location}")
     (path / "pyproject.toml").write_text(
         f"""
 [project]
 name = "rpacore"
 version = "0.1.0"
-license-files = {value}
+license = {{ text = "Apache-2.0" }}
+{license_files}
 
 [project.urls]
 Homepage = "https://github.com/renatomoselli/rpacore"
+{setuptools_section}
 """,
         encoding="utf-8",
     )
@@ -100,8 +123,11 @@ def _write_pyproject_with_invalid_urls(path: Path) -> None:
 [project]
 name = "rpacore"
 version = "0.1.0"
-license-files = ["LICENSE", "NOTICE"]
+license = { text = "Apache-2.0" }
 urls = []
+
+[tool.setuptools]
+license-files = ["LICENSE", "NOTICE"]
 """,
         encoding="utf-8",
     )
@@ -222,6 +248,7 @@ def test_prepare_release_manifest_writes_manifest_and_go_draft(tmp_path: Path) -
     assert manifest["documentation_verification"]["status"] == "passed"
     assert manifest["sbom"]["status"] == "not_produced"
     assert manifest["release"] == {"version": "0.1.0", "tag": "v0.1.0"}
+    assert manifest["expected_pypi_metadata"]["license"] == "Apache-2.0"
     assert manifest["expected_pypi_metadata"]["license_files"] == ["LICENSE", "NOTICE"]
     assert (output_dir / "release-manifest.json").is_file()
     summary = (output_dir / "release-go-no-go.md").read_text(encoding="utf-8")
@@ -339,21 +366,88 @@ def test_prepare_release_manifest_rejects_missing_name(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("license_files_value", ['"LICENSE"', "{}"])
+@pytest.mark.parametrize("location", ["project", "tool.setuptools"])
 def test_prepare_release_manifest_rejects_invalid_license_files(
     tmp_path: Path,
     license_files_value: str,
+    location: str,
 ) -> None:
     script = _load_script()
     repo_root = tmp_path / "rpacore"
     examples_repo = tmp_path / "rpacore-examples"
     repo_root.mkdir()
     examples_repo.mkdir()
-    _write_pyproject_with_invalid_license_files(repo_root, license_files_value)
+    _write_pyproject_with_invalid_license_files(repo_root, license_files_value, location=location)
     _git_init(repo_root)
     _git_init(examples_repo)
     release_candidate, examples_wheel = _write_evidence(tmp_path)
 
     with pytest.raises(script.ManifestError, match="license-files must be a list"):
+        script.prepare_release_manifest(
+            **_manifest_args(
+                repo_root=repo_root,
+                examples_repo=examples_repo,
+                release_candidate=release_candidate,
+                examples_wheel=examples_wheel,
+                output_dir=tmp_path / "out",
+            )
+        )
+
+
+def test_prepare_release_manifest_rejects_missing_license_files(tmp_path: Path) -> None:
+    script = _load_script()
+    repo_root = tmp_path / "rpacore"
+    examples_repo = tmp_path / "rpacore-examples"
+    repo_root.mkdir()
+    examples_repo.mkdir()
+    (repo_root / "pyproject.toml").write_text(
+        """
+[project]
+name = "rpacore"
+version = "0.1.0"
+license = { text = "Apache-2.0" }
+""",
+        encoding="utf-8",
+    )
+    _git_init(repo_root)
+    _git_init(examples_repo)
+    release_candidate, examples_wheel = _write_evidence(tmp_path)
+
+    with pytest.raises(script.ManifestError, match="missing license-files"):
+        script.prepare_release_manifest(
+            **_manifest_args(
+                repo_root=repo_root,
+                examples_repo=examples_repo,
+                release_candidate=release_candidate,
+                examples_wheel=examples_wheel,
+                output_dir=tmp_path / "out",
+            )
+        )
+
+
+def test_prepare_release_manifest_rejects_empty_license_files(tmp_path: Path) -> None:
+    script = _load_script()
+    repo_root = tmp_path / "rpacore"
+    examples_repo = tmp_path / "rpacore-examples"
+    repo_root.mkdir()
+    examples_repo.mkdir()
+    (repo_root / "pyproject.toml").write_text(
+        """
+[project]
+name = "rpacore"
+version = "0.1.0"
+license = { text = "Apache-2.0" }
+
+[tool.setuptools]
+license-files = []
+""",
+        encoding="utf-8",
+    )
+    _git_init(repo_root)
+    _git_init(examples_repo)
+    release_candidate, examples_wheel = _write_evidence(tmp_path)
+
+    with pytest.raises(script.ManifestError, match="license-files must not be empty"):
         script.prepare_release_manifest(
             **_manifest_args(
                 repo_root=repo_root,
@@ -386,6 +480,29 @@ def test_prepare_release_manifest_rejects_invalid_urls(tmp_path: Path) -> None:
                 output_dir=tmp_path / "out",
             )
         )
+
+
+@pytest.mark.parametrize("license_value", ["Apache-2.0", {"text": "Apache-2.0"}])
+def test_metadata_license_accepts_string_and_pep621_text_table(license_value: object) -> None:
+    script = _load_script()
+
+    assert script._metadata_license({"license": license_value}) == "Apache-2.0"
+
+
+@pytest.mark.parametrize("license_value", [None, {}, {"file": "LICENSE"}, {"text": ""}])
+def test_metadata_license_rejects_missing_text(license_value: object) -> None:
+    script = _load_script()
+
+    with pytest.raises(script.ManifestError, match="project missing license"):
+        script._metadata_license({"license": license_value})
+
+
+@pytest.mark.parametrize("license_value", ["Apache-2.O", {"text": "MIT"}])
+def test_metadata_license_rejects_unexpected_license_expression(license_value: object) -> None:
+    script = _load_script()
+
+    with pytest.raises(script.ManifestError, match="project license must be 'Apache-2.0'"):
+        script._metadata_license({"license": license_value})
 
 
 def test_prepare_release_manifest_marks_failed_testpypi_no_go(tmp_path: Path) -> None:
@@ -686,6 +803,40 @@ def test_prepare_release_manifest_rejects_missing_runtime_dependencies(tmp_path:
                 output_dir=tmp_path / "out",
             )
         )
+
+
+def test_release_environment_uses_architecture_when_machine_is_blank() -> None:
+    script = _load_script()
+
+    environment = script._release_environment(
+        {
+            "platform": {
+                "system": "Windows",
+                "release": "10",
+                "machine": "",
+                "architecture": "64bit",
+            },
+            "python": {"version": "3.11.9"},
+        }
+    )
+
+    assert environment["platform"]["machine"] == "64bit"
+
+
+def test_release_environment_uses_unknown_when_machine_and_architecture_are_blank() -> None:
+    script = _load_script()
+
+    environment = script._release_environment(
+        {
+            "platform": {
+                "system": "Windows",
+                "release": "10",
+            },
+            "python": {"version": "3.11.9"},
+        }
+    )
+
+    assert environment["platform"]["machine"] == "unknown"
 
 
 def test_git_output_wraps_missing_git(tmp_path: Path, monkeypatch) -> None:
