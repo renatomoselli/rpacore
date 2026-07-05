@@ -16,7 +16,13 @@ robotic process automations. Define your skills, wire them into a transaction,
 and the framework handles execution order, retry logic, persistence, logging,
 queues, reports, credentials, and notifications.
 
-The long-term product direction is:
+For complete working automations, see the separate
+[RPA Core examples](https://github.com/renatomoselli/rpacore-examples)
+repository. It includes file inbox processing, JSON event log processing,
+database reconciliation, Excel reorganization, checkpoint/resume behavior, API
+batching, and other user-facing examples built against the released package.
+
+The design direction is:
 
 > AI-assisted development, deterministic execution.
 
@@ -356,6 +362,21 @@ integration-style tests for the framework itself:
 - `examples/sample_skill.py`
 - `examples/sample_main.py`
 
+Fuller user-facing automations live in the separate
+[RPA Core examples](https://github.com/renatomoselli/rpacore-examples)
+repository. Start there if you want complete projects that install RPA Core as a
+package and show recommended project structure.
+
+Example projects include:
+
+- file inbox processing
+- JSON event log processing
+- database reconciliation
+- Excel reorganization
+- checkpoint/resume behavior
+- REST API batch processing
+- browser and desktop automation examples
+
 For a step-by-step beginner guide, see [docs/tutorial.md](docs/tutorial.md).
 
 For persistence, migrations, and crash-behavior details, see
@@ -364,22 +385,16 @@ import-boundary references, see [docs/README.md](docs/README.md).
 For vulnerability reporting and local security posture, see
 [SECURITY.md](SECURITY.md) and [docs/security.md](docs/security.md).
 
-For fuller showcase automations, see the examples repository:
+## Local-First Design
 
-- examples repository: `rpacore-examples`
-
-## Local-First Direction
-
-RPA Core Cloud is a future optional orchestrator/control plane. The framework
-itself must stay useful without it:
+RPA Core v0.1.0 is local-first:
 
 - projects remain normal Python repos
 - runs persist locally
 - logs, reports, queues, transactions, and artifacts stay readable
-- future worker/orchestrator contracts should be documented and exportable
 
-Cloud and remote orchestration are not part of v0.1.0; see
-[docs/non-goals.md](docs/non-goals.md).
+Remote orchestration and distributed worker protocols are outside v0.1.0; see
+[docs/non-goals.md](docs/non-goals.md) for current non-goals.
 
 ## Compatibility Baseline
 
