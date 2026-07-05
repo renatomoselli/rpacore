@@ -33,11 +33,17 @@ GitHub topics:
 
 Project URLs:
 
-- homepage: `https://github.com/renatomoselli/rpacore`
+- homepage: `https://rpacore.dev`
 - documentation: `https://github.com/renatomoselli/rpacore/tree/main/docs`
 - repository: `https://github.com/renatomoselli/rpacore`
 - issues: `https://github.com/renatomoselli/rpacore/issues`
 - security: `https://github.com/renatomoselli/rpacore/security/advisories/new`
+
+Canonical web domains:
+
+- primary: `https://rpacore.dev`
+- defensive redirect: `https://rpacore.org`
+- defensive redirect: `https://rpacore.net`
 
 The description, package keywords, and project URLs should match the
 `[project]` and `[project.urls]` metadata in [`pyproject.toml`](../pyproject.toml).

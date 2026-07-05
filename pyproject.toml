@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/renatomoselli/rpacore"
+Homepage = "https://rpacore.dev"
 Documentation = "https://github.com/renatomoselli/rpacore/tree/main/docs"
 Repository = "https://github.com/renatomoselli/rpacore"
 Issues = "https://github.com/renatomoselli/rpacore/issues"

@@ -39,6 +39,7 @@ class TestPackageVersion:
         assert "pytest>=8.1.1" in pyproject["project"]["optional-dependencies"]["dev"]
         assert "twine>=5.1.0" in pyproject["project"]["optional-dependencies"]["dev"]
         assert "wheel>=0.46.2" in pyproject["project"]["optional-dependencies"]["dev"]
+        assert pyproject["project"]["urls"]["Homepage"] == "https://rpacore.dev"
         assert pyproject["project"]["urls"]["Documentation"].endswith("/tree/main/docs")
         for license_file in pyproject["tool"]["setuptools"]["license-files"]:
             assert (pyproject_path.parent / license_file).is_file()

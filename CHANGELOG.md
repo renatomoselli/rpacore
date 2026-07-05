@@ -28,6 +28,8 @@ deterministic Python automation.
 - Optional OS credential-store integration via the `keyring` extra.
 - Repository settings documentation for release metadata, branch
   protection, required checks, and issue/security routes.
+- Canonical `rpacore.dev` homepage metadata, with `rpacore.org` and
+  `rpacore.net` reserved as defensive redirects.
 - Release rehearsal documentation for freeze inputs, evidence, examples
   validation, and go/no-go decisions.
 - Release manifest preparation script for combining framework and examples

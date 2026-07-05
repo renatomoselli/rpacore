@@ -51,7 +51,7 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 
 [project.urls]
-Homepage = "https://github.com/renatomoselli/rpacore"
+Homepage = "https://rpacore.dev"
 Repository = "https://github.com/renatomoselli/rpacore"
 
 [tool.setuptools]
@@ -110,7 +110,7 @@ license = {{ text = "Apache-2.0" }}
 {license_files}
 
 [project.urls]
-Homepage = "https://github.com/renatomoselli/rpacore"
+Homepage = "https://rpacore.dev"
 {setuptools_section}
 """,
         encoding="utf-8",
