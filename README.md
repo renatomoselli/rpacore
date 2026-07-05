@@ -29,6 +29,8 @@ The design direction is:
 That means RPA Core should be friendly to humans and AI coding agents, but the
 runtime remains deterministic. There are no runtime AI dependencies.
 
+![RPA Core concept diagram showing user automation, ProcessContext, Engine, ordered skills, checkpoint persistence, and local outputs/state](https://raw.githubusercontent.com/renatomoselli/rpacore/main/docs/assets/rpacore-concept-diagram.png)
+
 Core traits:
 
 - **Deterministic execution**: predictable behavior, no hidden runtime magic.
