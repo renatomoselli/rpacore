@@ -264,8 +264,8 @@ Persistence is written by user wiring through `save_transaction()`. For strict
 crash boundaries, pass that persistence call as `Engine.run(checkpoint=...)`;
 the engine checkpoints after each transaction or skill state transition. Without
 a checkpoint callback, user code may still save only after `Engine.run()`
-returns. Loading a persisted transaction resets any `IN_PROGRESS` transaction or
-skill to `FAILED`.
+returns. Loading a persisted transaction preserves the stored status; explicit
+recovery happens when user code calls `resume_transaction()`.
 
 ## Configuration
 

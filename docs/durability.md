@@ -58,11 +58,10 @@ exception `screenshot_path` remains intact.
 Artifacts are part of transaction recovery because they are loaded with the
 transaction. They remain attached to the durable transaction that recorded them,
 including interrupted or `IN_PROGRESS` transactions left behind by a failed
-checkpoint. RPA Core does not clean up those records automatically; Task 52 adds
-the queue-to-transaction binding needed to make such stranded transaction records
-discoverable from queue retries. Transaction schema migrations are forward-only;
-older code must reject a newer artifact schema version rather than silently
-ignoring artifact rows.
+checkpoint. RPA Core does not clean up those records automatically; queue-to-
+transaction binding makes stranded transaction records discoverable from queue
+retries. Transaction schema migrations are forward-only; older code must reject
+a newer artifact schema version rather than silently ignoring artifact rows.
 
 Queue resource lifecycle:
 

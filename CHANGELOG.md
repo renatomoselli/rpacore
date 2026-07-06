@@ -2,7 +2,15 @@
 
 All notable user-facing changes are recorded here.
 
-## v0.1.0 - Unreleased
+## v0.1.1 - Unreleased
+
+### Fixed
+
+- Cleaned public documentation and package metadata language after the v0.1.0
+  public release while preserving existing maintainer script names.
+- Kept public docs free of private cloud-planning language.
+
+## v0.1.0 - 2026-07-05
 
 RPA Core v0.1.0 is the first public compatibility baseline for local-first,
 deterministic Python automation.

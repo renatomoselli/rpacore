@@ -8,7 +8,7 @@ remain:
 - `rpacore[screenshots]` installs `mss` for framework-captured screenshots.
 - `rpacore[keyring]` installs `keyring` for OS credential-store integration.
 
-No new runtime dependency is adopted by the Phase 5 architecture.
+No new runtime dependency is adopted by the v0.1.0 architecture.
 
 ## Decision Matrix
 

@@ -41,9 +41,9 @@ Unhandled exceptions from skill code are recorded as system failures.
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
 | `save_transaction(transaction, db_path)` | Save one transaction to SQLite. | Creates or migrates the SQLite database and writes transaction rows. |
-| `load_transaction(transaction_id, db_path)` | Load one transaction from SQLite. | Reads SQLite; resets in-progress persisted state to failed for safe recovery. |
+| `load_transaction(transaction_id, db_path)` | Load one transaction from SQLite. | Reads SQLite and preserves persisted status values. |
 | `list_transactions(db_path)` | List persisted transactions. | Reads SQLite. |
-| `resume_transaction(transaction)` | Prepare a loaded transaction for retry. | Mutates in-memory statuses and appends resume history when needed. |
+| `resume_transaction(transaction_id, skills, db_path=...)` | Load and prepare a persisted transaction for retry. | Mutates in-memory statuses, reattaches executable skills, and appends resume history when needed. |
 | `serialize_transaction(transaction)` | Convert a transaction to JSON-safe data. | No I/O. |
 | `TRANSACTION_FORMAT_VERSION` | Current serialized transaction format version. | No side effects. |
 

@@ -1,7 +1,6 @@
 # Public API and Rejected Feature Audit
 
-This audit closes the Phase 5 review of the intended RPA Core v0.1.0 public
-surface before example adoption.
+This audit records the review of the intended RPA Core v0.1.0 public surface.
 
 ## Public API Boundary
 

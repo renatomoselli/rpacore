@@ -1,7 +1,7 @@
 # Core Validation Migration Audit
 
-This audit closes the Phase 5 decision on whether core modules should adopt the
-public config validation helpers from `rpacore.config_validation`.
+This audit records the decision on whether core modules should adopt the public
+config validation helpers from `rpacore.config_validation`.
 
 The helpers are the supported API for user projects validating plain
 configuration dictionaries. Core modules may still use private validation and
