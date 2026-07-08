@@ -39,7 +39,8 @@ Please include:
 
 The maintainer will acknowledge actionable private reports as availability
 permits, triage severity, and coordinate a fix or disclosure note before public
-details are shared. RPA Core does not promise a cloud-service SLA.
+details are shared. RPA Core does not provide a service-level agreement for user
+automations or third-party systems.
 
 Issues that affect user-authored automation code, third-party services, or
 optional dependency behavior may be redirected when they are outside the

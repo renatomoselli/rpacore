@@ -33,15 +33,17 @@ class TestPackageVersion:
 
         pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
-        assert pyproject["project"]["license"] == {"text": "Apache-2.0"}
-        assert "license-files" not in pyproject["project"]
-        assert pyproject["tool"]["setuptools"]["license-files"] == ["LICENSE", "NOTICE"]
+        assert pyproject["project"]["license"] == "Apache-2.0"
+        assert pyproject["build-system"]["requires"] == ["setuptools>=77.0.0", "wheel"]
+        assert pyproject["build-system"]["build-backend"] == "setuptools.build_meta"
+        assert pyproject["project"]["license-files"] == ["LICENSE", "NOTICE"]
+        assert "license-files" not in pyproject.get("tool", {}).get("setuptools", {})
         assert "pytest>=8.1.1" in pyproject["project"]["optional-dependencies"]["dev"]
         assert "twine>=5.1.0" in pyproject["project"]["optional-dependencies"]["dev"]
         assert "wheel>=0.46.2" in pyproject["project"]["optional-dependencies"]["dev"]
         assert pyproject["project"]["urls"]["Homepage"] == "https://rpacore.dev"
         assert pyproject["project"]["urls"]["Documentation"].endswith("/tree/main/docs")
-        for license_file in pyproject["tool"]["setuptools"]["license-files"]:
+        for license_file in pyproject["project"]["license-files"]:
             assert (pyproject_path.parent / license_file).is_file()
 
     def test_public_repository_readiness_files_exist(self) -> None:

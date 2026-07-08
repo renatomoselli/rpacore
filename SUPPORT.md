@@ -25,10 +25,10 @@ Some user automations or optional dependencies may be platform-specific.
 
 ## Boundaries
 
-The project does not provide a cloud service SLA. Issues in user-authored
-automation code, third-party websites, desktop applications, credentials,
-network services, or optional libraries may be redirected when they are outside
-the framework boundary.
+The project does not provide a service-level agreement for user automations or
+third-party systems. Issues in user-authored automation code, third-party
+websites, desktop applications, credentials, network services, or optional
+libraries may be redirected when they are outside the framework boundary.
 
 ## Compatibility Policy
 

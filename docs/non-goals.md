@@ -3,7 +3,7 @@
 RPA Core v0.1.0 intentionally does not ship:
 
 - runtime AI behavior or AI service calls
-- a cloud orchestrator or remote worker protocol
+- a managed execution service or remote worker protocol
 - automatic skill discovery or configuration-defined pipelines
 - generic per-skill hard timeouts or arbitrary cancellation
 - async execution

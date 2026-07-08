@@ -98,7 +98,7 @@ contents.
 
 ## Decision
 
-Do not add `SkillTestCase` for v0.1.0. Plain pytest tests with direct
+Do not add `SkillTestCase` for the `0.1.x` release line. Plain pytest tests with direct
 `ProcessContext` construction cover the demonstrated skill-testing needs:
 business exceptions, system exceptions, durable state, artifact records, and
 engine-level retry/status behavior where needed.

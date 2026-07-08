@@ -2,13 +2,22 @@
 
 All notable user-facing changes are recorded here.
 
-## v0.1.1 - Unreleased
+## Unreleased
+
+### Changed
+
+- Updated public docs to describe the maintained `0.1.x` release line where the
+  wording applies to current documentation and API coverage.
+- Moved package license-file metadata to `project.license-files` and declared an
+  explicit setuptools build backend to avoid deprecated build configuration.
+
+## v0.1.1 - 2026-07-06
 
 ### Fixed
 
 - Cleaned public documentation and package metadata language after the v0.1.0
   public release while preserving existing maintainer script names.
-- Kept public docs free of private cloud-planning language.
+- Kept public docs focused on supported local-first behavior.
 
 ## v0.1.0 - 2026-07-05
 
@@ -59,7 +68,7 @@ deterministic Python automation.
 
 - RPA Core is not a sandbox; it executes user-authored Python.
 - There is no runtime AI behavior or AI dependency.
-- There is no cloud orchestrator or remote worker protocol in v0.1.0.
+- There is no managed execution service or remote worker protocol in v0.1.0.
 - There is no generic per-skill hard timeout or arbitrary cancellation.
 - There is no automatic skill discovery or configuration-defined pipeline model.
 - Artifact records store paths and metadata, not file contents.

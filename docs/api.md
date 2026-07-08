@@ -1,6 +1,6 @@
 # API Reference
 
-The supported v0.1.0 public API is the top-level `rpacore` package. Prefer
+The supported `0.1.x` public API is the top-level `rpacore` package. Prefer
 imports such as:
 
 ```python

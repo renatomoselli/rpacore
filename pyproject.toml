@@ -1,10 +1,15 @@
+[build-system]
+requires = ["setuptools>=77.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "rpacore"
 version = "0.1.1"
 description = "RPA Core — deterministic, stateful RPA in Python"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     { name = "Renato Moselli" },
 ]
@@ -42,9 +47,6 @@ keyring = [
 
 [project.scripts]
 rpacore = "rpacore.cli:main"
-
-[tool.setuptools]
-license-files = ["LICENSE", "NOTICE"]
 
 [tool.setuptools.packages.find]
 include = ["rpacore*"]

@@ -341,8 +341,8 @@ out code keeps running and mutating external systems.
 
 Configure I/O timeouts in the library that performs the work, such as the HTTP,
 SMTP, browser, database, or desktop automation client used by a skill. If an
-automation needs a hard deadline with termination, run it behind an external
-worker-process or orchestrator boundary and record the outcome back into RPA
+automation needs a hard deadline with termination, run it behind a separate
+worker process boundary and record the outcome back into RPA
 Core. RPA Core v0.1.0 intentionally rejects Pebble or similar process-timeout
 dependencies because process termination cannot make arbitrary external side
 effects reversible. See [Runtime Dependency Decisions](docs/runtime-dependencies.md)

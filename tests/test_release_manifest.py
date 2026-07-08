@@ -48,14 +48,12 @@ name = "rpacore"
 version = "0.1.0"
 description = "RPA Core — deterministic, stateful RPA in Python"
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 
 [project.urls]
 Homepage = "https://rpacore.dev"
 Repository = "https://github.com/renatomoselli/rpacore"
-
-[tool.setuptools]
-license-files = ["LICENSE", "NOTICE"]
 """,
         encoding="utf-8",
     )
@@ -66,9 +64,7 @@ def _write_pyproject_without_version(path: Path) -> None:
         """
 [project]
 name = "rpacore"
-license = { text = "Apache-2.0" }
-
-[tool.setuptools]
+license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 """,
         encoding="utf-8",
@@ -80,9 +76,7 @@ def _write_pyproject_without_name(path: Path) -> None:
         """
 [project]
 version = "0.1.0"
-license = { text = "Apache-2.0" }
-
-[tool.setuptools]
+license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 """,
         encoding="utf-8",
@@ -106,7 +100,7 @@ license-files = {value}
 [project]
 name = "rpacore"
 version = "0.1.0"
-license = {{ text = "Apache-2.0" }}
+license = "Apache-2.0"
 {license_files}
 
 [project.urls]
@@ -123,10 +117,8 @@ def _write_pyproject_with_invalid_urls(path: Path) -> None:
 [project]
 name = "rpacore"
 version = "0.1.0"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 urls = []
-
-[tool.setuptools]
 license-files = ["LICENSE", "NOTICE"]
 """,
         encoding="utf-8",
@@ -405,7 +397,7 @@ def test_prepare_release_manifest_rejects_missing_license_files(tmp_path: Path) 
 [project]
 name = "rpacore"
 version = "0.1.0"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 """,
         encoding="utf-8",
     )
@@ -436,9 +428,7 @@ def test_prepare_release_manifest_rejects_empty_license_files(tmp_path: Path) ->
 [project]
 name = "rpacore"
 version = "0.1.0"
-license = { text = "Apache-2.0" }
-
-[tool.setuptools]
+license = "Apache-2.0"
 license-files = []
 """,
         encoding="utf-8",
