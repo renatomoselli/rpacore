@@ -97,7 +97,7 @@ class TestReleaseCandidateValidationScript:
 
     def test_parse_json_output_requires_object(self) -> None:
         module = _load_script()
-        evidence = module.CommandEvidence(
+        command_record = module.CommandRecord(
             name="json",
             command=["cmd"],
             cwd=".",
@@ -106,11 +106,11 @@ class TestReleaseCandidateValidationScript:
             stdout='{"ok": true}',
         )
 
-        assert module._parse_json_output(evidence) == {"ok": True}
+        assert module._parse_json_output(command_record) == {"ok": True}
 
-        evidence.stdout = "[]"
+        command_record.stdout = "[]"
         try:
-            module._parse_json_output(evidence)
+            module._parse_json_output(command_record)
         except module.ValidationError as exc:
             assert "JSON object" in str(exc)
         else:
@@ -121,7 +121,7 @@ class TestReleaseCandidateValidationScript:
         raw_stdout = json.dumps({
             "transactions": [{"id": str(index)} for index in range(1500)]
         })
-        evidence = module.CommandEvidence(
+        command_record = module.CommandRecord(
             name="json",
             command=["cmd"],
             cwd=".",
@@ -131,11 +131,11 @@ class TestReleaseCandidateValidationScript:
             raw_stdout=raw_stdout,
         )
 
-        assert len(module._parse_json_output(evidence)["transactions"]) == 1500
+        assert len(module._parse_json_output(command_record)["transactions"]) == 1500
 
     def test_parse_json_output_preserves_explicit_empty_raw_stdout(self) -> None:
         module = _load_script()
-        evidence = module.CommandEvidence(
+        command_record = module.CommandRecord(
             name="json",
             command=["cmd"],
             cwd=".",
@@ -146,7 +146,7 @@ class TestReleaseCandidateValidationScript:
         )
 
         try:
-            module._parse_json_output(evidence)
+            module._parse_json_output(command_record)
         except module.ValidationError as exc:
             assert "valid JSON" in str(exc)
         else:
@@ -154,7 +154,7 @@ class TestReleaseCandidateValidationScript:
 
     def test_parse_ndjson_output_parses_every_line(self) -> None:
         module = _load_script()
-        evidence = module.CommandEvidence(
+        command_record = module.CommandRecord(
             name="ndjson",
             command=["cmd"],
             cwd=".",
@@ -163,7 +163,7 @@ class TestReleaseCandidateValidationScript:
             stdout='{"id": 1}\n{"id": 2}\n',
         )
 
-        assert module._parse_ndjson_output(evidence) == [{"id": 1}, {"id": 2}]
+        assert module._parse_ndjson_output(command_record) == [{"id": 1}, {"id": 2}]
 
     def test_parse_ndjson_output_uses_untruncated_stdout(self) -> None:
         module = _load_script()
@@ -171,7 +171,7 @@ class TestReleaseCandidateValidationScript:
             json.dumps({"id": str(index)}) + "\n"
             for index in range(1500)
         )
-        evidence = module.CommandEvidence(
+        command_record = module.CommandRecord(
             name="ndjson",
             command=["cmd"],
             cwd=".",
@@ -181,11 +181,11 @@ class TestReleaseCandidateValidationScript:
             raw_stdout=raw_stdout,
         )
 
-        assert len(module._parse_ndjson_output(evidence)) == 1500
+        assert len(module._parse_ndjson_output(command_record)) == 1500
 
     def test_command_record_omits_raw_output(self) -> None:
         module = _load_script()
-        evidence = module.CommandEvidence(
+        command_record = module.CommandRecord(
             name="json",
             command=["cmd"],
             cwd=".",
@@ -196,7 +196,7 @@ class TestReleaseCandidateValidationScript:
             raw_stderr="full err",
         )
 
-        record = module._command_record(evidence)
+        record = module._command_record(command_record)
 
         assert record["stdout"] == "short"
         assert "raw_stdout" not in record
@@ -217,10 +217,10 @@ class TestReleaseCandidateValidationScript:
         else:
             raise AssertionError("Expected ValidationError")
 
-    def test_run_check_false_returns_failed_command_evidence(self, tmp_path: Path) -> None:
+    def test_run_check_false_returns_failed_command_record(self, tmp_path: Path) -> None:
         module = _load_script()
 
-        evidence = module._run(
+        command_record = module._run(
             "allowed_failure",
             [sys.executable, "-c", "import sys; sys.exit(7)"],
             cwd=tmp_path,
@@ -228,8 +228,8 @@ class TestReleaseCandidateValidationScript:
             check=False,
         )
 
-        assert evidence.name == "allowed_failure"
-        assert evidence.exit_code == 7
+        assert command_record.name == "allowed_failure"
+        assert command_record.exit_code == 7
 
     def test_validate_contained_path_rejects_escaped_paths(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -401,7 +401,7 @@ class TestReleaseCandidateValidationScript:
             stdout = ""
             if name == "demo_transaction_list_json":
                 stdout = '{"transactions": []}'
-            return module.CommandEvidence(
+            return module.CommandRecord(
                 name=name,
                 command=command,
                 cwd=str(cwd),
@@ -518,7 +518,7 @@ class TestReleaseCandidateValidationScript:
     def test_aggregate_pytest_counts_uses_command_parsed_counts(self) -> None:
         module = _load_script()
         commands = [
-            module.CommandEvidence(
+            module.CommandRecord(
                 name="framework_tests",
                 command=["pytest"],
                 cwd=".",
@@ -526,7 +526,7 @@ class TestReleaseCandidateValidationScript:
                 duration_seconds=0.01,
                 parsed={"passed": 2, "skipped": 1, "transaction_count": 99},
             ),
-            module.CommandEvidence(
+            module.CommandRecord(
                 name="example_pytest:examples/demo/tests",
                 command=["pytest"],
                 cwd=".",
@@ -545,14 +545,14 @@ class TestReleaseCandidateValidationScript:
     def test_manifest_result_counts_commands_and_dirty_repositories(self) -> None:
         module = _load_script()
         commands = [
-            module.CommandEvidence(
+            module.CommandRecord(
                 name="passed",
                 command=["cmd"],
                 cwd=".",
                 exit_code=0,
                 duration_seconds=0.01,
             ),
-            module.CommandEvidence(
+            module.CommandRecord(
                 name="failed",
                 command=["cmd"],
                 cwd=".",
@@ -561,8 +561,8 @@ class TestReleaseCandidateValidationScript:
             ),
         ]
         repos = [
-            module.RepoEvidence("rpacore", ".", "abc", "main", False, []),
-            module.RepoEvidence("rpacore-examples", ".", "def", "main", True, ["M file"]),
+            module.RepoState("rpacore", ".", "abc", "main", False, []),
+            module.RepoState("rpacore-examples", ".", "def", "main", True, ["M file"]),
         ]
 
         assert module._manifest_result(commands=commands, repos=repos) == {
@@ -572,31 +572,31 @@ class TestReleaseCandidateValidationScript:
             "dirty_repository_count": 1,
         }
 
-    def test_evidence_index_maps_findings_to_present_commands(self) -> None:
+    def test_validation_index_maps_findings_to_present_commands(self) -> None:
         module = _load_script()
         commands = [
-            module.CommandEvidence(
+            module.CommandRecord(
                 name="framework_tests",
                 command=["pytest"],
                 cwd=".",
                 exit_code=0,
                 duration_seconds=0.01,
             ),
-            module.CommandEvidence(
+            module.CommandRecord(
                 name="example_cli_transaction_export_json",
                 command=["rpacore"],
                 cwd=".",
                 exit_code=0,
                 duration_seconds=0.01,
             ),
-            module.CommandEvidence(
+            module.CommandRecord(
                 name="example_cli_transaction_export_ndjson",
                 command=["rpacore"],
                 cwd=".",
                 exit_code=0,
                 duration_seconds=0.01,
             ),
-            module.CommandEvidence(
+            module.CommandRecord(
                 name="example_pytest:examples/demo/tests",
                 command=["pytest"],
                 cwd=".",
@@ -605,7 +605,7 @@ class TestReleaseCandidateValidationScript:
             ),
         ]
 
-        assert module._evidence_index(commands) == {
+        assert module._validation_index(commands) == {
             "G2-001": ["framework_tests"],
             "G2-002": [],
             "G2-004": [
@@ -992,7 +992,7 @@ name = "demo"
                 "dirty_repository_count": 0,
             },
             "pytest_totals": {"passed": 10, "skipped": 2},
-            "evidence_index": {"G2-001": ["framework_tests"]},
+            "validation_index": {"G2-001": ["framework_tests"]},
             "artifacts": [{"name": "rpacore.whl", "sha256": "abc"}],
             "dependency_inventory": {
                 "runtime_dependencies": [],
@@ -1002,7 +1002,7 @@ name = "demo"
 
         module._write_manifest(manifest, tmp_path)
 
-        written = json.loads((tmp_path / "release-candidate-evidence.json").read_text())
+        written = json.loads((tmp_path / "release-candidate-validation-results.json").read_text())
         assert written["finding_ids"] == ["G2-001"]
         assert written["result"]["status"] == "pass"
         assert written["pytest_totals"] == {"passed": 10, "skipped": 2}
@@ -1012,7 +1012,7 @@ name = "demo"
         assert "Dirty repositories: `0`" in summary
         assert "## Pytest Totals" in summary
         assert "passed=10, skipped=2" in summary
-        assert "## Evidence Index" in summary
+        assert "## Validation Index" in summary
         assert "`G2-001`: `framework_tests`" in summary
         assert "framework_tests" in summary
         assert "rpacore.whl" in summary
@@ -1038,7 +1038,7 @@ name = "demo"
                 "dirty_repository_count": 0,
             },
             "pytest_totals": {},
-            "evidence_index": {},
+            "validation_index": {},
             "artifacts": [],
         }
 
@@ -1065,7 +1065,7 @@ name = "demo"
                 "failed_command_count": 0,
                 "dirty_repository_count": 0,
             },
-            "evidence_index": {},
+            "validation_index": {},
             "artifacts": [],
         }
         real_replace = Path.replace
@@ -1079,7 +1079,7 @@ name = "demo"
             module._write_manifest(manifest, tmp_path)
 
         assert replacements == [
-            "release-candidate-evidence.json",
+            "release-candidate-validation-results.json",
             "release-candidate-summary.md",
         ]
 
@@ -1100,7 +1100,7 @@ name = "demo"
                 "failed_command_count": 0,
                 "dirty_repository_count": 0,
             },
-            "evidence_index": {},
+            "validation_index": {},
             "artifacts": [],
         }
         real_replace = Path.replace
@@ -1121,11 +1121,11 @@ name = "demo"
             raise AssertionError("Expected OSError")
 
         assert replacements == [
-            "release-candidate-evidence.json",
+            "release-candidate-validation-results.json",
             "release-candidate-summary.md",
         ]
-        assert not (tmp_path / "release-candidate-evidence.json").exists()
-        assert not (tmp_path / ".release-candidate-evidence.json.tmp").exists()
+        assert not (tmp_path / "release-candidate-validation-results.json").exists()
+        assert not (tmp_path / ".release-candidate-validation-results.json.tmp").exists()
         assert not (tmp_path / ".release-candidate-summary.md.tmp").exists()
 
     def test_write_manifest_preserves_existing_summary_when_manifest_replace_fails(
@@ -1145,7 +1145,7 @@ name = "demo"
                 "failed_command_count": 0,
                 "dirty_repository_count": 0,
             },
-            "evidence_index": {},
+            "validation_index": {},
             "artifacts": [],
         }
         summary_path = tmp_path / "release-candidate-summary.md"
@@ -1154,7 +1154,7 @@ name = "demo"
 
         def fail_manifest_replace(path: Path, target: Path):
             replacements.append(target.name)
-            if target.name == "release-candidate-evidence.json":
+            if target.name == "release-candidate-validation-results.json":
                 raise OSError("manifest locked")
             raise AssertionError("summary replace should not run when manifest replace fails")
 
@@ -1166,9 +1166,9 @@ name = "demo"
         else:
             raise AssertionError("Expected OSError")
 
-        assert replacements == ["release-candidate-evidence.json"]
+        assert replacements == ["release-candidate-validation-results.json"]
         assert summary_path.read_text(encoding="utf-8") == "old summary"
-        assert not (tmp_path / ".release-candidate-evidence.json.tmp").exists()
+        assert not (tmp_path / ".release-candidate-validation-results.json.tmp").exists()
         assert not (tmp_path / ".release-candidate-summary.md.tmp").exists()
 
     def test_latest_wheel_prefers_stable_when_mtimes_match(self, tmp_path: Path) -> None:
@@ -1188,7 +1188,7 @@ name = "demo"
         repo_root = tmp_path / "repo"
         examples_repo = tmp_path / "examples"
         work_dir = tmp_path / "work"
-        output_dir = tmp_path / "evidence"
+        output_dir = tmp_path / "validation-results"
         repo_root.mkdir()
         examples_repo.mkdir()
         commands: list[str] = []
@@ -1233,7 +1233,7 @@ dev = ["pytest"]
             command_details[name] = (command, cwd)
             if name == "example_cli_run":
                 (cwd / "rpacore.db").write_text("", encoding="utf-8")
-            return module.CommandEvidence(
+            return module.CommandRecord(
                 name=name,
                 command=command,
                 cwd=str(cwd),
@@ -1279,10 +1279,10 @@ dev = ["pytest"]
                 },
             ]
 
-        with patch.object(module, "_repo_evidence") as repo_evidence:
-            repo_evidence.side_effect = [
-                module.RepoEvidence("rpacore", str(repo_root), "abc", "main", False, []),
-                module.RepoEvidence("rpacore-examples", str(examples_repo), "def", "main", False, []),
+        with patch.object(module, "_repo_state") as repo_state:
+            repo_state.side_effect = [
+                module.RepoState("rpacore", str(repo_root), "abc", "main", False, []),
+                module.RepoState("rpacore-examples", str(examples_repo), "def", "main", False, []),
             ]
             with patch.object(module, "_copy_tree", side_effect=fake_copy_tree):
                 with patch.object(module, "_run", side_effect=fake_run):
@@ -1336,13 +1336,13 @@ dev = ["pytest"]
         ]
         assert manifest["commands"][10]["parsed"] == {"transaction_count": 1}
         assert manifest["pytest_totals"] == {"passed": 2}
-        assert manifest["evidence_index"]["G2-004"] == [
+        assert manifest["validation_index"]["G2-004"] == [
             "example_cli_transaction_list_json",
             "example_cli_transaction_show_json",
             "example_cli_transaction_export_json",
             "example_cli_transaction_export_ndjson",
         ]
-        assert manifest["evidence_index"]["G2-013"] == [
+        assert manifest["validation_index"]["G2-013"] == [
             "example_pytest:examples/demo/tests"
         ]
         assert manifest["artifacts"][0]["contains_examples"] is False
@@ -1355,13 +1355,13 @@ dev = ["pytest"]
         example_command, example_cwd = command_details["example_pytest:examples/demo/tests"]
         assert example_command[-2:] == ["tests", "-q"]
         assert example_cwd == work_dir / "source" / "rpacore-examples" / "examples" / "demo"
-        assert (output_dir / "release-candidate-evidence.json").exists()
+        assert (output_dir / "release-candidate-validation-results.json").exists()
 
     def test_validate_release_candidate_rejects_invalid_artifact_records(self, tmp_path: Path) -> None:
         module = _load_script()
         repo_root = tmp_path / "repo"
         work_dir = tmp_path / "work"
-        output_dir = tmp_path / "evidence"
+        output_dir = tmp_path / "validation-results"
         repo_root.mkdir()
 
         def fake_copy_tree(source: Path, destination: Path) -> None:
@@ -1375,7 +1375,7 @@ name = "rpacore"
             )
 
         def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
-            return module.CommandEvidence(
+            return module.CommandRecord(
                 name=name,
                 command=command,
                 cwd=str(cwd),
@@ -1405,8 +1405,8 @@ name = "rpacore"
 
         with patch.object(
             module,
-            "_repo_evidence",
-            return_value=module.RepoEvidence("rpacore", str(repo_root), "abc", "main", False, []),
+            "_repo_state",
+            return_value=module.RepoState("rpacore", str(repo_root), "abc", "main", False, []),
         ):
             with patch.object(module, "_copy_tree", side_effect=fake_copy_tree):
                 with patch.object(module, "_run", side_effect=fake_run):
@@ -1433,7 +1433,7 @@ name = "rpacore"
         module = _load_script()
         repo_root = tmp_path / "repo"
         work_dir = tmp_path / "work"
-        output_dir = tmp_path / "evidence"
+        output_dir = tmp_path / "validation-results"
         repo_root.mkdir()
 
         def fake_copy_tree(source: Path, destination: Path) -> None:
@@ -1442,8 +1442,8 @@ name = "rpacore"
 
         with patch.object(
             module,
-            "_repo_evidence",
-            return_value=module.RepoEvidence("rpacore", str(repo_root), "abc", "main", False, []),
+            "_repo_state",
+            return_value=module.RepoState("rpacore", str(repo_root), "abc", "main", False, []),
         ):
             with patch.object(module, "_copy_tree", side_effect=fake_copy_tree):
                 with patch.object(module, "_run", side_effect=module.ValidationError("boom")):
@@ -1473,7 +1473,7 @@ name = "rpacore"
         module = _load_script()
         repo_root = tmp_path / "repo"
         work_dir = tmp_path / "work"
-        output_dir = tmp_path / "evidence"
+        output_dir = tmp_path / "validation-results"
         examples_repo = tmp_path / "examples"
         repo_root.mkdir()
         examples_repo.mkdir()
@@ -1504,7 +1504,7 @@ name = "rpacore"
                 repo_root=tmp_path,
                 examples_repo=None,
                 work_dir=tmp_path / "work",
-                output_dir=tmp_path / "evidence",
+                output_dir=tmp_path / "validation-results",
                 examples_pytest=[],
                 example_cli_project="examples/demo",
                 example_cli_db="rpacore.db",
@@ -1521,14 +1521,14 @@ name = "rpacore"
         module = _load_script()
         repo_root = tmp_path / "repo"
         work_dir = tmp_path / "work"
-        output_dir = tmp_path / "evidence"
+        output_dir = tmp_path / "validation-results"
         repo_root.mkdir()
         failure = module.ValidationError("validation failed")
 
         with patch.object(
             module,
-            "_repo_evidence",
-            return_value=module.RepoEvidence("rpacore", str(repo_root), "abc", "main", False, []),
+            "_repo_state",
+            return_value=module.RepoState("rpacore", str(repo_root), "abc", "main", False, []),
         ):
             with patch.object(module, "_copy_tree"):
                 with patch.object(module, "_run", side_effect=failure):
@@ -1555,14 +1555,14 @@ name = "rpacore"
         module = _load_script()
         repo_root = tmp_path / "repo"
         work_dir = tmp_path / "work"
-        output_dir = tmp_path / "evidence"
+        output_dir = tmp_path / "validation-results"
         repo_root.mkdir()
         interrupt = KeyboardInterrupt()
 
         with patch.object(
             module,
-            "_repo_evidence",
-            return_value=module.RepoEvidence("rpacore", str(repo_root), "abc", "main", False, []),
+            "_repo_state",
+            return_value=module.RepoState("rpacore", str(repo_root), "abc", "main", False, []),
         ):
             with patch.object(module, "_copy_tree"):
                 with patch.object(module, "_run", side_effect=interrupt):
@@ -1585,7 +1585,7 @@ name = "rpacore"
     def test_main_cleans_owned_work_dir_when_output_dir_is_external(self, tmp_path: Path) -> None:
         module = _load_script()
         work_dir = tmp_path / "owned-work"
-        output_dir = tmp_path / "evidence"
+        output_dir = tmp_path / "validation-results"
         work_dir.mkdir()
 
         with patch.object(
@@ -1611,7 +1611,7 @@ name = "rpacore"
     def test_main_removes_owned_temp_work_dir_when_output_dir_is_external(self, tmp_path: Path) -> None:
         module = _load_script()
         work_dir = tmp_path / "owned-work"
-        output_dir = tmp_path / "evidence"
+        output_dir = tmp_path / "validation-results"
 
         with patch.object(module.tempfile, "mkdtemp", return_value=str(work_dir)):
             with patch.object(module, "validate_release_candidate", return_value={"ok": True}):

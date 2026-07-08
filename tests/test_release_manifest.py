@@ -1,4 +1,4 @@
-"""Tests for preparing release manifests from rehearsal evidence."""
+"""Tests for preparing release manifests from validation results."""
 
 from __future__ import annotations
 
@@ -125,8 +125,8 @@ license-files = ["LICENSE", "NOTICE"]
     )
 
 
-def _write_evidence(tmp_path: Path) -> tuple[Path, Path]:
-    release_candidate = tmp_path / "release-candidate-evidence.json"
+def _write_validation_results(tmp_path: Path) -> tuple[Path, Path]:
+    release_candidate = tmp_path / "release-candidate-validation-results.json"
     examples_wheel = tmp_path / "examples-wheel-validation.json"
     release_candidate.write_text(
         json.dumps(
@@ -184,8 +184,8 @@ def _manifest_args(
     return {
         "repo_root": repo_root,
         "examples_repo": examples_repo,
-        "release_candidate_evidence": release_candidate,
-        "examples_wheel_evidence": examples_wheel,
+        "release_candidate_validation_results": release_candidate,
+        "examples_wheel_validation_results": examples_wheel,
         "output_dir": output_dir,
         "tag": "v0.1.0",
         "owner": "release owner",
@@ -200,7 +200,7 @@ def _manifest_args(
     }
 
 
-def test_prepare_release_manifest_writes_manifest_and_go_draft(tmp_path: Path) -> None:
+def test_prepare_release_manifest_writes_manifest_and_approval_draft(tmp_path: Path) -> None:
     script = _load_script()
     repo_root = tmp_path / "rpacore"
     examples_repo = tmp_path / "rpacore-examples"
@@ -209,14 +209,14 @@ def test_prepare_release_manifest_writes_manifest_and_go_draft(tmp_path: Path) -
     _write_pyproject(repo_root)
     framework_commit = _git_init(repo_root)
     examples_commit = _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
     output_dir = tmp_path / "out"
 
     manifest = script.prepare_release_manifest(
         repo_root=repo_root,
         examples_repo=examples_repo,
-        release_candidate_evidence=release_candidate,
-        examples_wheel_evidence=examples_wheel,
+        release_candidate_validation_results=release_candidate,
+        examples_wheel_validation_results=examples_wheel,
         output_dir=output_dir,
         tag="v0.1.0",
         owner="release owner",
@@ -230,7 +230,7 @@ def test_prepare_release_manifest_writes_manifest_and_go_draft(tmp_path: Path) -
         testpypi_note="direct artifact validation is representative",
     )
 
-    assert manifest["decision"]["status"] == "go"
+    assert manifest["decision"]["status"] == "approved"
     assert manifest["schema_version"] == 1
     assert manifest["repositories"]["framework"]["commit"] == framework_commit
     assert manifest["repositories"]["examples"]["commit"] == examples_commit
@@ -243,12 +243,12 @@ def test_prepare_release_manifest_writes_manifest_and_go_draft(tmp_path: Path) -
     assert manifest["expected_pypi_metadata"]["license"] == "Apache-2.0"
     assert manifest["expected_pypi_metadata"]["license_files"] == ["LICENSE", "NOTICE"]
     assert (output_dir / "release-manifest.json").is_file()
-    summary = (output_dir / "release-go-no-go.md").read_text(encoding="utf-8")
-    assert "Release Go/No-Go Draft" in summary
+    summary = (output_dir / "release-approval.md").read_text(encoding="utf-8")
+    assert "Release Approval Draft" in summary
     assert "Examples commit" in summary
 
 
-def test_prepare_release_manifest_marks_dirty_repo_no_go(tmp_path: Path) -> None:
+def test_prepare_release_manifest_rejects_dirty_repo(tmp_path: Path) -> None:
     script = _load_script()
     repo_root = tmp_path / "rpacore"
     examples_repo = tmp_path / "rpacore-examples"
@@ -258,13 +258,13 @@ def test_prepare_release_manifest_marks_dirty_repo_no_go(tmp_path: Path) -> None
     _git_init(repo_root)
     _git_init(examples_repo)
     (examples_repo / "dirty.txt").write_text("dirty", encoding="utf-8")
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     manifest = script.prepare_release_manifest(
         repo_root=repo_root,
         examples_repo=examples_repo,
-        release_candidate_evidence=release_candidate,
-        examples_wheel_evidence=examples_wheel,
+        release_candidate_validation_results=release_candidate,
+        examples_wheel_validation_results=examples_wheel,
         output_dir=tmp_path / "out",
         tag="v0.1.0",
         owner="release owner",
@@ -278,7 +278,7 @@ def test_prepare_release_manifest_marks_dirty_repo_no_go(tmp_path: Path) -> None
         testpypi_note="",
     )
 
-    assert manifest["decision"]["status"] == "no-go"
+    assert manifest["decision"]["status"] == "rejected"
     assert manifest["repositories"]["examples"]["dirty"] is True
 
 
@@ -291,7 +291,7 @@ def test_prepare_release_manifest_rejects_missing_artifacts(tmp_path: Path) -> N
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate = tmp_path / "release-candidate-evidence.json"
+    release_candidate = tmp_path / "release-candidate-validation-results.json"
     release_candidate.write_text(
         json.dumps({"result": {"status": "pass"}, "artifacts": []}),
         encoding="utf-8",
@@ -299,7 +299,7 @@ def test_prepare_release_manifest_rejects_missing_artifacts(tmp_path: Path) -> N
     examples_wheel = tmp_path / "examples-wheel-validation.json"
     examples_wheel.write_text(json.dumps({"result": {"status": "pass"}}), encoding="utf-8")
 
-    with pytest.raises(script.ManifestError, match="release-candidate evidence has no artifacts"):
+    with pytest.raises(script.ManifestError, match="release-candidate validation results have no artifacts"):
         script.prepare_release_manifest(
             **_manifest_args(
                 repo_root=repo_root,
@@ -320,7 +320,7 @@ def test_prepare_release_manifest_rejects_missing_project_table(tmp_path: Path) 
     (repo_root / "pyproject.toml").write_text("tool = {}\n", encoding="utf-8")
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     with pytest.raises(script.ManifestError, match=r"pyproject\.toml missing \[project\] table"):
         script.prepare_release_manifest(
@@ -343,7 +343,7 @@ def test_prepare_release_manifest_rejects_missing_name(tmp_path: Path) -> None:
     _write_pyproject_without_name(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     with pytest.raises(script.ManifestError, match="pyproject.toml project missing name"):
         script.prepare_release_manifest(
@@ -372,7 +372,7 @@ def test_prepare_release_manifest_rejects_invalid_license_files(
     _write_pyproject_with_invalid_license_files(repo_root, license_files_value, location=location)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     with pytest.raises(script.ManifestError, match="license-files must be a list"):
         script.prepare_release_manifest(
@@ -403,7 +403,7 @@ license = "Apache-2.0"
     )
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     with pytest.raises(script.ManifestError, match="missing license-files"):
         script.prepare_release_manifest(
@@ -435,7 +435,7 @@ license-files = []
     )
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     with pytest.raises(script.ManifestError, match="license-files must not be empty"):
         script.prepare_release_manifest(
@@ -458,7 +458,7 @@ def test_prepare_release_manifest_rejects_invalid_urls(tmp_path: Path) -> None:
     _write_pyproject_with_invalid_urls(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     with pytest.raises(script.ManifestError, match="urls must be an object"):
         script.prepare_release_manifest(
@@ -495,7 +495,7 @@ def test_metadata_license_rejects_unexpected_license_expression(license_value: o
         script._metadata_license({"license": license_value})
 
 
-def test_prepare_release_manifest_marks_failed_testpypi_no_go(tmp_path: Path) -> None:
+def test_prepare_release_manifest_rejects_failed_testpypi(tmp_path: Path) -> None:
     script = _load_script()
     repo_root = tmp_path / "rpacore"
     examples_repo = tmp_path / "rpacore-examples"
@@ -504,7 +504,7 @@ def test_prepare_release_manifest_marks_failed_testpypi_no_go(tmp_path: Path) ->
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     manifest = script.prepare_release_manifest(
         **{
@@ -519,11 +519,11 @@ def test_prepare_release_manifest_marks_failed_testpypi_no_go(tmp_path: Path) ->
         }
     )
 
-    assert manifest["decision"]["status"] == "no-go"
+    assert manifest["decision"]["status"] == "rejected"
     assert manifest["decision"]["testpypi"] == "failed"
 
 
-def test_prepare_release_manifest_marks_skipped_docs_no_go(tmp_path: Path) -> None:
+def test_prepare_release_manifest_rejects_skipped_docs(tmp_path: Path) -> None:
     script = _load_script()
     repo_root = tmp_path / "rpacore"
     examples_repo = tmp_path / "rpacore-examples"
@@ -532,7 +532,7 @@ def test_prepare_release_manifest_marks_skipped_docs_no_go(tmp_path: Path) -> No
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     manifest = script.prepare_release_manifest(
         **{
@@ -547,11 +547,11 @@ def test_prepare_release_manifest_marks_skipped_docs_no_go(tmp_path: Path) -> No
         }
     )
 
-    assert manifest["decision"]["status"] == "no-go"
+    assert manifest["decision"]["status"] == "rejected"
     assert manifest["documentation_verification"]["status"] == "skipped"
 
 
-def test_prepare_release_manifest_marks_failed_docs_no_go(tmp_path: Path) -> None:
+def test_prepare_release_manifest_rejects_failed_docs(tmp_path: Path) -> None:
     script = _load_script()
     repo_root = tmp_path / "rpacore"
     examples_repo = tmp_path / "rpacore-examples"
@@ -560,7 +560,7 @@ def test_prepare_release_manifest_marks_failed_docs_no_go(tmp_path: Path) -> Non
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     manifest = script.prepare_release_manifest(
         **{
@@ -575,7 +575,7 @@ def test_prepare_release_manifest_marks_failed_docs_no_go(tmp_path: Path) -> Non
         }
     )
 
-    assert manifest["decision"]["status"] == "no-go"
+    assert manifest["decision"]["status"] == "rejected"
     assert manifest["documentation_verification"]["status"] == "failed"
 
 
@@ -588,7 +588,7 @@ def test_prepare_release_manifest_rejects_missing_version(tmp_path: Path) -> Non
     _write_pyproject_without_version(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     with pytest.raises(script.ManifestError, match="pyproject.toml project missing version"):
         script.prepare_release_manifest(
@@ -602,7 +602,7 @@ def test_prepare_release_manifest_rejects_missing_version(tmp_path: Path) -> Non
         )
 
 
-def test_prepare_release_manifest_rejects_missing_evidence_status(tmp_path: Path) -> None:
+def test_prepare_release_manifest_rejects_missing_validation_status(tmp_path: Path) -> None:
     script = _load_script()
     repo_root = tmp_path / "rpacore"
     examples_repo = tmp_path / "rpacore-examples"
@@ -611,7 +611,7 @@ def test_prepare_release_manifest_rejects_missing_evidence_status(tmp_path: Path
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
     examples_wheel.write_text(
         json.dumps(
             {
@@ -622,7 +622,7 @@ def test_prepare_release_manifest_rejects_missing_evidence_status(tmp_path: Path
         encoding="utf-8",
     )
 
-    with pytest.raises(script.ManifestError, match="examples-wheel evidence missing result.status"):
+    with pytest.raises(script.ManifestError, match="examples wheel validation results missing result.status"):
         script.prepare_release_manifest(
             **_manifest_args(
                 repo_root=repo_root,
@@ -643,12 +643,12 @@ def test_prepare_release_manifest_rejects_non_object_result(tmp_path: Path) -> N
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
     payload = json.loads(release_candidate.read_text(encoding="utf-8"))
     payload["result"] = "pass"
     release_candidate.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(script.ManifestError, match="release-candidate evidence result must be an object"):
+    with pytest.raises(script.ManifestError, match="release-candidate validation results result must be an object"):
         script.prepare_release_manifest(
             **_manifest_args(
                 repo_root=repo_root,
@@ -660,7 +660,7 @@ def test_prepare_release_manifest_rejects_non_object_result(tmp_path: Path) -> N
         )
 
 
-def test_prepare_release_manifest_rejects_unknown_evidence_status(tmp_path: Path) -> None:
+def test_prepare_release_manifest_rejects_unknown_validation_status(tmp_path: Path) -> None:
     script = _load_script()
     repo_root = tmp_path / "rpacore"
     examples_repo = tmp_path / "rpacore-examples"
@@ -669,7 +669,7 @@ def test_prepare_release_manifest_rejects_unknown_evidence_status(tmp_path: Path
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
     payload = json.loads(release_candidate.read_text(encoding="utf-8"))
     payload["result"] = {"status": "pending"}
     release_candidate.write_text(json.dumps(payload), encoding="utf-8")
@@ -725,7 +725,7 @@ def test_prepare_release_manifest_rejects_missing_environment_subkeys(tmp_path: 
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
     payload = json.loads(release_candidate.read_text(encoding="utf-8"))
     payload["platform"] = {}
     payload["python"] = {}
@@ -752,7 +752,7 @@ def test_prepare_release_manifest_rejects_missing_dependency_inventory(tmp_path:
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
     payload = json.loads(release_candidate.read_text(encoding="utf-8"))
     del payload["dependency_inventory"]
     release_candidate.write_text(json.dumps(payload), encoding="utf-8")
@@ -778,7 +778,7 @@ def test_prepare_release_manifest_rejects_missing_runtime_dependencies(tmp_path:
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
     payload = json.loads(release_candidate.read_text(encoding="utf-8"))
     payload["dependency_inventory"] = {}
     release_candidate.write_text(json.dumps(payload), encoding="utf-8")
@@ -896,7 +896,7 @@ def test_write_outputs_removes_manifest_when_summary_replace_fails(tmp_path: Pat
     manifest = {
         "generated_at": "2026-07-03T00:00:00+00:00",
         "decision": {
-            "status": "go",
+            "status": "approved",
             "owner": "release owner",
             "approver": "approver",
             "testpypi": "skipped",
@@ -907,7 +907,7 @@ def test_write_outputs_removes_manifest_when_summary_replace_fails(tmp_path: Pat
             "framework": {"commit": "framework-commit"},
             "examples": {"commit": "examples-commit"},
         },
-        "evidence": {
+        "validation_results": {
             "release_candidate": {"status": "pass"},
             "examples_wheel": {"status": "pass"},
         },
@@ -946,7 +946,7 @@ def test_write_outputs_attempts_temp_cleanup_when_compensation_unlink_fails(
     manifest = {
         "generated_at": "2026-07-03T00:00:00+00:00",
         "decision": {
-            "status": "go",
+            "status": "approved",
             "owner": "release owner",
             "approver": "approver",
             "testpypi": "skipped",
@@ -957,7 +957,7 @@ def test_write_outputs_attempts_temp_cleanup_when_compensation_unlink_fails(
             "framework": {"commit": "framework-commit"},
             "examples": {"commit": "examples-commit"},
         },
-        "evidence": {
+        "validation_results": {
             "release_candidate": {"status": "pass"},
             "examples_wheel": {"status": "pass"},
         },
@@ -1003,7 +1003,7 @@ def test_write_outputs_cleans_temp_files_when_manifest_replace_fails(tmp_path: P
     manifest = {
         "generated_at": "2026-07-03T00:00:00+00:00",
         "decision": {
-            "status": "go",
+            "status": "approved",
             "owner": "release owner",
             "approver": "approver",
             "testpypi": "skipped",
@@ -1014,7 +1014,7 @@ def test_write_outputs_cleans_temp_files_when_manifest_replace_fails(tmp_path: P
             "framework": {"commit": "framework-commit"},
             "examples": {"commit": "examples-commit"},
         },
-        "evidence": {
+        "validation_results": {
             "release_candidate": {"status": "pass"},
             "examples_wheel": {"status": "pass"},
         },
@@ -1048,7 +1048,7 @@ def test_write_outputs_writes_manifest_and_summary(tmp_path: Path) -> None:
     manifest = {
         "generated_at": "2026-07-03T00:00:00+00:00",
         "decision": {
-            "status": "go",
+            "status": "approved",
             "owner": "release owner",
             "approver": "approver",
             "testpypi": "skipped",
@@ -1059,7 +1059,7 @@ def test_write_outputs_writes_manifest_and_summary(tmp_path: Path) -> None:
             "framework": {"commit": "framework-commit"},
             "examples": {"commit": "examples-commit"},
         },
-        "evidence": {
+        "validation_results": {
             "release_candidate": {"status": "pass"},
             "examples_wheel": {"status": "pass"},
         },
@@ -1087,7 +1087,7 @@ def test_summary_markdown_renders_blank_testpypi_note_as_none() -> None:
     manifest = {
         "generated_at": "2026-07-03T00:00:00+00:00",
         "decision": {
-            "status": "go",
+            "status": "approved",
             "owner": "release owner",
             "approver": "approver",
             "testpypi": "skipped",
@@ -1098,7 +1098,7 @@ def test_summary_markdown_renders_blank_testpypi_note_as_none() -> None:
             "framework": {"commit": "framework-commit"},
             "examples": {"commit": "examples-commit"},
         },
-        "evidence": {
+        "validation_results": {
             "release_candidate": {"status": "pass"},
             "examples_wheel": {"status": "pass"},
         },
@@ -1133,9 +1133,9 @@ def test_main_returns_clean_error_for_manifest_error(tmp_path: Path, capsys) -> 
             str(tmp_path),
             "--examples-repo",
             str(tmp_path),
-            "--release-candidate-evidence",
+            "--release-candidate-validation-results",
             str(missing),
-            "--examples-wheel-evidence",
+            "--examples-wheel-validation-results",
             str(missing),
             "--owner",
             "release owner",
@@ -1147,7 +1147,7 @@ def test_main_returns_clean_error_for_manifest_error(tmp_path: Path, capsys) -> 
     )
 
     assert exit_code == 1
-    assert "error: cannot read release-candidate evidence" in capsys.readouterr().err
+    assert "error: cannot read release-candidate validation results" in capsys.readouterr().err
 
 
 def test_main_returns_clean_error_for_write_failure(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -1160,7 +1160,7 @@ def test_main_returns_clean_error_for_write_failure(tmp_path: Path, capsys, monk
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     def fail_write_outputs(*args, **kwargs) -> None:
         raise OSError("disk full")
@@ -1173,9 +1173,9 @@ def test_main_returns_clean_error_for_write_failure(tmp_path: Path, capsys, monk
             str(repo_root),
             "--examples-repo",
             str(examples_repo),
-            "--release-candidate-evidence",
+            "--release-candidate-validation-results",
             str(release_candidate),
-            "--examples-wheel-evidence",
+            "--examples-wheel-validation-results",
             str(examples_wheel),
             "--output-dir",
             str(output_dir),
@@ -1202,7 +1202,7 @@ def test_main_success_prints_output_file_paths(tmp_path: Path, capsys) -> None:
     _write_pyproject(repo_root)
     _git_init(repo_root)
     _git_init(examples_repo)
-    release_candidate, examples_wheel = _write_evidence(tmp_path)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
 
     exit_code = script.main(
         [
@@ -1210,9 +1210,9 @@ def test_main_success_prints_output_file_paths(tmp_path: Path, capsys) -> None:
             str(repo_root),
             "--examples-repo",
             str(examples_repo),
-            "--release-candidate-evidence",
+            "--release-candidate-validation-results",
             str(release_candidate),
-            "--examples-wheel-evidence",
+            "--examples-wheel-validation-results",
             str(examples_wheel),
             "--output-dir",
             str(output_dir),
@@ -1228,7 +1228,7 @@ def test_main_success_prints_output_file_paths(tmp_path: Path, capsys) -> None:
     captured = capsys.readouterr()
     assert exit_code == 0
     assert f"Wrote release manifest to {output_dir.resolve() / script.MANIFEST_NAME}" in captured.out
-    assert f"Wrote release go/no-go draft to {output_dir.resolve() / script.SUMMARY_NAME}" in captured.out
+    assert f"Wrote release approval draft to {output_dir.resolve() / script.SUMMARY_NAME}" in captured.out
 
 
 def test_build_parser_documents_docs_verification_default() -> None:
@@ -1237,4 +1237,4 @@ def test_build_parser_documents_docs_verification_default() -> None:
 
     assert "--docs-verification" in help_text
     assert "only 'passed' can" in help_text
-    assert "produce a go decision" in help_text
+    assert "produce an approved decision" in help_text

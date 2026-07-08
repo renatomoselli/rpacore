@@ -31,11 +31,11 @@ BROKEN_VENV_SENTINEL = ".rpacore-validation-broken"
 
 
 class BuildValidationError(ValidationError):
-    """Validation failure that preserves build command evidence."""
+    """Validation failure that preserves the build command record."""
 
-    def __init__(self, message: str, evidence: CommandRecord) -> None:
+    def __init__(self, message: str, command_record: CommandRecord) -> None:
         super().__init__(message)
-        self.evidence = evidence
+        self.command_record = command_record
 
 EXAMPLE_REGISTRY: dict[str, dict[str, object]] = {
     "acme_work_items": {
@@ -87,7 +87,7 @@ RUN_MAIN_CHOICES = ("deterministic", "all", "none")
 
 @dataclass
 class CommandRecord:
-    """Serializable evidence for a command run."""
+    """Serializable record for a command run."""
 
     name: str
     command: list[str]
@@ -263,7 +263,7 @@ def _build_wheel(repo_root: Path, wheelhouse: Path, *, timeout_seconds: int) -> 
     wheelhouse.mkdir(parents=True)
     command = [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(wheelhouse)]
     try:
-        evidence = _run(
+        command_record = _run(
             "build_wheel",
             command,
             cwd=repo_root,
@@ -271,19 +271,22 @@ def _build_wheel(repo_root: Path, wheelhouse: Path, *, timeout_seconds: int) -> 
             allowed_roots=(repo_root,),
         )
         wheels = sorted(wheelhouse.glob("rpacore-*.whl"))
-        if evidence.exit_code != 0:
-            raise BuildValidationError(f"wheel build failed with exit code {evidence.exit_code}", evidence)
+        if command_record.exit_code != 0:
+            raise BuildValidationError(
+                f"wheel build failed with exit code {command_record.exit_code}",
+                command_record,
+            )
         if not wheels:
-            raise BuildValidationError(f"build completed but no wheel was created in {wheelhouse}", evidence)
+            raise BuildValidationError(f"build completed but no wheel was created in {wheelhouse}", command_record)
         if len(wheels) != 1:
-            raise BuildValidationError(f"build created multiple wheels in {wheelhouse}: {wheels}", evidence)
+            raise BuildValidationError(f"build created multiple wheels in {wheelhouse}: {wheels}", command_record)
     except BuildValidationError:
         try:
             _remove_tree(wheelhouse)
         except OSError as cleanup_error:
             logger.warning("Failed to clean partial wheelhouse %s: %s", wheelhouse, cleanup_error)
         raise
-    return wheels[0], evidence
+    return wheels[0], command_record
 
 
 def _example_dirs(examples_repo: Path) -> list[Path]:
@@ -887,7 +890,7 @@ def validate_examples_against_wheel(
     try:
         wheel, build_command = _build_wheel(repo_root, wheelhouse, timeout_seconds=timeout_seconds)
     except BuildValidationError as exc:
-        build_command = exc.evidence
+        build_command = exc.command_record
         wheel = wheelhouse / ".rpacore-build-failed"
     build_failed = not build_command.passed
 
@@ -971,7 +974,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         default=Path("validation-artifacts/examples-wheel-validation"),
-        help="Directory for the JSON and Markdown validation evidence.",
+        help="Directory for the JSON and Markdown validation results.",
     )
     parser.add_argument("--work-dir", type=Path, default=Path(tempfile.gettempdir()) / "rpacore-examples-wheel-validation")
     parser.add_argument(

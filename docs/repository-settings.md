@@ -105,7 +105,7 @@ the `installed-artifact` job before approving a release.
 For `rpacore-examples`, require its deterministic validation checks when a CI
 workflow exists. Manual, browser, desktop, network, or account-backed examples
 should be labeled separately and should not block repository maintenance unless
-the release decision explicitly makes them required evidence.
+the release decision explicitly makes them required validation results.
 
 ## Issue And Security Routes
 

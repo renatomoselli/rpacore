@@ -4,6 +4,21 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+### Breaking
+
+- Renamed maintainer release validation interfaces from evidence/go-no-go
+  wording to validation results and approval wording.
+
+  | Old | New |
+  | --- | --- |
+  | `--release-candidate-evidence` | `--release-candidate-validation-results` |
+  | `--examples-wheel-evidence` | `--examples-wheel-validation-results` |
+  | `release-candidate-evidence.json` | `release-candidate-validation-results.json` |
+  | `release-go-no-go.md` | `release-approval.md` |
+  | `evidence` manifest key | `validation_results` manifest key |
+  | `go` / `no-go` decision values | `approved` / `rejected` decision values |
+  | default `evidence/` output directory | default `validation-results/` output directory |
+
 ### Changed
 
 - Updated public docs to describe the maintained `0.1.x` release line where the
@@ -47,10 +62,10 @@ deterministic Python automation.
   protection, required checks, and issue/security routes.
 - Canonical `rpacore.dev` homepage metadata, with `rpacore.org` and
   `rpacore.net` reserved as defensive redirects.
-- Release rehearsal documentation for freeze inputs, evidence, examples
-  validation, and go/no-go decisions.
+- Release rehearsal documentation for freeze inputs, validation results, examples
+  validation, and approval decisions.
 - Release manifest preparation script for combining framework and examples
-  rehearsal evidence into a go/no-go draft.
+  rehearsal validation results into an approval draft.
 
 ### Compatibility
 

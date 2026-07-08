@@ -433,10 +433,10 @@ class TestExamplesWheelValidationScript:
             )
 
         with patch.object(script, "_run", side_effect=fake_run):
-            built_wheel, evidence = script._build_wheel(tmp_path, wheelhouse, timeout_seconds=300)
+            built_wheel, command_record = script._build_wheel(tmp_path, wheelhouse, timeout_seconds=300)
 
         assert built_wheel == wheel
-        assert evidence.passed is True
+        assert command_record.passed is True
 
     def test_build_failure_manifest_records_failed_result(self, tmp_path: Path) -> None:
         script = _load_script()
@@ -446,7 +446,7 @@ class TestExamplesWheelValidationScript:
         output_dir = tmp_path / "out"
         repo_root.mkdir()
 
-        build_evidence = script.CommandRecord(
+        build_command_record = script.CommandRecord(
             name="build_wheel",
             command=["python", "-m", "build"],
             cwd=str(repo_root),
@@ -457,7 +457,7 @@ class TestExamplesWheelValidationScript:
         )
 
         def fail_build(*_args, **_kwargs):
-            raise script.BuildValidationError("wheel build failed with exit code 2", build_evidence)
+            raise script.BuildValidationError("wheel build failed with exit code 2", build_command_record)
 
         with patch.object(script, "_build_wheel", side_effect=fail_build):
             manifest = script.validate_examples_against_wheel(
@@ -686,7 +686,7 @@ class TestExamplesWheelValidationScript:
         assert command_names[-2:] == ["pytest", "run_main"]
         assert all(command.skipped for command in result.commands[-2:])
 
-    def test_playwright_failure_keeps_installed_import_evidence(self, tmp_path: Path) -> None:
+    def test_playwright_failure_keeps_installed_import_record(self, tmp_path: Path) -> None:
         script = _load_script()
         examples_repo = tmp_path / "rpacore-examples"
         example_dir = examples_repo / "examples" / "acme_work_items"

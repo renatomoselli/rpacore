@@ -44,7 +44,7 @@ RPA Core uses semantic-versioned releases beginning with v0.1.0:
 - minor releases may add documented APIs or behavior, but should avoid breaking
   existing v0.1 users without a recorded migration reason
 - breaking changes before v1.0 require a changelog entry, public migration
-  guidance, and focused validation evidence
+  guidance, and focused validation results
 
 Deprecations should remain documented for at least one patch release when that
 is practical. A deprecation can be shortened only for correctness, security,

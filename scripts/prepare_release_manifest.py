@@ -1,4 +1,4 @@
-"""Prepare release manifest and go/no-go draft from rehearsal evidence."""
+"""Prepare release manifest and release-approval draft from validation results."""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ from typing import Any
 
 
 MANIFEST_NAME = "release-manifest.json"
-SUMMARY_NAME = "release-go-no-go.md"
+SUMMARY_NAME = "release-approval.md"
 GIT_TIMEOUT_SECONDS = 30
-EVIDENCE_STATUSES = frozenset({"pass", "fail"})
+VALIDATION_STATUSES = frozenset({"pass", "fail"})
 EXPECTED_LICENSE = "Apache-2.0"
 LOGGER = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ def _read_json(path: Path, *, label: str) -> dict[str, Any]:
 def _artifact_summary(release_candidate: dict[str, Any]) -> list[dict[str, Any]]:
     artifacts = release_candidate.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
-        raise ManifestError("release-candidate evidence has no artifacts")
+        raise ManifestError("release-candidate validation results have no artifacts")
     summary = []
     for artifact in artifacts:
         if not isinstance(artifact, dict):
@@ -130,7 +130,7 @@ def _artifact_summary(release_candidate: dict[str, Any]) -> list[dict[str, Any]]
 def _dependency_inventory(release_candidate: dict[str, Any]) -> dict[str, Any]:
     inventory = release_candidate.get("dependency_inventory")
     if inventory is None:
-        raise ManifestError("release-candidate evidence missing dependency_inventory object")
+        raise ManifestError("release-candidate validation results missing dependency_inventory object")
     if not isinstance(inventory, dict):
         raise ManifestError("release-candidate dependency_inventory must be an object")
     runtime_dependencies = inventory.get("runtime_dependencies")
@@ -200,9 +200,9 @@ def _release_environment(release_candidate: dict[str, Any]) -> dict[str, Any]:
     platform_info = release_candidate.get("platform")
     python_info = release_candidate.get("python")
     if not isinstance(platform_info, dict):
-        raise ManifestError("release-candidate evidence missing platform object")
+        raise ManifestError("release-candidate validation results missing platform object")
     if not isinstance(python_info, dict):
-        raise ManifestError("release-candidate evidence missing python object")
+        raise ManifestError("release-candidate validation results missing python object")
     machine = platform_info.get("machine")
     if not isinstance(machine, str) or not machine:
         machine = platform_info.get("architecture")
@@ -249,7 +249,7 @@ def _expected_pypi_metadata(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def _status_from_evidence(
+def _status_from_validation_results(
     release_candidate: dict[str, Any],
     examples_wheel: dict[str, Any],
     *,
@@ -260,19 +260,19 @@ def _status_from_evidence(
 ) -> str:
     release_candidate_result = _result_status(
         release_candidate,
-        label="release-candidate evidence",
+        label="release-candidate validation results",
     )
     examples_wheel_result = _result_status(
         examples_wheel,
-        label="examples-wheel evidence",
+        label="examples wheel validation results",
     )
     if framework.dirty or examples.dirty or docs_verification != "passed" or testpypi == "failed":
-        return "no-go"
-    return "go" if [release_candidate_result, examples_wheel_result] == ["pass", "pass"] else "no-go"
+        return "rejected"
+    return "approved" if [release_candidate_result, examples_wheel_result] == ["pass", "pass"] else "rejected"
 
 
-def _result_status(evidence: dict[str, Any], *, label: str) -> str:
-    result = evidence.get("result")
+def _result_status(validation_results: dict[str, Any], *, label: str) -> str:
+    result = validation_results.get("result")
     if not isinstance(result, dict):
         raise ManifestError(f"{label} result must be an object")
     if "status" not in result:
@@ -280,8 +280,8 @@ def _result_status(evidence: dict[str, Any], *, label: str) -> str:
     status = result.get("status")
     if not isinstance(status, str):
         raise ManifestError(f"{label} result.status must be a string")
-    if status not in EVIDENCE_STATUSES:
-        expected = ", ".join(sorted(EVIDENCE_STATUSES))
+    if status not in VALIDATION_STATUSES:
+        expected = ", ".join(sorted(VALIDATION_STATUSES))
         raise ManifestError(f"{label} result.status must be one of: {expected}")
     return status
 
@@ -290,8 +290,8 @@ def prepare_release_manifest(
     *,
     repo_root: Path,
     examples_repo: Path,
-    release_candidate_evidence: Path,
-    examples_wheel_evidence: Path,
+    release_candidate_validation_results: Path,
+    examples_wheel_validation_results: Path,
     output_dir: Path,
     tag: str,
     owner: str,
@@ -307,8 +307,14 @@ def prepare_release_manifest(
     repo_root = repo_root.resolve()
     examples_repo = examples_repo.resolve()
     output_dir = output_dir.resolve()
-    release_candidate = _read_json(release_candidate_evidence, label="release-candidate evidence")
-    examples_wheel = _read_json(examples_wheel_evidence, label="examples-wheel evidence")
+    release_candidate = _read_json(
+        release_candidate_validation_results,
+        label="release-candidate validation results",
+    )
+    examples_wheel = _read_json(
+        examples_wheel_validation_results,
+        label="examples wheel validation results",
+    )
     framework_state = _repo_state("rpacore", repo_root)
     examples_state = _repo_state("rpacore-examples", examples_repo)
     metadata = _expected_pypi_metadata(repo_root)
@@ -323,7 +329,7 @@ def prepare_release_manifest(
         "schema_version": 1,
         "generated_at": generated_at,
         "decision": {
-            "status": _status_from_evidence(
+            "status": _status_from_validation_results(
                 release_candidate,
                 examples_wheel,
                 framework=framework_state,
@@ -354,15 +360,15 @@ def prepare_release_manifest(
             "note": docs_verification_note,
         },
         "expected_pypi_metadata": metadata,
-        "evidence": {
+        "validation_results": {
             "release_candidate": {
-                "path": str(release_candidate_evidence),
-                "status": _result_status(release_candidate, label="release-candidate evidence"),
+                "path": str(release_candidate_validation_results),
+                "status": _result_status(release_candidate, label="release-candidate validation results"),
                 "generated_at": release_candidate.get("generated_at"),
             },
             "examples_wheel": {
-                "path": str(examples_wheel_evidence),
-                "status": _result_status(examples_wheel, label="examples-wheel evidence"),
+                "path": str(examples_wheel_validation_results),
+                "status": _result_status(examples_wheel, label="examples wheel validation results"),
                 "generated_at": examples_wheel.get("generated_at"),
             },
         },
@@ -408,7 +414,7 @@ def _summary_markdown(manifest: dict[str, Any]) -> str:
     if not artifacts:
         artifacts = "- (none)"
     lines = [
-        "# Release Go/No-Go Draft",
+        "# Release Approval Draft",
         "",
         f"- Generated at: `{manifest['generated_at']}`",
         f"- Decision status: `{manifest['decision']['status']}`",
@@ -418,8 +424,8 @@ def _summary_markdown(manifest: dict[str, Any]) -> str:
         f"- Tag: `{manifest['release']['tag']}`",
         f"- Framework commit: `{manifest['repositories']['framework']['commit']}`",
         f"- Examples commit: `{manifest['repositories']['examples']['commit']}`",
-        f"- Release-candidate evidence: `{manifest['evidence']['release_candidate']['status']}`",
-        f"- Examples wheel evidence: `{manifest['evidence']['examples_wheel']['status']}`",
+        f"- Release-candidate validation results: `{manifest['validation_results']['release_candidate']['status']}`",
+        f"- Examples wheel validation results: `{manifest['validation_results']['examples_wheel']['status']}`",
         f"- Documentation verification: `{manifest['documentation_verification']['status']}`",
         f"- SBOM: `{manifest['sbom']['status']}`",
         f"- Platform: `{manifest['environment']['platform']['system']}` "
@@ -436,8 +442,8 @@ def _summary_markdown(manifest: dict[str, Any]) -> str:
         "## Open Decision",
         "",
         "A human release owner must review this draft, confirm external repository",
-        "settings and publication permissions, then record the final go/no-go",
-        "decision before any publication action.",
+        "settings and publication permissions, then record the final approval or",
+        "rejection decision before any publication action.",
         "",
     ]
     return "\n".join(lines)
@@ -451,12 +457,12 @@ def _note_or_none(value: Any) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Prepare release manifest and go/no-go draft from rehearsal evidence."
+        description="Prepare release manifest and release-approval draft from validation results."
     )
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--examples-repo", type=Path, default=Path.cwd().parent / "rpacore-examples")
-    parser.add_argument("--release-candidate-evidence", type=Path, required=True)
-    parser.add_argument("--examples-wheel-evidence", type=Path, required=True)
+    parser.add_argument("--release-candidate-validation-results", type=Path, required=True)
+    parser.add_argument("--examples-wheel-validation-results", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("validation-artifacts/release-manifest"))
     parser.add_argument("--tag", default="v0.1.0")
     parser.add_argument("--owner", required=True)
@@ -465,7 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--docs-verification",
         choices=("passed", "failed", "skipped"),
         default="skipped",
-        help="Documentation verification result; only 'passed' can produce a go decision.",
+        help="Documentation verification result; only 'passed' can produce an approved decision.",
     )
     parser.add_argument("--docs-command", default="python scripts/verify_docs.py --repo-root .")
     parser.add_argument("--docs-verification-note", default="")
@@ -486,8 +492,8 @@ def main(argv: list[str] | None = None) -> int:
         prepare_release_manifest(
             repo_root=args.repo_root,
             examples_repo=args.examples_repo,
-            release_candidate_evidence=args.release_candidate_evidence,
-            examples_wheel_evidence=args.examples_wheel_evidence,
+            release_candidate_validation_results=args.release_candidate_validation_results,
+            examples_wheel_validation_results=args.examples_wheel_validation_results,
             output_dir=args.output_dir,
             tag=args.tag,
             owner=args.owner,
@@ -508,7 +514,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     output_dir = args.output_dir.resolve()
     print(f"Wrote release manifest to {output_dir / MANIFEST_NAME}")
-    print(f"Wrote release go/no-go draft to {output_dir / SUMMARY_NAME}")
+    print(f"Wrote release approval draft to {output_dir / SUMMARY_NAME}")
     return 0
 
 

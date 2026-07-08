@@ -36,8 +36,8 @@ The release manifest should contain:
 - documentation verification command and result
 - expected PyPI metadata, including project URLs and license files
 - release owner and approver
-- release-candidate evidence files
-- external examples wheel-validation evidence files
+- release-candidate validation results
+- external examples wheel-validation results
 - TestPyPI result, or a note that TestPyPI was intentionally skipped
 
 Use the prebuilt, hashed artifacts recorded in the manifest for publication. Do
@@ -71,14 +71,15 @@ Then verify:
 - deterministic representative examples pass from the built wheel
 - repository settings match [Repository Settings](repository-settings.md)
 
-Prepare the release manifest and go/no-go draft from the two evidence files:
+Prepare the release manifest and approval draft from the two validation result
+files:
 
 ```bash
 python scripts/prepare_release_manifest.py \
   --repo-root . \
   --examples-repo ../rpacore-examples \
-  --release-candidate-evidence <path-to-release-candidate-evidence.json> \
-  --examples-wheel-evidence <path-to-examples-wheel-validation.json> \
+  --release-candidate-validation-results <path-to-release-candidate-validation-results.json> \
+  --examples-wheel-validation-results <path-to-examples-wheel-validation.json> \
   --owner "<release owner>" \
   --approver "<release approver>" \
   --docs-verification passed \
@@ -89,28 +90,28 @@ python scripts/prepare_release_manifest.py \
 ```
 
 Manual, browser, desktop, network, or account-backed examples should be recorded
-separately from deterministic release evidence unless the release owner makes
-them required for the candidate.
+separately from deterministic release validation results unless the release
+owner makes them required for the candidate.
 
-## Go Or No-Go Decision
+## Release Approval
 
 Record a written decision before publication:
 
-- go or no-go
+- approval or rejection
 - release owner
 - approver
 - date
 - framework commit
 - examples commit
 - artifact hashes
-- validation evidence locations
+- validation result locations
 - open blockers
 - known non-blocking limits
 - rollback or hotfix path
 
-The decision should be `go` only when there are no runtime, data-loss, security,
-artifact, source, version, tag, documentation, examples, repository-readiness, or
-publication-permission blockers.
+The decision should approve publication only when there are no runtime,
+data-loss, security, artifact, source, version, tag, documentation, examples,
+repository-readiness, or publication-permission blockers.
 
 ## TestPyPI
 

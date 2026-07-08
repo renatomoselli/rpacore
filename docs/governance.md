@@ -61,9 +61,9 @@ The release branch should require the CI jobs that prove the public product:
   names, local-machine paths, and accidental large binaries
 
 Local release rehearsal may run stricter checks than CI. Publication still uses
-the frozen prebuilt artifacts and the release manifest evidence; do not rebuild
+the frozen prebuilt artifacts and the release validation results; do not rebuild
 artifacts during upload. See [Release Rehearsal](release-rehearsal.md) for the
-manifest and go/no-go decision shape.
+manifest and approval/rejection decision shape.
 
 ## Repository Hygiene
 
@@ -93,15 +93,15 @@ A release owner is responsible for:
 - checking public docs, security policy, support route, and governance route
 - confirming compatible `rpacore-examples` instructions point to the intended
   framework version
-- preserving release evidence, logs, and rollback or hotfix decisions
+- preserving release validation results, logs, and rollback or hotfix decisions
 
 Publication requires explicit approval at release time. A plan, release
 rehearsal, or successful CI run does not authorize publishing by itself.
 
 ## Examples Repository Alignment
 
-The examples repository is consumer-facing evidence. Framework changes are not
-release-ready until the examples impact is explicit:
+The examples repository is a consumer-facing validation surface. Framework
+changes are not release-ready until the examples impact is explicit:
 
 - update the affected examples, tests, requirements, and README files; or
 - record why no example change is required.

@@ -1,4 +1,4 @@
-"""Produce reproducible release-candidate evidence for RPA Core."""
+"""Produce reproducible release-candidate validation results for RPA Core."""
 
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ PYTEST_COUNT_STATUSES = frozenset(
 
 
 @dataclass
-class CommandEvidence:
+class CommandRecord:
     """One executed command and its bounded output."""
 
     name: str
@@ -96,7 +96,7 @@ class CommandEvidence:
 
 
 @dataclass
-class RepoEvidence:
+class RepoState:
     """Repository provenance captured before validation starts."""
 
     name: str
@@ -125,7 +125,7 @@ def _run(
     allowed_roots: tuple[Path, ...],
     env: dict[str, str] | None = None,
     check: bool = True,
-) -> CommandEvidence:
+) -> CommandRecord:
     _validate_contained_path(cwd, allowed_roots=allowed_roots, label=f"{name} cwd")
     started = time.perf_counter()
     try:
@@ -138,7 +138,7 @@ def _run(
             check=check,
         )
     except subprocess.CalledProcessError as exc:
-        evidence = CommandEvidence(
+        command_record = CommandRecord(
             name=name,
             command=command,
             cwd=str(cwd),
@@ -151,10 +151,10 @@ def _run(
         )
         raise ValidationError(
             f"{name} failed with exit code {exc.returncode}\n"
-            f"stdout:\n{evidence.stdout}\n"
-            f"stderr:\n{evidence.stderr}"
+            f"stdout:\n{command_record.stdout}\n"
+            f"stderr:\n{command_record.stderr}"
         ) from exc
-    evidence = CommandEvidence(
+    command_record = CommandRecord(
         name=name,
         command=command,
         cwd=str(cwd),
@@ -165,7 +165,7 @@ def _run(
         raw_stdout=completed.stdout,
         raw_stderr=completed.stderr,
     )
-    return evidence
+    return command_record
 
 
 def _git_output(repo: Path, *args: str) -> str:
@@ -223,10 +223,10 @@ def _require_git_repo(path: Path, *, name: str) -> None:
         raise ValidationError(f"{name} path is not a git repository: {path}")
 
 
-def _repo_evidence(name: str, path: Path) -> RepoEvidence:
+def _repo_state(name: str, path: Path) -> RepoState:
     _require_git_repo(path, name=name)
     status = _git_output(path, "status", "--porcelain=v1").splitlines()
-    return RepoEvidence(
+    return RepoState(
         name=name,
         path=str(path),
         commit=_git_output(path, "rev-parse", "HEAD"),
@@ -457,7 +457,7 @@ def _pytest_counts(output: str) -> dict[str, int]:
     return counts
 
 
-def _aggregate_pytest_counts(commands: list[CommandEvidence]) -> dict[str, int]:
+def _aggregate_pytest_counts(commands: list[CommandRecord]) -> dict[str, int]:
     totals: dict[str, int] = {}
     for command in commands:
         for status, count in command.parsed.items():
@@ -470,8 +470,8 @@ def _aggregate_pytest_counts(commands: list[CommandEvidence]) -> dict[str, int]:
 
 def _manifest_result(
     *,
-    commands: list[CommandEvidence],
-    repos: list[RepoEvidence],
+    commands: list[CommandRecord],
+    repos: list[RepoState],
 ) -> dict[str, int | str]:
     failed_command_count = sum(1 for command in commands if command.exit_code != 0)
     dirty_repository_count = sum(1 for repo in repos if repo.dirty)
@@ -483,7 +483,7 @@ def _manifest_result(
     }
 
 
-def _evidence_index(commands: list[CommandEvidence]) -> dict[str, list[str]]:
+def _validation_index(commands: list[CommandRecord]) -> dict[str, list[str]]:
     command_names = {command.name for command in commands}
     index = {
         "G2-001": ["framework_tests"],
@@ -506,20 +506,20 @@ def _evidence_index(commands: list[CommandEvidence]) -> dict[str, list[str]]:
     }
 
 
-def _parse_json_output(evidence: CommandEvidence) -> dict[str, Any]:
-    stdout = evidence.raw_stdout if evidence.raw_stdout is not None else evidence.stdout
+def _parse_json_output(command_record: CommandRecord) -> dict[str, Any]:
+    stdout = command_record.raw_stdout if command_record.raw_stdout is not None else command_record.stdout
     try:
         parsed = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise ValidationError(f"{evidence.name} did not produce valid JSON: {exc}") from exc
+        raise ValidationError(f"{command_record.name} did not produce valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
-        raise ValidationError(f"{evidence.name} did not produce a JSON object")
+        raise ValidationError(f"{command_record.name} did not produce a JSON object")
     return parsed
 
 
-def _parse_ndjson_output(evidence: CommandEvidence) -> list[dict[str, Any]]:
+def _parse_ndjson_output(command_record: CommandRecord) -> list[dict[str, Any]]:
     records = []
-    stdout = evidence.raw_stdout if evidence.raw_stdout is not None else evidence.stdout
+    stdout = command_record.raw_stdout if command_record.raw_stdout is not None else command_record.stdout
     for line_number, line in enumerate(stdout.splitlines(), start=1):
         if not line.strip():
             continue
@@ -527,10 +527,10 @@ def _parse_ndjson_output(evidence: CommandEvidence) -> list[dict[str, Any]]:
             parsed = json.loads(line)
         except json.JSONDecodeError as exc:
             raise ValidationError(
-                f"{evidence.name} line {line_number} did not produce valid JSON: {exc}"
+                f"{command_record.name} line {line_number} did not produce valid JSON: {exc}"
             ) from exc
         if not isinstance(parsed, dict):
-            raise ValidationError(f"{evidence.name} produced a non-object NDJSON line")
+            raise ValidationError(f"{command_record.name} produced a non-object NDJSON line")
         records.append(parsed)
     return records
 
@@ -617,8 +617,8 @@ def _python_version_info(python: Path) -> dict[str, str]:
     }
 
 
-def _command_record(evidence: CommandEvidence) -> dict[str, Any]:
-    record = asdict(evidence)
+def _command_record(command_record: CommandRecord) -> dict[str, Any]:
+    record = asdict(command_record)
     record.pop("raw_stdout", None)
     record.pop("raw_stderr", None)
     return record
@@ -636,7 +636,7 @@ def _transaction_command(
 
 
 def _append_cli_transaction_inspection(
-    commands: list[CommandEvidence],
+    commands: list[CommandRecord],
     *,
     name_prefix: str,
     rpacore_cli: Path,
@@ -645,7 +645,7 @@ def _append_cli_transaction_inspection(
     allowed_roots: tuple[Path, ...],
     env: dict[str, str],
 ) -> None:
-    inspection_commands: list[CommandEvidence] = []
+    inspection_commands: list[CommandRecord] = []
     inspection_commands.append(
         _run(
             f"{name_prefix}_transaction_list",
@@ -723,7 +723,7 @@ def validate_release_candidate(
     example_cli_project: str | None,
     example_cli_db: str,
 ) -> dict[str, Any]:
-    """Run release-candidate validation and return the evidence manifest."""
+    """Run release-candidate validation and return the validation manifest."""
     output_dir.mkdir(parents=True, exist_ok=True)
     work_dir = work_dir.resolve()
     source_dir = work_dir / "source"
@@ -747,15 +747,15 @@ def validate_release_candidate(
         wheelhouse.mkdir(parents=True)
         outside_dir.mkdir(parents=True)
 
-        repos = [_repo_evidence("rpacore", repo_root)]
+        repos = [_repo_state("rpacore", repo_root)]
         if examples_repo is not None:
-            repos.append(_repo_evidence("rpacore-examples", examples_repo))
+            repos.append(_repo_state("rpacore-examples", examples_repo))
 
         _copy_tree(repo_root, framework_copy)
         if examples_repo is not None:
             _copy_tree(examples_repo, examples_copy)
 
-        commands: list[CommandEvidence] = []
+        commands: list[CommandRecord] = []
         env = _python_env()
         allowed_run_roots = (work_dir,)
         commands.append(_run("framework_tests", [sys.executable, "-m", "pytest", "-q"], cwd=framework_copy, allowed_roots=allowed_run_roots, env=env))
@@ -867,15 +867,15 @@ def validate_release_candidate(
             for test_path in examples_pytest:
                 target = _example_pytest_target(test_path, examples_root=examples_copy)
                 command = [str(python), "-m", "pytest", target.pytest_path, "-q"]
-                evidence = _run(
+                command_record = _run(
                     f"example_pytest:{target.manifest_path}",
                     command,
                     cwd=target.project_dir,
                     allowed_roots=allowed_run_roots,
                     env=env,
                 )
-                evidence.parsed = _pytest_counts(evidence.stdout + "\n" + evidence.stderr)
-                commands.append(evidence)
+                command_record.parsed = _pytest_counts(command_record.stdout + "\n" + command_record.stderr)
+                commands.append(command_record)
 
         manifest = {
             "schema_version": 1,
@@ -893,7 +893,7 @@ def validate_release_candidate(
             "dependency_inventory": dependency_inventory,
             "result": _manifest_result(commands=commands, repos=repos),
             "pytest_totals": _aggregate_pytest_counts(commands),
-            "evidence_index": _evidence_index(commands),
+            "validation_index": _validation_index(commands),
             "commands": [_command_record(command) for command in commands],
             "work_dir": str(work_dir),
         }
@@ -919,12 +919,12 @@ def validate_release_candidate(
 
 
 def _write_manifest(manifest: dict[str, Any], output_dir: Path) -> None:
-    manifest_path = output_dir / "release-candidate-evidence.json"
+    manifest_path = output_dir / "release-candidate-validation-results.json"
     summary_path = output_dir / "release-candidate-summary.md"
     manifest_tmp = output_dir / f".{manifest_path.name}.tmp"
     summary_tmp = output_dir / f".{summary_path.name}.tmp"
     lines = [
-        "# Release Candidate Evidence Summary",
+        "# Release Candidate Validation Summary",
         "",
         f"- Generated at: `{manifest['generated_at']}`",
         f"- Result: `{manifest['result']['status']}`",
@@ -945,11 +945,11 @@ def _write_manifest(manifest: dict[str, Any], output_dir: Path) -> None:
             for status, count in manifest["pytest_totals"].items()
         ) or "(none)"
         lines.extend(["", "## Pytest Totals", "", f"- {totals}"])
-    lines.extend(["", "## Evidence Index", ""])
+    lines.extend(["", "## Validation Index", ""])
     for finding_id in manifest.get("finding_ids", []):
-        command_names = manifest.get("evidence_index", {}).get(finding_id, [])
-        evidence = ", ".join(f"`{name}`" for name in command_names) or "(none)"
-        lines.append(f"- `{finding_id}`: {evidence}")
+        command_names = manifest.get("validation_index", {}).get(finding_id, [])
+        validation_commands = ", ".join(f"`{name}`" for name in command_names) or "(none)"
+        lines.append(f"- `{finding_id}`: {validation_commands}")
     lines.extend(["", "## Commands", ""])
     for command in manifest["commands"]:
         status = "pass" if command["exit_code"] == 0 else "fail"
@@ -991,7 +991,7 @@ def _write_manifest(manifest: dict[str, Any], output_dir: Path) -> None:
 def build_parser() -> argparse.ArgumentParser:
     default_repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
-        description="Run release-candidate validation and write evidence files."
+        description="Run release-candidate validation and write result files."
     )
     parser.add_argument("--repo-root", type=Path, default=default_repo_root)
     parser.add_argument("--examples-repo", type=Path, default=None)
@@ -1002,7 +1002,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Keep an owned work directory after validation. When --output-dir is omitted, "
-            "evidence is written inside the work directory and the directory is kept."
+            "validation results are written inside the work directory and the directory is kept."
         ),
     )
     parser.add_argument("--examples-pytest", action="append", default=[])
@@ -1023,7 +1023,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     owns_work_dir = args.work_dir is None
     work_dir = args.work_dir or Path(tempfile.mkdtemp(prefix="rpacore-rc-"))
-    output_dir = args.output_dir or (work_dir / "evidence")
+    output_dir = args.output_dir or (work_dir / "validation-results")
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
         validate_release_candidate(
@@ -1035,7 +1035,7 @@ def main(argv: list[str] | None = None) -> int:
             example_cli_project=args.example_cli_project,
             example_cli_db=args.example_cli_db,
         )
-        print(f"Wrote release-candidate evidence to {output_dir.resolve()}")
+        print(f"Wrote release-candidate validation results to {output_dir.resolve()}")
     finally:
         if owns_work_dir and args.output_dir is not None and not args.keep_work_dir:
             _remove_tree(work_dir)
