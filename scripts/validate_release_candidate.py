@@ -39,6 +39,7 @@ from rpacore._validation import (
 
 
 TRUNCATE_OUTPUT_CHARS = 12_000
+DEFAULT_OUTPUT_DIR = Path("validation-artifacts/release-candidate-validation")
 VALIDATION_FINDINGS = (
     "G2-001",
     "G2-002",
@@ -996,13 +997,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo-root", type=Path, default=default_repo_root)
     parser.add_argument("--examples-repo", type=Path, default=None)
     parser.add_argument("--work-dir", type=Path, default=None)
-    parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help="Directory for release-candidate validation result files.",
+    )
     parser.add_argument(
         "--keep-work-dir",
         action="store_true",
         help=(
-            "Keep an owned work directory after validation. When --output-dir is omitted, "
-            "validation results are written inside the work directory and the directory is kept."
+            "Keep an owned temporary work directory after validation. By default, "
+            "owned temporary work directories are removed after writing validation results."
         ),
     )
     parser.add_argument("--examples-pytest", action="append", default=[])

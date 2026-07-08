@@ -39,6 +39,7 @@ class TestReleaseCandidateValidationScript:
                 ".git",
                 ".internal",
                 ".pytest_cache",
+                ".rpiv",
                 "Aux",
                 "con",
                 "NUL",
@@ -54,6 +55,7 @@ class TestReleaseCandidateValidationScript:
             ".git",
             ".internal",
             ".pytest_cache",
+            ".rpiv",
             "Aux",
             "con",
             "NUL",
@@ -61,6 +63,15 @@ class TestReleaseCandidateValidationScript:
             "Prn",
             "rpacore.egg-info",
         }
+
+    def test_parser_defaults_write_to_public_validation_artifacts_dir(self) -> None:
+        module = _load_script()
+
+        args = module.build_parser().parse_args([])
+
+        assert args.output_dir == Path("validation-artifacts/release-candidate-validation")
+        assert ".rpiv" not in args.output_dir.parts
+        assert args.work_dir is None
 
     def test_copy_tree_skips_symlinks(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -1607,6 +1618,26 @@ name = "rpacore"
         assert result == 0
         validate.assert_called_once()
         assert work_dir.exists()
+
+    def test_main_defaults_output_to_public_validation_artifacts_dir(self, tmp_path: Path) -> None:
+        module = _load_script()
+        work_dir = tmp_path / "owned-work"
+
+        with patch.object(module.tempfile, "mkdtemp", return_value=str(work_dir)):
+            with patch.object(
+                module,
+                "validate_release_candidate",
+                return_value={"ok": True},
+            ) as validate:
+                result = module.main(["--repo-root", str(tmp_path)])
+
+        assert result == 0
+        validate.assert_called_once()
+        assert validate.call_args.kwargs["output_dir"] == (
+            Path("validation-artifacts/release-candidate-validation").resolve()
+        )
+        assert ".rpiv" not in validate.call_args.kwargs["output_dir"].parts
+        assert not work_dir.exists()
 
     def test_main_removes_owned_temp_work_dir_when_output_dir_is_external(self, tmp_path: Path) -> None:
         module = _load_script()

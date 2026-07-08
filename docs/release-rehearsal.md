@@ -48,7 +48,10 @@ not rebuild artifacts during upload.
 Run the framework release-candidate validation from a clean repository state:
 
 ```bash
-python scripts/validate_release_candidate.py --repo-root . --examples-repo ../rpacore-examples
+python scripts/validate_release_candidate.py \
+  --repo-root . \
+  --examples-repo ../rpacore-examples \
+  --output-dir validation-artifacts/release-candidate-validation
 ```
 
 Run external examples validation against the built wheel:
@@ -78,8 +81,8 @@ files:
 python scripts/prepare_release_manifest.py \
   --repo-root . \
   --examples-repo ../rpacore-examples \
-  --release-candidate-validation-results <path-to-release-candidate-validation-results.json> \
-  --examples-wheel-validation-results <path-to-examples-wheel-validation.json> \
+  --release-candidate-validation-results validation-artifacts/release-candidate-validation/release-candidate-validation-results.json \
+  --examples-wheel-validation-results validation-artifacts/examples-wheel-validation/examples-wheel-validation.json \
   --owner "<release owner>" \
   --approver "<release approver>" \
   --docs-verification passed \
