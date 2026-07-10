@@ -63,6 +63,17 @@ transaction binding makes stranded transaction records discoverable from queue
 retries. Transaction schema migrations are forward-only; older code must reject
 a newer artifact schema version rather than silently ignoring artifact rows.
 
+`atomic_output_path(destination)` supports content-agnostic file publication for
+skills that write JSON, CSV, workbooks, or library-owned formats. It yields a
+temporary path in the destination directory and calls `os.replace()` only after
+the context exits successfully. If writer code raises, the previous destination
+is preserved and the temporary file is removed without masking the original
+exception. The helper fsyncs the temporary file before replacement, but it does
+not create parent directories, preserve prior file permissions, coordinate
+cross-process writers, or make file publication atomic with SQLite checkpoints.
+Register artifacts only after the context succeeds so durable transaction
+records do not point at partial files.
+
 Queue resource lifecycle:
 
 - queue item payload populates `ctx.state`

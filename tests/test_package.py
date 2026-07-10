@@ -167,6 +167,7 @@ class TestPackageVersion:
             "Transaction",
             "TransactionReport",
             "WebhookNotifier",
+            "atomic_output_path",
             "build_credential_provider",
             "build_notifiers",
             "configure_logger",

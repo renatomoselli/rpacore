@@ -1,17 +1,38 @@
-"""Public helpers for resolving configuration paths safely."""
+"""Public helpers for resolving and publishing paths safely."""
 
 from __future__ import annotations
 
 import copy
 from collections.abc import Iterable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from os import PathLike
+import os
 from pathlib import Path
+import sys
+import tempfile
 
 from rpacore._validation import type_error
 from rpacore.exceptions import SystemException
 
 
 PathValue = str | PathLike[str]
+
+
+@contextmanager
+def atomic_output_path(destination: PathValue) -> Iterator[Path]:
+    """Yield a temporary sibling path and replace destination on successful exit."""
+    destination_path = _path_value(destination, "destination")
+    temporary = _temporary_output_path(destination_path)
+    published = False
+    try:
+        yield temporary
+        _fsync_file(temporary)
+        os.replace(temporary, destination_path)
+        published = True
+    finally:
+        if not published:
+            _cleanup_temporary_output(temporary, suppress_errors=sys.exc_info()[0] is not None)
 
 
 def resolve_config_path(
@@ -86,3 +107,24 @@ def _dotted_parent(config: dict[str, object], key: str) -> tuple[dict[str, objec
             raise type_error(".".join(traversed), "dict", child)
         parent = child
     return parent, parts[-1]
+
+
+def _temporary_output_path(destination: Path) -> Path:
+    parent = destination.parent
+    prefix = f".{destination.name}." if destination.name else ".output."
+    descriptor, temporary = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=parent)
+    os.close(descriptor)
+    return Path(temporary)
+
+
+def _fsync_file(path: Path) -> None:
+    with path.open("r+b") as handle:
+        os.fsync(handle.fileno())
+
+
+def _cleanup_temporary_output(path: Path, *, suppress_errors: bool) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        if not suppress_errors:
+            raise

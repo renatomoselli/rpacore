@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import os
 from pathlib import Path
 
@@ -9,7 +11,154 @@ import pytest
 
 import rpacore
 from rpacore.exceptions import SystemException
-from rpacore.paths import resolve_config_path, resolve_config_paths
+from rpacore.paths import atomic_output_path, resolve_config_path, resolve_config_paths
+
+
+class TestAtomicOutputPath:
+    def test_success_replaces_destination_after_json_writer_completes(self, tmp_path: Path) -> None:
+        destination = tmp_path / "report.json"
+        destination.write_text('{"status": "old"}', encoding="utf-8")
+
+        with atomic_output_path(destination) as temporary:
+            assert temporary.parent == destination.parent
+            assert temporary.name.startswith(f".{destination.name}.")
+            assert temporary.name.endswith(".tmp")
+            assert destination.read_text(encoding="utf-8") == '{"status": "old"}'
+            temporary.write_text(json.dumps({"status": "new"}), encoding="utf-8")
+
+        assert json.loads(destination.read_text(encoding="utf-8")) == {"status": "new"}
+        assert not temporary.exists()
+
+    def test_success_supports_csv_writer(self, tmp_path: Path) -> None:
+        destination = tmp_path / "rows.csv"
+
+        with atomic_output_path(destination) as temporary:
+            with temporary.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["name", "count"])
+                writer.writerow(["processed", "2"])
+
+        assert destination.read_text(encoding="utf-8").splitlines() == [
+            "name,count",
+            "processed,2",
+        ]
+
+    def test_success_supports_workbook_like_binary_writer(self, tmp_path: Path) -> None:
+        destination = tmp_path / "workbook.xlsx"
+        payload = b"PK\x03\x04fake-xlsx-content"
+
+        with atomic_output_path(destination) as temporary:
+            temporary.write_bytes(payload)
+
+        assert destination.read_bytes() == payload
+
+    def test_success_without_writer_output_publishes_empty_file(self, tmp_path: Path) -> None:
+        destination = tmp_path / "empty.txt"
+        destination.write_text("old", encoding="utf-8")
+
+        with atomic_output_path(destination) as temporary:
+            assert temporary.read_bytes() == b""
+
+        assert destination.read_bytes() == b""
+        assert not temporary.exists()
+
+    def test_exception_preserves_existing_destination_and_removes_temporary(self, tmp_path: Path) -> None:
+        destination = tmp_path / "report.json"
+        destination.write_text("old", encoding="utf-8")
+
+        with pytest.raises(RuntimeError, match="writer failed"):
+            with atomic_output_path(destination) as temporary:
+                temporary.write_text("partial", encoding="utf-8")
+                raise RuntimeError("writer failed")
+
+        assert destination.read_text(encoding="utf-8") == "old"
+        assert not temporary.exists()
+        assert list(tmp_path.glob(f".{destination.name}.*.tmp")) == []
+
+    def test_cleanup_failure_does_not_mask_writer_exception(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        destination = tmp_path / "report.json"
+        destination.write_text("old", encoding="utf-8")
+        cleanup_attempts: list[Path] = []
+
+        def fail_unlink(path: Path, missing_ok: bool = False) -> None:
+            cleanup_attempts.append(path)
+            raise OSError("cleanup failed")
+
+        monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+        with pytest.raises(RuntimeError, match="writer failed"):
+            with atomic_output_path(destination) as temporary:
+                temporary.write_text("partial", encoding="utf-8")
+                raise RuntimeError("writer failed")
+
+        assert cleanup_attempts == [temporary]
+        assert destination.read_text(encoding="utf-8") == "old"
+
+    def test_replace_failure_preserves_existing_destination_and_removes_temporary(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        destination = tmp_path / "report.json"
+        destination.write_text("old", encoding="utf-8")
+
+        def fail_replace(source: Path, target: Path) -> None:
+            assert source.exists()
+            assert target == destination
+            raise OSError("replace denied")
+
+        monkeypatch.setattr(os, "replace", fail_replace)
+
+        with pytest.raises(OSError, match="replace denied"):
+            with atomic_output_path(destination) as temporary:
+                temporary.write_text("new", encoding="utf-8")
+
+        assert destination.read_text(encoding="utf-8") == "old"
+        assert not temporary.exists()
+
+    def test_fsync_failure_preserves_existing_destination_and_removes_temporary(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        destination = tmp_path / "report.json"
+        destination.write_text("old", encoding="utf-8")
+        replace_calls: list[tuple[Path, Path]] = []
+
+        def fail_fsync(file_descriptor: int) -> None:
+            raise OSError("fsync failed")
+
+        def record_replace(source: Path, target: Path) -> None:
+            replace_calls.append((source, target))
+
+        monkeypatch.setattr(os, "fsync", fail_fsync)
+        monkeypatch.setattr(os, "replace", record_replace)
+
+        with pytest.raises(OSError, match="fsync failed"):
+            with atomic_output_path(destination) as temporary:
+                temporary.write_text("new", encoding="utf-8")
+
+        assert destination.read_text(encoding="utf-8") == "old"
+        assert not temporary.exists()
+        assert replace_calls == []
+
+    def test_missing_parent_directory_fails_before_yield(self, tmp_path: Path) -> None:
+        destination = tmp_path / "missing" / "report.json"
+
+        with pytest.raises(FileNotFoundError):
+            with atomic_output_path(destination):
+                raise AssertionError("context body should not run")
+
+    def test_invalid_destination_type_raises(self) -> None:
+        with pytest.raises(TypeError) as exc_info:
+            with atomic_output_path(123):  # type: ignore[arg-type]
+                raise AssertionError("context body should not run")
+
+        assert str(exc_info.value) == "destination expected str | PathLike[str]; got int value=123"
 
 
 class TestResolveConfigPath:

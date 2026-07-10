@@ -96,6 +96,11 @@ notification layer. Reports, notifications, and serialization use artifact
 metadata and paths; they do not automatically attach arbitrary artifact file
 contents.
 
+For files that must not appear partially written, write through
+`atomic_output_path(destination)` and register the artifact only after the
+context succeeds. Test both the successful destination and the failure path that
+preserves any previous destination.
+
 ## Decision
 
 Do not add `SkillTestCase` for the `0.1.x` release line. Plain pytest tests with direct

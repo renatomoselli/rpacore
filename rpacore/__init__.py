@@ -26,7 +26,7 @@ from rpacore.manifest import (
     resolve_project_entrypoint,
 )
 from rpacore.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifiers, dispatch
-from rpacore.paths import resolve_config_path, resolve_config_paths
+from rpacore.paths import atomic_output_path, resolve_config_path, resolve_config_paths
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider, QueueStatus, SqliteQueue
 from rpacore.recovery import resume_transaction
@@ -67,6 +67,7 @@ __all__ = [
     "Transaction",
     "TransactionReport",
     "WebhookNotifier",
+    "atomic_output_path",
     "build_credential_provider",
     "build_notifiers",
     "configure_logger",

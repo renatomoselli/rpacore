@@ -4,6 +4,11 @@ All notable user-facing changes are recorded here.
 
 ## Unreleased
 
+### Added
+
+- Added `atomic_output_path()` for content-agnostic file publication that
+  replaces destinations only after writer success.
+
 ### Breaking
 
 - Renamed maintainer release validation interfaces from evidence/go-no-go
