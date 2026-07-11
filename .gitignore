@@ -31,6 +31,8 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+# Windows reserved device name.
+nul
 
 # Testing
 .pytest_cache/

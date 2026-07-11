@@ -16,6 +16,7 @@ contract. Public submodules remain implementation locations; see
 | Symbol | Purpose | Durable mutations and side effects |
 | --- | --- | --- |
 | `Engine` | Executes ordered skills in a `Transaction`. | Mutates transaction, skill statuses, history, timestamps, retry count, state, metadata, and artifacts in memory. Persists only when `checkpoint` calls a persistence function. |
+| `execute_transaction` | Run one transaction with a `ProcessContext`, optional strict SQLite checkpoints, and optional runtime resources. | Mutates the transaction through `Engine.run()`. When `transaction_db_path` is set, creates or migrates the SQLite transaction database and checkpoints each transition. |
 | `ProcessContext` | Runtime context passed to skills. | Carries durable `state`, runtime-only `resources`, config, and transaction reference. Resources are not serialized. |
 | `Skill` | Base class for user-authored work units. | User subclasses implement `execute(ctx)`. Side effects belong to user code. |
 | `Transaction` | Unit of execution and persistence. | Stores reference, status, skills, durable state, metadata, artifacts, and history. |
@@ -24,6 +25,11 @@ contract. Public submodules remain implementation locations; see
 `Engine.run(ctx, checkpoint=...)` validates wiring before user skill code runs.
 When a checkpoint callback is supplied, it is called after each transaction or
 skill state transition. Checkpoint failures propagate and stop execution.
+
+Use `execute_transaction(transaction, transaction_db_path=...)` for ordinary
+one-off runs that should persist strict SQLite checkpoints. Use raw
+`Engine.run(ctx, checkpoint=...)` when you need to build the full
+`ProcessContext` or custom persistence callback yourself.
 
 ## Exceptions
 

@@ -172,6 +172,7 @@ class TestPackageVersion:
             "build_notifiers",
             "configure_logger",
             "dispatch",
+            "execute_transaction",
             "find_project_manifest",
             "generate_report",
             "get_logger",

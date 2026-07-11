@@ -69,11 +69,10 @@ Community and release-readiness routes:
 ```python
 from rpacore import (
     Engine,
-    ProcessContext,
     Transaction,
     configure_logger,
+    execute_transaction,
     load_config,
-    save_transaction,
 )
 
 from my_skills import FetchRecord, ProcessRecord, WriteOutput
@@ -93,17 +92,16 @@ tx.skills = [
     WriteOutput(name="write_output", execution_order=3),
 ]
 
-ctx = ProcessContext(transaction=tx, config=config)
-Engine(
+engine = Engine(
     max_retries=config["max_retries"],
     retry_delay=config["retry_delay"],
     retry_backoff=config["retry_backoff"],
-).run(
-    ctx,
-    checkpoint=lambda transaction: save_transaction(
-        transaction,
-        db_path=config["transaction_db_path"],
-    ),
+)
+execute_transaction(
+    tx,
+    config=config,
+    engine=engine,
+    transaction_db_path=config["transaction_db_path"],
 )
 ```
 
@@ -239,8 +237,7 @@ main.py
   configure_logger()
   create Transaction
   attach ordered Skills
-  create ProcessContext
-  Engine.run(ctx, checkpoint=save_transaction)
+  execute_transaction(transaction, transaction_db_path=...)
   generate report / dispatch notifications
 ```
 
@@ -260,12 +257,14 @@ as a retryable runtime failure. The same validation applies to loaded
 transactions before resume, so persisted malformed skill wiring must be fixed
 rather than silently re-run.
 
-Persistence is written by user wiring through `save_transaction()`. For strict
-crash boundaries, pass that persistence call as `Engine.run(checkpoint=...)`;
-the engine checkpoints after each transaction or skill state transition. Without
-a checkpoint callback, user code may still save only after `Engine.run()`
-returns. Loading a persisted transaction preserves the stored status; explicit
-recovery happens when user code calls `resume_transaction()`.
+Persistence is written by user wiring. For strict crash boundaries in ordinary
+one-off runs, use `execute_transaction(transaction, transaction_db_path=...)`;
+it supplies `save_transaction()` as the engine checkpoint after each transaction
+or skill state transition. Advanced callers can still build `ProcessContext`
+directly and call `Engine.run(ctx, checkpoint=...)`. Without a checkpoint
+callback, user code may still save only after `Engine.run()` returns. Loading a
+persisted transaction preserves the stored status; explicit recovery happens
+when user code calls `resume_transaction()`.
 
 ## Configuration
 

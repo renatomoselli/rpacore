@@ -18,6 +18,7 @@ from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialNotFoundError, CredentialProvider, EnvCredentialProvider, KeyringCredentialProvider, build_credential_provider
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
+from rpacore.execution import execute_transaction
 from rpacore.logger import configure_logger, get_logger
 from rpacore.manifest import (
     ProjectManifest,
@@ -72,6 +73,7 @@ __all__ = [
     "build_notifiers",
     "configure_logger",
     "dispatch",
+    "execute_transaction",
     "find_project_manifest",
     "generate_report",
     "get_logger",

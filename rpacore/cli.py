@@ -416,7 +416,7 @@ def _main_py() -> str:
     return textwrap.dedent("""\
         from __future__ import annotations
 
-        from rpacore import Engine, ProcessContext, Status, Transaction, load_config, save_transaction
+        from rpacore import Engine, Status, Transaction, execute_transaction, load_config
         from skills.greeting import WriteGreeting
 
 
@@ -432,17 +432,17 @@ def _main_py() -> str:
                     ),
                 ],
             )
-            ctx = ProcessContext(transaction=transaction, config=config)
             engine = Engine(
                 max_retries=int(config["max_retries"]),
                 retry_delay=float(config["retry_delay"]),
                 retry_backoff=float(config["retry_backoff"]),
                 screenshot_dir=str(config["screenshot_dir"]),
             )
-            db_path = str(config["transaction_db_path"])
-            engine.run(
-                ctx,
-                checkpoint=lambda tx: save_transaction(tx, db_path=db_path),
+            execute_transaction(
+                transaction,
+                config=config,
+                engine=engine,
+                transaction_db_path=str(config["transaction_db_path"]),
             )
             return 0 if transaction.status is Status.SUCCESSFUL else 1
 

@@ -14,9 +14,8 @@ Creates a normal Python project directory containing:
 - `tests/`
 - `.gitignore`
 
-The generated `main.py` uses `Engine.run(checkpoint=...)` and
-`save_transaction()` so the scaffold demonstrates strict checkpoint persistence
-with public APIs.
+The generated `main.py` uses `execute_transaction(transaction_db_path=...)` so
+the scaffold demonstrates strict checkpoint persistence with public APIs.
 
 RPA Core distributions include the framework's `LICENSE` and `NOTICE`. The
 generated project does not copy those files or add a package license field,

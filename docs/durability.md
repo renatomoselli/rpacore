@@ -86,6 +86,27 @@ Queue resource lifecycle:
 - resource setup failures prevent queue claims
 - resource cleanup failures propagate after already-decided queue outcomes
 
+One-off transaction lifecycle:
+
+- `execute_transaction(transaction, transaction_db_path=...)` builds a
+  `ProcessContext` and supplies strict SQLite checkpoints to `Engine.run()`
+- transient SQLite `locked` or `busy` checkpoint failures are retried briefly
+  before propagating
+- pass `engine=Engine(...)` when the run needs custom retry or screenshot
+  settings
+- pass `checkpoint=...` for custom persistence instead of `transaction_db_path`;
+  supplying both is rejected
+- `resource_scope` is entered once before the transaction starts and exited once
+  after `Engine.run()` returns or raises
+- `resource_scope` may yield resources that populate `ctx.resources`
+- the context receives a shallow copy of the resource mapping
+- resource setup failures prevent skill execution
+- resource cleanup failures propagate after the transaction outcome is already
+  decided
+- a custom context manager that returns truthy from `__exit__` may suppress an
+  execution exception; the transaction status and history still record the
+  engine outcome
+
 When `run_queue_loop()` is configured with `transaction_db_path`, queue items
 also retain a durable `transaction_id` binding. On the first claim, the runner
 builds the transaction, validates and seeds queue payload into transaction state,
@@ -405,6 +426,16 @@ checkpoint after each transaction or skill state transition, including the
 `skill_started` checkpoint before user skill code begins. Checkpoint failures
 propagate and stop execution. They are not converted into successful outcomes.
 
+For ordinary non-queue runs, `execute_transaction()` provides the same strict
+SQLite checkpoint behavior without hand-writing the callback:
+
+```python
+execute_transaction(transaction, transaction_db_path="rpacore.db")
+```
+
+Its built-in SQLite checkpoint retries match the same short-lived `locked` or
+`busy` policy used by the queue runner. Other SQLite errors remain loud.
+
 The queue runner supplies `save_transaction()` as this checkpoint when
 `transaction_db_path` is configured. This means a process that exits after a
 skill succeeds leaves that skill status, durable state, timestamps, and history
@@ -414,6 +445,11 @@ Checkpoint failures prevent queue completion. If the failure happens after a
 successful, skipped, or terminal business-failed skill outcome, the runner marks
 the queue item failed without automatic retry to avoid replaying side effects
 that already occurred. Earlier checkpoint failures remain retryable.
+
+After any checkpoint failure, treat the in-memory `Transaction` object as a
+diagnostic snapshot of the interrupted run. For durable recovery, reload the
+persisted transaction and call `resume_transaction()` with fresh skill
+instances instead of retrying the same partially mutated object.
 
 Runner retry has two separate layers. `Engine(max_retries=...)` owns in-process
 skill retry passes for `SystemException` failures inside one claimed queue item;

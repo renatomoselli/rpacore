@@ -8,6 +8,8 @@ All notable user-facing changes are recorded here.
 
 - Added `atomic_output_path()` for content-agnostic file publication that
   replaces destinations only after writer success.
+- Added `execute_transaction()` as a one-off transaction runner with strict
+  SQLite checkpoint persistence and explicit `resource_scope` support.
 
 ### Breaking
 

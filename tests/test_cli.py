@@ -215,7 +215,7 @@ class TestCliInit:
         assert run_result.stderr == ""
         assert (project / "greeting.txt").read_text(encoding="utf-8") == "Hello, Alice\n"
         assert (project / "rpacore.db").exists()
-        assert "checkpoint=lambda tx: save_transaction(tx, db_path=db_path)" in (
+        assert "execute_transaction(" in (
             project / "main.py"
         ).read_text(encoding="utf-8")
         transactions = list_transactions(str(project / "rpacore.db"))

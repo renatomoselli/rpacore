@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from rpacore._json_state import JsonStateError, validate_json_object
+from rpacore._sqlite_retry import is_transient_sqlite_lock, sqlite_retry_delay
 from rpacore._validation import type_error
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialProvider
@@ -559,7 +560,7 @@ def _renew_lease_with_retries(
             queue.renew_lease(item_id, claimed_by=claimed_by)
             return None
         except sqlite3.OperationalError as exc:
-            if not _is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
+            if not is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,
@@ -592,7 +593,7 @@ def _complete_queue_item_with_retries(
             queue.complete(item.id, claimed_by=item.claimed_by)
             return None
         except sqlite3.OperationalError as exc:
-            if not _is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
+            if not is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,
@@ -626,7 +627,7 @@ def _fail_queue_item_with_retries(
             queue.fail(item.id, retry=retry, claimed_by=item.claimed_by)
             return None
         except sqlite3.OperationalError as exc:
-            if not _is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
+            if not is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,
@@ -646,11 +647,6 @@ def _fail_queue_item_with_retries(
     return None
 
 
-def _is_transient_sqlite_lock(error: sqlite3.OperationalError) -> bool:
-    message = str(error).lower()
-    return "locked" in message or "busy" in message
-
-
 def _sleep_before_sqlite_retry(
     attempt: int,
     *,
@@ -663,7 +659,7 @@ def _sleep_before_sqlite_retry(
     error: sqlite3.OperationalError,
     max_attempts: int,
 ) -> None:
-    delay = delay_seconds * (2 ** attempt)
+    delay = sqlite_retry_delay(attempt, base_delay_seconds=delay_seconds)
     log.warning(
         "Retrying transient SQLite operation after lock/busy error",
         extra={
@@ -810,7 +806,7 @@ def _bind_transaction_with_retries(
             queue.bind_transaction(item_id, transaction_id, claimed_by=claimed_by)
             return None
         except sqlite3.OperationalError as exc:
-            if not _is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
+            if not is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,
@@ -949,7 +945,10 @@ def _save_transaction_with_retries(
             save_transaction(transaction, db_path=db_path)
             return None
         except sqlite3.OperationalError as exc:
-            if not _is_transient_sqlite_lock(exc) or attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1:
+            if (
+                not is_transient_sqlite_lock(exc)
+                or attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1
+            ):
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,
@@ -983,7 +982,10 @@ def _delete_transaction_with_retries(
             _delete_transaction(transaction_id, db_path=db_path)
             return None
         except sqlite3.OperationalError as exc:
-            if not _is_transient_sqlite_lock(exc) or attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1:
+            if (
+                not is_transient_sqlite_lock(exc)
+                or attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1
+            ):
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,

@@ -8,15 +8,14 @@ from __future__ import annotations
 
 from rpacore import (
     Engine,
-    ProcessContext,
     Transaction,
     build_credential_provider,
     build_notifiers,
     configure_logger,
     dispatch,
+    execute_transaction,
     generate_report,
     load_config,
-    save_transaction,
 )
 
 # --- Replace these with your own Skill subclasses ---
@@ -57,7 +56,7 @@ def main(
         else str(config["transaction_db_path"])
     )
 
-    # 5. Run the engine with strict checkpoint persistence.
+    # 5. Run the transaction with strict checkpoint persistence.
     engine = Engine(
         max_retries=int(config["max_retries"]),
         retry_delay=float(config["retry_delay"]),
@@ -65,10 +64,12 @@ def main(
         screenshot_dir=str(config["screenshot_dir"]),
     )
     credentials = build_credential_provider(str(config["credential_provider"]))
-    ctx = ProcessContext(transaction=transaction, config=config, credentials=credentials)
-    engine.run(
-        ctx,
-        checkpoint=lambda tx: save_transaction(tx, db_path=_db_path),
+    execute_transaction(
+        transaction,
+        config=config,
+        credentials=credentials,
+        engine=engine,
+        transaction_db_path=_db_path,
     )
 
     # 6. Dispatch notifications (email / webhook) if configured.

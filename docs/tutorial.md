@@ -122,11 +122,10 @@ from __future__ import annotations
 
 from rpacore import (
     Engine,
-    ProcessContext,
     Transaction,
     configure_logger,
+    execute_transaction,
     load_config,
-    save_transaction,
 )
 
 from skills.greet_user import WriteGreeting
@@ -148,17 +147,16 @@ def main() -> None:
         )
     ]
 
-    ctx = ProcessContext(transaction=tx, config=config)
-    Engine(
+    engine = Engine(
         max_retries=int(config["max_retries"]),
         retry_delay=float(config["retry_delay"]),
         retry_backoff=float(config["retry_backoff"]),
-    ).run(
-        ctx,
-        checkpoint=lambda transaction: save_transaction(
-            transaction,
-            db_path=str(config["transaction_db_path"]),
-        ),
+    )
+    execute_transaction(
+        tx,
+        config=config,
+        engine=engine,
+        transaction_db_path=str(config["transaction_db_path"]),
     )
 
     print(f"Transaction {tx.id}: {tx.status}")
@@ -168,7 +166,7 @@ if __name__ == "__main__":
     main()
 ```
 
-The checkpoint callback makes the run crash-durable at engine state boundaries:
+`execute_transaction()` makes the run crash-durable at engine state boundaries:
 the transaction is saved before user skill code starts and after each status
 transition.
 
