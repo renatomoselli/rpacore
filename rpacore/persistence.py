@@ -6,22 +6,32 @@ from collections.abc import Iterator
 from datetime import datetime
 
 from rpacore._json_state import JsonStateError, validate_json_object
+from rpacore._sqlite import (
+    SCHEMA_VERSION_TABLE,
+    TRANSACTION_SCHEMA_VERSION,
+    component_schema_version,
+    connect_sqlite,
+    ensure_database_compatibility,
+    ensure_supported_schema,
+    require_current_schema,
+)
 from rpacore.exceptions import BusinessException, SystemException
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
 
 
-_SCHEMA_TABLE = "rpacore_schema_versions"
+_SCHEMA_TABLE = SCHEMA_VERSION_TABLE
 _TRANSACTION_SCHEMA_COMPONENT = "transactions"
-_TRANSACTION_SCHEMA_VERSION = 5
+_TRANSACTION_SCHEMA_VERSION = TRANSACTION_SCHEMA_VERSION
 
 
-def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=1)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.row_factory = sqlite3.Row
-    return conn
+def _connect(db_path: str, *, readonly: bool = False) -> sqlite3.Connection:
+    return connect_sqlite(
+        db_path,
+        field="transaction_db_path",
+        readonly=readonly,
+    )
 
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -52,11 +62,7 @@ def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
 
 
 def _component_schema_version(conn: sqlite3.Connection, component: str) -> int:
-    row = conn.execute(
-        f"SELECT version FROM {_SCHEMA_TABLE} WHERE component = ?",
-        (component,),
-    ).fetchone()
-    return 0 if row is None else int(row["version"])
+    return component_schema_version(conn, component)
 
 
 def _record_component_schema_version(conn: sqlite3.Connection, component: str, version: int) -> None:
@@ -191,6 +197,13 @@ def _migrate_transactions_to_v5(conn: sqlite3.Connection) -> None:
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run explicit transaction schema migrations through the latest version."""
     with conn:
+        ensure_database_compatibility(conn)
+        ensure_supported_schema(
+            conn,
+            component=_TRANSACTION_SCHEMA_COMPONENT,
+            supported_version=_TRANSACTION_SCHEMA_VERSION,
+            label="transaction",
+        )
         _ensure_schema_version_table(conn)
         current_version = _component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT)
         if current_version == 0 and _table_exists(conn, "transactions"):
@@ -502,11 +515,79 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
         conn.close()
 
 
-def load_transaction(transaction_id: str, db_path: str = "rpacore.db") -> Transaction:
-    """Load a transaction from the database without mutating persisted state."""
+def _delete_unbound_pending_transaction(
+    transaction_id: str,
+    *,
+    db_path: str,
+) -> None:
+    """Delete one unstarted pending transaction created before queue binding."""
     conn = _connect(db_path)
     try:
         _ensure_schema(conn)
+        with conn:
+            row = conn.execute(
+                "SELECT status FROM transactions WHERE id = ?",
+                (transaction_id,),
+            ).fetchone()
+            if row is None:
+                return
+            has_history = conn.execute(
+                "SELECT 1 FROM transaction_history WHERE transaction_id = ? LIMIT 1",
+                (transaction_id,),
+            ).fetchone()
+            if row["status"] != Status.PENDING or has_history is not None:
+                raise RuntimeError(
+                    "Refusing to delete transaction "
+                    f"{transaction_id!r}; expected pending status with no history"
+                )
+            conn.execute(
+                "DELETE FROM exceptions WHERE skill_id IN "
+                "(SELECT id FROM skills WHERE transaction_id = ?)",
+                (transaction_id,),
+            )
+            conn.execute(
+                "DELETE FROM skills WHERE transaction_id = ?",
+                (transaction_id,),
+            )
+            conn.execute(
+                "DELETE FROM transaction_history WHERE transaction_id = ?",
+                (transaction_id,),
+            )
+            conn.execute(
+                "DELETE FROM transaction_metadata WHERE transaction_id = ?",
+                (transaction_id,),
+            )
+            conn.execute(
+                "DELETE FROM transaction_artifacts WHERE transaction_id = ?",
+                (transaction_id,),
+            )
+            conn.execute(
+                "DELETE FROM transactions WHERE id = ?",
+                (transaction_id,),
+            )
+    finally:
+        conn.close()
+
+
+def load_transaction(
+    transaction_id: str,
+    db_path: str = "rpacore.db",
+    *,
+    readonly: bool = False,
+) -> Transaction:
+    """Load a transaction from the database without mutating persisted state."""
+    conn = _connect(db_path, readonly=readonly)
+    try:
+        if readonly:
+            ensure_database_compatibility(conn)
+            require_current_schema(
+                conn,
+                component=_TRANSACTION_SCHEMA_COMPONENT,
+                supported_version=_TRANSACTION_SCHEMA_VERSION,
+                label="transaction",
+            )
+        else:
+            _ensure_schema(conn)
         row = conn.execute(
             "SELECT id, reference, status, retry_count, created_at, started_at, finished_at, state "
             "FROM transactions WHERE id = ?",
@@ -608,6 +689,7 @@ def list_transactions(
     since: datetime | None = None,
     metadata_filter: dict[str, object] | None = None,
     limit: int = 100,
+    readonly: bool = False,
 ) -> list[Transaction]:
     """Return transactions matching optional filters, newest first.
 
@@ -624,9 +706,18 @@ def list_transactions(
         if metadata_filter is not None
         else {}
     )
-    conn = _connect(db_path)
+    conn = _connect(db_path, readonly=readonly)
     try:
-        _ensure_schema(conn)
+        if readonly:
+            ensure_database_compatibility(conn)
+            require_current_schema(
+                conn,
+                component=_TRANSACTION_SCHEMA_COMPONENT,
+                supported_version=_TRANSACTION_SCHEMA_VERSION,
+                label="transaction",
+            )
+        else:
+            _ensure_schema(conn)
         query = "SELECT id FROM transactions WHERE 1=1"
         params: list[object] = []
         if status is not None:
@@ -650,7 +741,10 @@ def list_transactions(
     finally:
         conn.close()
 
-    return [load_transaction(tx_id, db_path) for tx_id in transaction_ids]
+    return [
+        load_transaction(tx_id, db_path, readonly=readonly)
+        for tx_id in transaction_ids
+    ]
 
 
 def iter_transactions(
@@ -659,6 +753,7 @@ def iter_transactions(
     status: Status | None = None,
     since: datetime | None = None,
     metadata_filter: dict[str, object] | None = None,
+    readonly: bool = False,
 ) -> Iterator[Transaction]:
     """Yield transactions matching optional filters, newest first."""
     metadata_json = (
@@ -666,9 +761,18 @@ def iter_transactions(
         if metadata_filter is not None
         else {}
     )
-    conn = _connect(db_path)
+    conn = _connect(db_path, readonly=readonly)
     try:
-        _ensure_schema(conn)
+        if readonly:
+            ensure_database_compatibility(conn)
+            require_current_schema(
+                conn,
+                component=_TRANSACTION_SCHEMA_COMPONENT,
+                supported_version=_TRANSACTION_SCHEMA_VERSION,
+                label="transaction",
+            )
+        else:
+            _ensure_schema(conn)
         query = "SELECT id FROM transactions WHERE 1=1"
         params: list[object] = []
         if status is not None:
@@ -687,6 +791,6 @@ def iter_transactions(
             params.extend([key, value_json])
         query += " ORDER BY created_at DESC, id ASC"
         for row in conn.execute(query, params):
-            yield load_transaction(row["id"], db_path)
+            yield load_transaction(row["id"], db_path, readonly=readonly)
     finally:
         conn.close()

@@ -177,7 +177,11 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
     try:
         db_path = _transaction_db_path(args.db_path)
         if args.transaction_command == "list":
-            transactions = list_transactions(db_path, limit=args.limit)
+            transactions = list_transactions(
+                db_path,
+                limit=args.limit,
+                readonly=True,
+            )
             if args.json:
                 _write_json(
                     {
@@ -194,7 +198,11 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
                 _write_transaction_list(transactions, limit=args.limit)
             return SUCCESS
         if args.transaction_command == "show":
-            transaction = load_transaction(args.transaction_id, db_path)
+            transaction = load_transaction(
+                args.transaction_id,
+                db_path,
+                readonly=True,
+            )
             if args.json:
                 _write_json(
                     {
@@ -207,7 +215,7 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
                 _write_transaction_detail(transaction)
             return SUCCESS
         if args.transaction_command == "export":
-            transactions = iter_transactions(db_path)
+            transactions = iter_transactions(db_path, readonly=True)
             _write_transaction_export(transactions, export_format=args.format)
             return SUCCESS
     except KeyError as exc:

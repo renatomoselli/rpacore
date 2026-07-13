@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import json
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -278,15 +279,63 @@ class TestCliTransaction:
         assert result.returncode == 2
         assert "invalid choice" in result.stderr
 
-    def test_transaction_list_empty_database_human_output(self, tmp_path: Path) -> None:
+    def test_transaction_list_missing_database_fails_without_creating_it(self, tmp_path: Path) -> None:
         db_path = tmp_path / "transactions.db"
 
         result = run_cli("transaction", "list", "--db", str(db_path), cwd=tmp_path)
 
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "SQLite database not found" in result.stderr
+        assert not db_path.exists()
+
+    def test_transaction_list_rejects_blank_database_path(self, tmp_path: Path) -> None:
+        result = run_cli("transaction", "list", "--db", "", cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stdout == ""
+        assert "transaction_db_path expected non-empty SQLite file path" in result.stderr
+        assert list(tmp_path.iterdir()) == []
+
+    def test_transaction_list_rejects_future_schema_without_mutation(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "future.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rpacore_schema_versions ("
+                "component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO rpacore_schema_versions VALUES ('transactions', 99)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        before = db_path.read_bytes()
+
+        result = run_cli("transaction", "list", "--db", str(db_path), cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert "Unsupported transaction schema version 99" in result.stderr
+        assert db_path.read_bytes() == before
+
+    def test_transaction_list_does_not_change_journal_mode(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+        save_transaction(Transaction(reference="journal"), str(db_path))
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+        finally:
+            conn.close()
+
+        result = run_cli("transaction", "list", "--db", str(db_path), cwd=tmp_path)
+
         assert result.returncode == 0
-        assert "Showing up to 100 transactions." in result.stdout
-        assert "No transactions found." in result.stdout
-        assert result.stderr == ""
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        finally:
+            conn.close()
 
     def test_transaction_list_populated_database_human_output(self, tmp_path: Path) -> None:
         db_path = tmp_path / "transactions.db"
@@ -579,7 +628,11 @@ class TestCliTransaction:
             "list_transactions",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no list")),
         )
-        monkeypatch.setattr(cli_module, "iter_transactions", lambda *_args: iter([]))
+        monkeypatch.setattr(
+            cli_module,
+            "iter_transactions",
+            lambda *_args, **_kwargs: iter([]),
+        )
 
         result = cli_module.main(
             [
@@ -608,7 +661,7 @@ class TestCliTransaction:
         monkeypatch.setattr(
             cli_module,
             "iter_transactions",
-            lambda *_args: iter([good, bad]),
+            lambda *_args, **_kwargs: iter([good, bad]),
         )
 
         result = cli_module.main(
@@ -636,7 +689,7 @@ class TestCliTransaction:
         monkeypatch.setattr(
             cli_module,
             "iter_transactions",
-            lambda *_args: iter([Transaction(reference="collision")]),
+            lambda *_args, **_kwargs: iter([Transaction(reference="collision")]),
         )
         monkeypatch.setattr(
             cli_module,
@@ -718,6 +771,7 @@ class TestCliTransaction:
 
     def test_transaction_show_missing_transaction_exits_one(self, tmp_path: Path) -> None:
         db_path = tmp_path / "transactions.db"
+        save_transaction(Transaction(reference="existing"), str(db_path))
 
         result = run_cli(
             "transaction",
@@ -734,6 +788,7 @@ class TestCliTransaction:
 
     def test_transaction_show_json_missing_transaction_exits_one(self, tmp_path: Path) -> None:
         db_path = tmp_path / "transactions.db"
+        save_transaction(Transaction(reference="existing"), str(db_path))
 
         result = run_cli(
             "transaction",

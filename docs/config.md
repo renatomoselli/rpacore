@@ -44,6 +44,11 @@ Relative `transaction_db_path`, `screenshot_dir`, and `queue.db_path` values are
 resolved relative to the config file. The removed top-level `db_path` key is
 rejected; use `transaction_db_path`.
 
+Transaction and queue database paths must name non-empty filesystem paths.
+Blank paths and `:memory:` are rejected because RPA Core opens multiple SQLite
+connections for checkpoints, inspection, queue transitions, and heartbeats;
+SQLite in-memory databases would give those connections unrelated state.
+
 Notification settings are optional:
 
 ```toml

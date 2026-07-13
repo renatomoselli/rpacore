@@ -11,6 +11,15 @@ from enum import StrEnum
 from typing import Iterable, Protocol, runtime_checkable
 
 from rpacore._json_state import validate_json_object
+from rpacore._sqlite import (
+    SCHEMA_VERSION_TABLE,
+    QUEUE_SCHEMA_VERSION,
+    configure_rollback_journal,
+    connect_sqlite,
+    ensure_database_compatibility,
+    ensure_supported_schema,
+    validate_durable_sqlite_path,
+)
 from rpacore._validation import type_error, value_error
 from rpacore.config_validation import optional_config
 
@@ -56,17 +65,13 @@ class QueueProvider(Protocol):
 _DEFAULT_DB_PATH = "queue.db"
 _DEFAULT_LEASE_TIMEOUT = 30
 _DEFAULT_MAX_RETRIES = 3
-_SCHEMA_TABLE = "rpacore_schema_versions"
+_SCHEMA_TABLE = SCHEMA_VERSION_TABLE
 _QUEUE_SCHEMA_COMPONENT = "queue"
-_QUEUE_SCHEMA_VERSION = 2
+_QUEUE_SCHEMA_VERSION = QUEUE_SCHEMA_VERSION
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, timeout=1)
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.row_factory = sqlite3.Row
-    return conn
+    return connect_sqlite(db_path, field="queue.db_path")
 
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -79,13 +84,25 @@ def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, 
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
+def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS rpacore_schema_versions (
             component TEXT PRIMARY KEY,
             version   INTEGER NOT NULL
         )
     """)
+
+
+def _record_queue_schema_version(conn: sqlite3.Connection, version: int) -> None:
+    conn.execute(
+        f"INSERT INTO {_SCHEMA_TABLE} (component, version) VALUES (?, ?) "
+        "ON CONFLICT(component) DO UPDATE SET version = excluded.version",
+        (_QUEUE_SCHEMA_COMPONENT, version),
+    )
+
+
+def _migrate_queue_to_v1(conn: sqlite3.Connection) -> None:
+    """Create the original queue item schema."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS queue_items (
             id           TEXT PRIMARY KEY,
@@ -95,10 +112,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             retry_count  INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL,
             claimed_by   TEXT NOT NULL DEFAULT '',
-            claimed_at   TEXT,
-            transaction_id TEXT NOT NULL DEFAULT ''
+            claimed_at   TEXT
         )
     """)
+    _record_queue_schema_version(conn, 1)
+
+
+def _migrate_queue_to_v2(conn: sqlite3.Connection) -> None:
+    """Add durable transaction binding and queue inspection indexes."""
     _ensure_column(conn, "queue_items", "transaction_id", "transaction_id TEXT NOT NULL DEFAULT ''")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_queue_items_created_at_id "
@@ -112,11 +133,30 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_queue_items_reference_status "
         "ON queue_items (reference, status)"
     )
-    conn.execute(
-        f"INSERT INTO {_SCHEMA_TABLE} (component, version) VALUES (?, ?) "
-        "ON CONFLICT(component) DO UPDATE SET version = excluded.version",
-        (_QUEUE_SCHEMA_COMPONENT, _QUEUE_SCHEMA_VERSION),
-    )
+    _record_queue_schema_version(conn, 2)
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    """Run sequential queue migrations after rejecting future schemas."""
+    with conn:
+        ensure_database_compatibility(conn)
+        current_version = ensure_supported_schema(
+            conn,
+            component=_QUEUE_SCHEMA_COMPONENT,
+            supported_version=_QUEUE_SCHEMA_VERSION,
+        )
+        _ensure_schema_version_table(conn)
+        if current_version < 1:
+            _migrate_queue_to_v1(conn)
+            current_version = 1
+        if current_version < 2:
+            _migrate_queue_to_v2(conn)
+            current_version = 2
+        if current_version != _QUEUE_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Unsupported queue schema version {current_version}; "
+                f"expected {_QUEUE_SCHEMA_VERSION}"
+            )
 
 
 def _load_payload(raw_payload: str) -> dict[str, object]:
@@ -240,6 +280,7 @@ class SqliteQueue:
             raise value_error("queue.lease_timeout", "int > 0", lease_timeout)
         if max_retries < 0:
             raise value_error("queue.max_retries", "int >= 0", max_retries)
+        validate_durable_sqlite_path(db_path, field="queue.db_path")
 
         self.db_path: str = db_path
         self.lease_timeout: int = lease_timeout
@@ -247,8 +288,16 @@ class SqliteQueue:
 
         conn = _connect(self.db_path)
         try:
-            with conn:
-                _ensure_schema(conn)
+            # These checks must precede the persistent journal policy. The
+            # checks inside _ensure_schema protect every later connection.
+            ensure_database_compatibility(conn)
+            ensure_supported_schema(
+                conn,
+                component=_QUEUE_SCHEMA_COMPONENT,
+                supported_version=_QUEUE_SCHEMA_VERSION,
+            )
+            configure_rollback_journal(conn)
+            _ensure_schema(conn)
         finally:
             conn.close()
 

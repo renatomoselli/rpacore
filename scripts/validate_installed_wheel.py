@@ -93,6 +93,8 @@ def _remove_tree(path: Path) -> None:
 def _smoke_code(repo_root: Path) -> str:
     return f"""
 from pathlib import Path
+import platform
+import sqlite3
 
 import rpacore
 from rpacore import Engine, ProcessContext, Skill, Status, Transaction
@@ -115,6 +117,7 @@ assert tx.status is Status.SUCCESSFUL
 assert tx.skills[0].status is Status.SUCCESSFUL
 assert ctx.state == {{"ran": True}}
 print(rpacore.__version__)
+print(f"Python {{platform.python_version()}}; SQLite {{sqlite3.sqlite_version}}")
 """
 
 

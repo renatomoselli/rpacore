@@ -42,6 +42,9 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      - name: Record Python and SQLite runtime versions
+        run: python -c "import platform, sqlite3; print(platform.python_version(), sqlite3.sqlite_version)"
+
       - name: Run tests
         run: pytest
 
@@ -109,6 +112,9 @@ jobs:
         with:
           name: rpacore-dist
           path: dist
+
+      - name: Record Python and SQLite runtime versions
+        run: python -c "import platform, sqlite3; print(platform.python_version(), sqlite3.sqlite_version)"
 
       - name: Validate installed wheel
         run: python scripts/validate_installed_wheel.py --repo-root . --wheel-dir dist

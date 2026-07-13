@@ -67,6 +67,17 @@ permissions, backups, disk encryption where appropriate, and normal operational
 controls. Avoid placing transaction, queue, log, report, export, or screenshot
 files in shared directories unless every reader is trusted.
 
+RPA Core rejects blank and `:memory:` durable database paths. Transaction CLI
+inspection opens existing files read-only and refuses missing or incompatible
+schemas without migration. Queue databases use rollback journal on the v0.1.x
+line to avoid the documented SQLite WAL-reset race in affected embedded
+runtimes. Keep database and journal files together during backup and restore.
+
+Database paths are trusted operator configuration, not a filesystem sandbox.
+They may intentionally identify storage outside the project directory, subject
+to the operating-system permissions of the automation process. Do not let an
+untrusted party control configuration files or command-line arguments.
+
 ## Notifications and Network Calls
 
 Webhook URLs must use `http` or `https`. Local, private, loopback, and link-local

@@ -7,6 +7,7 @@ import tomllib
 from pathlib import Path
 
 from rpacore._validation import type_error, value_error
+from rpacore._sqlite import validate_durable_sqlite_path
 from rpacore.credentials import SUPPORTED_CREDENTIAL_PROVIDERS
 
 _DEFAULTS: dict[str, object] = {
@@ -71,6 +72,14 @@ def _validate(config: dict[str, object]) -> None:
     transaction_db_path = config["transaction_db_path"]
     if not isinstance(transaction_db_path, str):
         raise type_error("transaction_db_path", "str", transaction_db_path)
+    validate_durable_sqlite_path(
+        transaction_db_path,
+        field="transaction_db_path",
+    )
+
+    queue = config.get("queue")
+    if isinstance(queue, dict) and "db_path" in queue:
+        validate_durable_sqlite_path(queue["db_path"], field="queue.db_path")
 
     screenshot_dir = config["screenshot_dir"]
     if not isinstance(screenshot_dir, str):
@@ -84,6 +93,8 @@ def _validate(config: dict[str, object]) -> None:
 
 
 def _resolve_config_path_value(base: Path, value: str) -> str:
+    if not value.strip() or value == ":memory:":
+        return value
     path = Path(value)
     if path.is_absolute():
         return value

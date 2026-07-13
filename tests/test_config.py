@@ -306,6 +306,30 @@ class TestLoadConfig:
 
         assert str(exc_info.value) == "transaction_db_path expected str; got int value=123"
 
+    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:"])
+    def test_transient_transaction_db_path_rejected(
+        self,
+        tmp_path: Path,
+        db_path: str,
+    ) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text(f'transaction_db_path = "{db_path}"\n', encoding="utf-8")
+
+        with pytest.raises(ValueError, match="transaction_db_path"):
+            load_config(toml)
+
+    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:"])
+    def test_transient_queue_db_path_rejected(
+        self,
+        tmp_path: Path,
+        db_path: str,
+    ) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text(f'[queue]\ndb_path = "{db_path}"\n', encoding="utf-8")
+
+        with pytest.raises(ValueError, match="queue.db_path"):
+            load_config(toml)
+
     def test_invalid_credential_provider_type_raises(self, tmp_path: Path) -> None:
         toml = tmp_path / "config.toml"
         toml.write_text("credential_provider = 123\n", encoding="utf-8")

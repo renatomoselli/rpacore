@@ -54,6 +54,11 @@ class TestSqliteQueueConfig:
 
         assert str(exc_info.value) == "queue.db_path expected str; got int value=123"
 
+    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:"])
+    def test_transient_db_path_rejected(self, db_path):
+        with pytest.raises(ValueError, match="queue.db_path"):
+            SqliteQueue({"db_path": db_path})
+
     def test_bad_lease_timeout_type(self, tmp_path):
         db = str(tmp_path / "q.db")
         with pytest.raises(TypeError) as exc_info:
@@ -427,6 +432,108 @@ class TestSqliteQueueIntrospection:
             conn.close()
 
         assert version == 2
+
+    def test_queue_uses_rollback_journal(self, tmp_path):
+        queue = make_queue(tmp_path)
+        conn = sqlite3.connect(queue.db_path)
+        try:
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+
+        assert journal_mode == "delete"
+
+    def test_failed_migration_keeps_safe_rollback_journal(self, tmp_path):
+        db_path = tmp_path / "failed-migration.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rpacore_schema_versions ("
+                "component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO rpacore_schema_versions VALUES ('queue', 1)"
+            )
+            conn.execute("CREATE VIEW queue_items AS SELECT '' AS id")
+            conn.commit()
+            assert conn.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+        finally:
+            conn.close()
+
+        with pytest.raises(sqlite3.OperationalError):
+            SqliteQueue({"db_path": str(db_path)})
+
+        conn = sqlite3.connect(db_path)
+        try:
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions WHERE component = 'queue'"
+            ).fetchone()[0]
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+
+        assert version == 1
+        assert journal_mode == "delete"
+
+    def test_future_queue_schema_is_rejected_without_mutation(self, tmp_path):
+        db_path = tmp_path / "future-queue.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rpacore_schema_versions ("
+                "component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO rpacore_schema_versions VALUES ('queue', 99)"
+            )
+            conn.commit()
+            conn.execute("PRAGMA journal_mode = WAL")
+        finally:
+            conn.close()
+        before = db_path.read_bytes()
+
+        with pytest.raises(RuntimeError, match="Unsupported queue schema version 99"):
+            SqliteQueue({"db_path": str(db_path)})
+
+        assert db_path.read_bytes() == before
+        conn = sqlite3.connect(db_path)
+        try:
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions WHERE component = 'queue'"
+            ).fetchone()[0]
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+        assert version == 99
+        assert journal_mode == "wal"
+
+    def test_future_transaction_schema_blocks_queue_mutation(self, tmp_path):
+        db_path = tmp_path / "future-transactions.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rpacore_schema_versions ("
+                "component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO rpacore_schema_versions VALUES ('transactions', 99)"
+            )
+            conn.commit()
+            conn.execute("PRAGMA journal_mode = WAL")
+        finally:
+            conn.close()
+        before = db_path.read_bytes()
+
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 99"):
+            SqliteQueue({"db_path": str(db_path)})
+
+        assert db_path.read_bytes() == before
+        conn = sqlite3.connect(db_path)
+        try:
+            journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+        assert journal_mode == "wal"
 
     def test_bind_transaction_persists_claim_owned_transaction_id(self, tmp_path):
         q = make_queue(tmp_path)

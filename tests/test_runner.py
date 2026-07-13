@@ -1103,7 +1103,11 @@ class TestRunnerManagedTransactionPersistence:
         def _fail_delete(transaction_id: str, *, db_path: str) -> None:
             raise RuntimeError("initial transaction cleanup failed")
 
-        monkeypatch.setattr(runner_module, "_delete_transaction", _fail_delete)
+        monkeypatch.setattr(
+            runner_module,
+            "_delete_unbound_pending_transaction",
+            _fail_delete,
+        )
 
         with pytest.raises(MemoryError, match="binding exhausted memory") as exc_info:
             run_queue_loop(
@@ -1220,7 +1224,11 @@ class TestRunnerManagedTransactionPersistence:
             cleanup_attempts.append(transaction_id)
             raise sqlite3.OperationalError("disk I/O error")
 
-        monkeypatch.setattr(runner_module, "_delete_transaction", _fail_delete)
+        monkeypatch.setattr(
+            runner_module,
+            "_delete_unbound_pending_transaction",
+            _fail_delete,
+        )
         monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
 
         summary = run_queue_loop(

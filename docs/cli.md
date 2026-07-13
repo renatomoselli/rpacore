@@ -50,6 +50,11 @@ Prints the installed package version.
 
 Transaction commands inspect the SQLite database at `[storage].transaction_db_path`
 from `rpacore.toml`. Pass `--db path/to/rpacore.db` to use a specific database.
+Inspection opens an existing database through SQLite's read-only URI mode. It
+does not create a missing database, migrate an older schema, rewrite a future
+schema marker, or change journal mode. Missing or incompatible databases fail
+with an actionable diagnostic; initialize or migrate storage through the
+owning application version before inspecting it.
 
 ```bash
 rpacore transaction list

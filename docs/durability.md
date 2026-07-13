@@ -348,6 +348,32 @@ When loaded from `config.toml`, relative `transaction_db_path` and
 This keeps both storage files stable when a process runs from a different
 current working directory.
 
+Durable database paths cannot be blank or `:memory:`. An empty path creates a
+temporary database, whitespace-only paths do not identify an intentional
+durable target, and `:memory:` creates connection-local state. RPA Core uses
+multiple connections for normal persistence and queue operation.
+
+## SQLite Journal Policy
+
+Queue databases use SQLite's rollback journal rather than WAL. This is a
+correctness-first policy for the stdlib SQLite runtimes supported by the
+`v0.1.x` line: SQLite documents a rare multi-connection WAL-reset corruption
+race in affected releases. RPA Core does not claim that a Python package can
+replace the SQLite library embedded in CPython. CI and installed-wheel jobs
+record both Python and SQLite versions so this policy can be revisited from
+runtime evidence. See SQLite's official
+[WAL-reset bug documentation](https://www.sqlite.org/wal.html#walreset).
+
+Rollback journal permits concurrent workers through SQLite's normal locking;
+RPA Core keeps claim, heartbeat, checkpoint, and transition transactions short
+and retains bounded lock retries at the runner boundaries. Do not manually
+switch an active queue database to WAL.
+
+After compatibility checks pass, the rollback-journal policy is applied before
+schema migration. Journal mode is an independent persistent safety setting, not
+part of the schema transaction: if migration fails and rolls back, the database
+deliberately remains in rollback-journal mode rather than returning to WAL.
+
 ## Schema Versions
 
 RPA Core stores component schema versions in a framework-owned table:
@@ -373,6 +399,11 @@ version   = 2
 This lets transaction and queue tables safely coexist in one SQLite file if a
 user intentionally chooses the same path, while keeping their schema versions
 independent.
+
+Compatibility is checked before migrations or persistent journal changes. A
+component version newer than this runtime supports is rejected without changing
+the schema marker. Transaction CLI inspection additionally requires the current
+transaction schema and never migrates.
 
 ## Migrations
 
@@ -427,6 +458,17 @@ are deliberately limited:
 
 Future persisted models must add fixture-based migration tests from the previous
 latest schema to the new latest schema.
+
+Queue migrations are also sequential: version 1 creates the queue item model;
+version 2 adds durable transaction binding and inspection indexes. Reopening a
+future queue schema with older `v0.1.1` code is unsafe because that release can
+rewrite the marker. Restore both code and database from the same pre-upgrade
+backup when rolling back; never point an older runtime at the newer live file.
+
+Cleanup of an initial transaction whose queue binding failed is owned by the
+persistence module. It will delete only a pending transaction with no history.
+Started or otherwise durable execution truth is never eligible for that narrow
+cleanup path.
 
 ## Crash Behavior
 

@@ -21,7 +21,11 @@ from rpacore.exceptions import BusinessException, ExecutionValidationError, Syst
 from rpacore.engine import Engine
 from rpacore.logger import get_logger
 from rpacore.notify import Notifier, dispatch
-from rpacore.persistence import load_transaction, save_transaction
+from rpacore.persistence import (
+    _delete_unbound_pending_transaction,
+    load_transaction,
+    save_transaction,
+)
 from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider
 from rpacore.recovery import resume_transaction
 from rpacore.report import generate_report
@@ -1063,7 +1067,7 @@ def _delete_transaction_with_retries(
     """Delete a not-yet-bound transaction, retrying short-lived SQLite lock failures."""
     for attempt in range(_PERSISTENCE_SAVE_ATTEMPTS):
         try:
-            _delete_transaction(transaction_id, db_path=db_path)
+            _delete_unbound_pending_transaction(transaction_id, db_path=db_path)
             return None
         except sqlite3.OperationalError as exc:
             if (
@@ -1087,23 +1091,3 @@ def _delete_transaction_with_retries(
         except Exception as exc:
             return exc
     return None
-
-
-def _delete_transaction(transaction_id: str, *, db_path: str) -> None:
-    """Remove a pending transaction record created before queue binding."""
-    conn = sqlite3.connect(db_path, timeout=1)
-    try:
-        conn.execute("PRAGMA foreign_keys = ON")
-        with conn:
-            conn.execute(
-                "DELETE FROM exceptions WHERE skill_id IN "
-                "(SELECT id FROM skills WHERE transaction_id = ?)",
-                (transaction_id,),
-            )
-            conn.execute("DELETE FROM skills WHERE transaction_id = ?", (transaction_id,))
-            conn.execute("DELETE FROM transaction_history WHERE transaction_id = ?", (transaction_id,))
-            conn.execute("DELETE FROM transaction_metadata WHERE transaction_id = ?", (transaction_id,))
-            conn.execute("DELETE FROM transaction_artifacts WHERE transaction_id = ?", (transaction_id,))
-            conn.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
-    finally:
-        conn.close()

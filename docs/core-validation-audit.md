@@ -20,7 +20,7 @@ hide important behavior.
 | `rpacore.persistence` | Keep local validation. | Persistence validates durable JSON state, persisted metadata, artifact metadata, timestamps, and schema repair cases. Failures are raised as `SystemException` where operators must repair durable storage, not as plain config errors. |
 | `rpacore.manifest` | Keep local validation. | Manifest validation has a closed top-level vocabulary, required section/key wording, entrypoint syntax checks, path resolution, and callable import validation. The public config helpers would not preserve those messages or phases directly. |
 | transaction metadata and artifacts | Keep local model and JSON validation. | `Transaction`, `Artifact`, persistence, reports, notifications, and serialization need defensive copies, JSON-safety checks, stable timestamps, and content-free artifact records. These are durable model rules rather than config lookup rules. |
-| SQLite schema introspection helpers | Keep local for now. | Queue and persistence each use tiny private schema helpers near their migration code. A shared private module would save a few lines but would also couple two independent schema lifecycles before more duplication exists. |
+| SQLite path, connection, and compatibility policy | Shared private policy adopted. | PATCH-003 established proven cross-component rules for durable paths, read-only URI connections, compatibility-first checks, and queue journal safety. Queue and transaction migration steps remain local to their independent schema lifecycles. |
 
 ## Broad Exception Boundaries
 

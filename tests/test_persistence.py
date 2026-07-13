@@ -7,7 +7,12 @@ import pytest
 
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, SystemException
-from rpacore.persistence import list_transactions, load_transaction, save_transaction
+from rpacore.persistence import (
+    _delete_unbound_pending_transaction,
+    list_transactions,
+    load_transaction,
+    save_transaction,
+)
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEvent, Transaction
@@ -26,6 +31,21 @@ def lock_database(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=1)
     conn.execute("BEGIN EXCLUSIVE")
     return conn
+
+
+class TestPersistencePaths:
+    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:"])
+    def test_transient_durable_path_rejected(self, db_path: str) -> None:
+        with pytest.raises(ValueError, match="transaction_db_path"):
+            save_transaction(make_transaction(), db_path)
+
+    def test_readonly_missing_path_does_not_create_database(self, tmp_path) -> None:
+        db_path = tmp_path / "missing.db"
+
+        with pytest.raises(FileNotFoundError, match="SQLite database not found"):
+            list_transactions(str(db_path), readonly=True)
+
+        assert not db_path.exists()
 
 
 def create_legacy_db(db_path: str) -> str:
@@ -1136,6 +1156,74 @@ class TestSchemaMigration:
 
         with pytest.raises(RuntimeError, match="Unsupported transaction schema version 6"):
             list_transactions(db_path)
+
+    @pytest.mark.parametrize("readonly", [False, True])
+    def test_future_transaction_schema_is_rejected_without_mutation(
+        self,
+        db_path,
+        readonly: bool,
+    ) -> None:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rpacore_schema_versions ("
+                "component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO rpacore_schema_versions VALUES ('transactions', 99)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with open(db_path, "rb") as database_file:
+            before = database_file.read()
+
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 99"):
+            list_transactions(db_path, readonly=readonly)
+
+        with open(db_path, "rb") as database_file:
+            assert database_file.read() == before
+
+    def test_future_queue_schema_blocks_transaction_mutation(self, db_path) -> None:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rpacore_schema_versions ("
+                "component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+            )
+            conn.execute(
+                "INSERT INTO rpacore_schema_versions VALUES ('queue', 99)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        with open(db_path, "rb") as database_file:
+            before = database_file.read()
+
+        with pytest.raises(RuntimeError, match="Unsupported queue schema version 99"):
+            save_transaction(make_transaction(), db_path)
+
+        with open(db_path, "rb") as database_file:
+            assert database_file.read() == before
+
+    def test_delete_unbound_pending_transaction_is_persistence_owned(self, db_path) -> None:
+        transaction = make_transaction()
+        save_transaction(transaction, db_path)
+
+        _delete_unbound_pending_transaction(transaction.id, db_path=db_path)
+
+        with pytest.raises(KeyError, match="Transaction not found"):
+            load_transaction(transaction.id, db_path)
+
+    def test_delete_unbound_pending_transaction_rejects_started_work(self, db_path) -> None:
+        transaction = make_transaction(status=Status.IN_PROGRESS)
+        transaction.append_history(HistoryEvent.TRANSACTION_STARTED)
+        save_transaction(transaction, db_path)
+
+        with pytest.raises(RuntimeError, match="Refusing to delete transaction"):
+            _delete_unbound_pending_transaction(transaction.id, db_path=db_path)
+
+        assert load_transaction(transaction.id, db_path).status is Status.IN_PROGRESS
 
     def test_unrelated_schema_errors_are_not_swallowed(self, db_path) -> None:
         conn = sqlite3.connect(db_path)

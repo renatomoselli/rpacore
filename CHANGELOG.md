@@ -43,6 +43,10 @@ All notable user-facing changes are recorded here.
 - Enabled certificate and hostname verification for SMTP STARTTLS before email
   credentials are sent. Private certificate authorities must be installed in
   the Python runtime's trust store.
+- Rejected blank and in-memory durable SQLite paths, protected future schema
+  markers from mutation, made transaction CLI inspection read-only, selected
+  rollback journal for queue safety, and moved initial-transaction cleanup into
+  persistence ownership.
 
 ## v0.1.1 - 2026-07-06
 
