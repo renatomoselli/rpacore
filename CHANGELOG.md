@@ -35,6 +35,12 @@ All notable user-facing changes are recorded here.
 - Moved package license-file metadata to `project.license-files` and declared an
   explicit setuptools build backend to avoid deprecated build configuration.
 
+### Fixed
+
+- Guaranteed that every queue-item exit stops and joins its lease heartbeat.
+- Prevented resource and lifecycle cleanup from suppressing or replacing
+  `MemoryError`, `KeyboardInterrupt`, and `SystemExit`.
+
 ## v0.1.1 - 2026-07-06
 
 ### Fixed

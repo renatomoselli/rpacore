@@ -98,7 +98,7 @@ environment variables, or enforce cross-field rules.
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
 | `QueueItem`, `QueueStatus`, `QueueLeaseLostError`, `QueueProvider`, `SqliteQueue` | Queue item model, statuses, provider contract, and SQLite implementation. | `SqliteQueue` creates/migrates and mutates SQLite queue state. |
-| `QueueRunSummary`, `run_queue_loop` | Process claimed queue items through user factories and `Engine`. | Mutates queue and transaction SQLite databases; renews leases; checkpoints transactions when `transaction_db_path` is configured. |
+| `QueueRunSummary`, `run_queue_loop` | Process claimed queue items through user factories and `Engine`. Fatal `MemoryError`, `KeyboardInterrupt`, and `SystemExit` signals propagate after deterministic cleanup. | Mutates queue and transaction SQLite databases; renews leases; checkpoints transactions when `transaction_db_path` is configured. Every post-claim exit stops and joins its lease heartbeat. |
 
 ## Manifest and Project Entrypoints
 

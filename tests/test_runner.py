@@ -1066,6 +1066,64 @@ class TestRunnerManagedTransactionPersistence:
         assert errors
         assert "could not bind transaction" in str(errors[0])
 
+    def test_bind_memory_error_propagates_after_initial_transaction_cleanup(self, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+
+        class MemoryErrorBindQueue(_FakeQueue):
+            def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
+                raise MemoryError("binding exhausted memory")
+
+        queue = MemoryErrorBindQueue([_item("bind-fatal")])
+
+        with pytest.raises(MemoryError, match="binding exhausted memory"):
+            run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SuccessSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="test-worker",
+                transaction_db_path=db_path,
+            )
+
+        assert queue.completed == []
+        assert queue.failed == []
+        assert list_transactions(db_path) == []
+
+    def test_bind_fatal_cleanup_failure_is_not_replaced(self, monkeypatch, tmp_path) -> None:
+        db_path = str(tmp_path / "transactions.db")
+
+        class MemoryErrorBindQueue(_FakeQueue):
+            def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
+                raise MemoryError("binding exhausted memory")
+
+        def _fail_delete(transaction_id: str, *, db_path: str) -> None:
+            raise RuntimeError("initial transaction cleanup failed")
+
+        monkeypatch.setattr(runner_module, "_delete_transaction", _fail_delete)
+
+        with pytest.raises(MemoryError, match="binding exhausted memory") as exc_info:
+            run_queue_loop(
+                queue=MemoryErrorBindQueue([_item("bind-fatal")]),
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SuccessSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="test-worker",
+                transaction_db_path=db_path,
+            )
+
+        assert exc_info.value.__notes__ == [
+            "initial transaction cleanup also raised RuntimeError: "
+            "initial transaction cleanup failed"
+        ]
+
     def test_initial_transaction_persistence_failure_retries_without_binding(
         self,
         monkeypatch,
@@ -1479,6 +1537,186 @@ class TestRunnerManagedTransactionPersistence:
 # ---------------------------------------------------------------------------
 
 class TestQueueLeaseHeartbeat:
+    @pytest.mark.parametrize(
+        "fatal_source",
+        ["engine", "report", "notifier", "after_item", "transition"],
+    )
+    def test_each_fatal_exit_source_stops_heartbeat(
+        self,
+        monkeypatch,
+        fatal_source,
+    ) -> None:
+        captured: list[runner_module._LeaseHeartbeat] = []
+        original_start = runner_module._start_lease_heartbeat
+
+        def _capture_start(*args, **kwargs):
+            heartbeat = original_start(*args, **kwargs)
+            captured.append(heartbeat)
+            return heartbeat
+
+        class _SourceSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                if fatal_source == "engine":
+                    raise MemoryError("fatal source failure")
+
+        class _SourceQueue(_FakeQueue):
+            def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
+                if fatal_source == "transition":
+                    raise MemoryError("fatal source failure")
+                super().complete(item_id, claimed_by=claimed_by)
+
+        class _SourceNotifier:
+            def send(self, report) -> None:
+                if fatal_source == "notifier":
+                    raise MemoryError("fatal source failure")
+
+        def _generate_report(transaction):
+            if fatal_source == "report":
+                raise MemoryError("fatal source failure")
+            return original_generate_report(transaction)
+
+        def _after_item(item, transaction, error) -> None:
+            if fatal_source == "after_item":
+                raise MemoryError("fatal source failure")
+
+        original_generate_report = runner_module.generate_report
+        monkeypatch.setattr(runner_module, "_start_lease_heartbeat", _capture_start)
+        monkeypatch.setattr(runner_module, "generate_report", _generate_report)
+
+        with pytest.raises(MemoryError, match="fatal source failure"):
+            run_queue_loop(
+                queue=_SourceQueue([_item("fatal")]),
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SourceSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="worker",
+                notifiers=[_SourceNotifier()],
+                after_item=_after_item,
+            )
+
+        assert len(captured) == 1
+        assert captured[0].stop_event.is_set()
+        assert not captured[0].thread.is_alive()
+
+    @pytest.mark.parametrize("fatal_type", [MemoryError, KeyboardInterrupt, SystemExit])
+    def test_fatal_notifier_exit_stops_heartbeat(self, monkeypatch, fatal_type) -> None:
+        captured: list[runner_module._LeaseHeartbeat] = []
+        original_start = runner_module._start_lease_heartbeat
+
+        def _capture_start(*args, **kwargs):
+            heartbeat = original_start(*args, **kwargs)
+            captured.append(heartbeat)
+            return heartbeat
+
+        class _FatalNotifier:
+            def send(self, report) -> None:
+                raise fatal_type("fatal notifier failure")
+
+        monkeypatch.setattr(runner_module, "_start_lease_heartbeat", _capture_start)
+
+        with pytest.raises(fatal_type, match="fatal notifier failure"):
+            run_queue_loop(
+                queue=_FakeQueue([_item("fatal")]),
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SuccessSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="worker",
+                notifiers=[_FatalNotifier()],
+            )
+
+        assert len(captured) == 1
+        assert captured[0].stop_event.is_set()
+        assert not captured[0].thread.is_alive()
+
+    def test_heartbeat_cleanup_failure_does_not_replace_fatal_exit(self, monkeypatch) -> None:
+        original_stop = runner_module._stop_lease_heartbeat
+
+        def _fail_after_stop(heartbeat) -> None:
+            original_stop(heartbeat)
+            raise RuntimeError("heartbeat cleanup failed")
+
+        class _FatalNotifier:
+            def send(self, report) -> None:
+                raise MemoryError("original fatal failure")
+
+        monkeypatch.setattr(runner_module, "_stop_lease_heartbeat", _fail_after_stop)
+
+        with pytest.raises(MemoryError, match="original fatal failure") as exc_info:
+            run_queue_loop(
+                queue=_FakeQueue([_item("fatal")]),
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SuccessSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="worker",
+                notifiers=[_FatalNotifier()],
+            )
+
+        assert exc_info.value.__notes__ == [
+            "lease heartbeat cleanup also raised RuntimeError: heartbeat cleanup failed"
+        ]
+
+    def test_heartbeat_cleanup_failure_propagates_without_active_error(self, monkeypatch) -> None:
+        original_stop = runner_module._stop_lease_heartbeat
+
+        def _fail_after_stop(heartbeat) -> None:
+            original_stop(heartbeat)
+            raise RuntimeError("heartbeat cleanup failed")
+
+        monkeypatch.setattr(runner_module, "_stop_lease_heartbeat", _fail_after_stop)
+
+        with pytest.raises(RuntimeError, match="heartbeat cleanup failed"):
+            _run([_item("complete")])
+
+    def test_item_is_reclaimable_after_fatal_notifier_exit(self, tmp_path) -> None:
+        db_path = str(tmp_path / "queue.db")
+        queue = SqliteQueue({"db_path": db_path, "lease_timeout": 1, "max_retries": 1})
+        queue.add(_item("fatal"))
+
+        class _FatalNotifier:
+            def send(self, report) -> None:
+                raise MemoryError("fatal notifier failure")
+
+        with pytest.raises(MemoryError, match="fatal notifier failure"):
+            run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_SuccessSkill("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="worker-a",
+                notifiers=[_FatalNotifier()],
+            )
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE queue_items SET claimed_at = datetime('now', '-10 seconds') WHERE reference = ?",
+                ("fatal",),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        reclaimed = queue.next_item("worker-b")
+        assert reclaimed is not None
+        assert reclaimed.reference == "fatal"
+        assert reclaimed.claimed_by == "worker-b"
+
     def test_long_running_sqlite_item_keeps_lease(self, monkeypatch, tmp_path) -> None:
         db_path = str(tmp_path / "queue.db")
         queue = SqliteQueue({"db_path": db_path, "lease_timeout": 1, "max_retries": 0})
@@ -1631,6 +1869,41 @@ class TestStopEvent:
 # ---------------------------------------------------------------------------
 
 class TestLifecycleHooks:
+    @pytest.mark.parametrize("fatal_type", [MemoryError, KeyboardInterrupt, SystemExit])
+    def test_resource_scope_cannot_suppress_fatal_exit(self, fatal_type) -> None:
+        class _SuppressingScope:
+            def __enter__(self):
+                return {}
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return True
+
+        with pytest.raises(fatal_type, match="fatal processing failure"):
+            _run(
+                [_item("fatal")],
+                build_raises=fatal_type("fatal processing failure"),
+                resource_scope=_SuppressingScope(),
+            )
+
+    def test_resource_scope_cleanup_failure_does_not_replace_fatal_exit(self) -> None:
+        class _FailingScope:
+            def __enter__(self):
+                return {}
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                raise RuntimeError("scope cleanup failed")
+
+        with pytest.raises(MemoryError, match="original fatal failure") as exc_info:
+            _run(
+                [_item("fatal")],
+                build_raises=MemoryError("original fatal failure"),
+                resource_scope=_FailingScope(),
+            )
+
+        assert exc_info.value.__notes__ == [
+            "resource_scope cleanup also raised RuntimeError: scope cleanup failed"
+        ]
+
     def test_resource_scope_resources_appear_in_every_item_context(self) -> None:
         seen: list[dict[str, object]] = []
         queue = _FakeQueue([_item("a"), _item("b")])
@@ -1969,6 +2242,21 @@ class TestLifecycleHooks:
 
         with pytest.raises(MemoryError, match="out of memory"):
             _run([_item("a")], on_finish=_fail_finish)
+
+    def test_on_finish_fatal_does_not_replace_active_fatal_exit(self) -> None:
+        def _fail_finish(summary: QueueRunSummary) -> None:
+            raise SystemExit("finish fatal failure")
+
+        with pytest.raises(MemoryError, match="processing fatal failure") as exc_info:
+            _run(
+                [_item("fatal")],
+                build_raises=MemoryError("processing fatal failure"),
+                on_finish=_fail_finish,
+            )
+
+        assert exc_info.value.__notes__ == [
+            "on_finish cleanup also raised SystemExit: finish fatal failure"
+        ]
 
     def test_successful_on_finish_does_not_increment_lifecycle_errors(self) -> None:
         summary, _ = _run([_item("a")], on_finish=lambda final_summary: None)

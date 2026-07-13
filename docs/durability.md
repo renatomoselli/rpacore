@@ -85,6 +85,9 @@ Queue resource lifecycle:
   identity
 - resource setup failures prevent queue claims
 - resource cleanup failures propagate after already-decided queue outcomes
+- `MemoryError`, `KeyboardInterrupt`, and `SystemExit` cannot be suppressed by
+  `resource_scope`; cleanup still runs before the original fatal signal
+  propagates
 
 One-off transaction lifecycle:
 
@@ -140,6 +143,12 @@ not run skill code or user callbacks. The heartbeat starts immediately after
 claim and remains active through processing, reporting, callbacks, and the final
 queue transition.
 
+Every exit after a claim stops and joins that item's heartbeat exactly once,
+including fatal failures from execution, reporting, notification, callbacks,
+and final queue transitions. If heartbeat cleanup also fails while another
+exception is active, the active exception remains primary and the cleanup
+failure is attached to it as an exception note.
+
 The renewal interval is shorter than `lease_timeout`; for `SqliteQueue` the
 runner uses one third of the lease timeout, bounded between 0.1 and 10 seconds.
 Transient SQLite `locked` or `busy` renewal errors are retried briefly before
@@ -170,19 +179,25 @@ successful item paths they increment `QueueRunSummary.callback_errors`; on
 failure paths they are logged but do not increment that counter. Ordinary
 callback failures do not change the intended `complete()` or `fail()`
 transition. Confirmed lease loss skips `after_item` because the worker no
-longer owns the item outcome. `MemoryError` from `after_item` propagates. User
-callbacks own their mutations and external side effects.
+longer owns the item outcome. Fatal process signals from `after_item` propagate.
+User callbacks own their mutations and external side effects.
 
 `on_finish` is a final summary observer. It receives `QueueRunSummary` exactly
 once from the runner's finalization path, including empty-queue runs and
 `resource_scope` setup failures that happen before the item loop starts.
 Ordinary `on_finish` exceptions are logged as `on_finish_error`, increment
 `QueueRunSummary.lifecycle_errors`, and are swallowed so cleanup callbacks do
-not change the run outcome. `MemoryError` from `on_finish` propagates.
+not change the run outcome. Fatal process signals from `on_finish` propagate.
+
+For this lifecycle policy, fatal process signals are `MemoryError`,
+`KeyboardInterrupt`, and `SystemExit`. They always propagate and cannot be
+suppressed by `resource_scope`. Cleanup still runs. If cleanup raises while a
+fatal signal is active, the fatal signal remains primary and the cleanup
+failure is visible in its exception notes.
 
 Runner failure dispositions:
 
-| Boundary | Ordinary outcome | MemoryError outcome |
+| Boundary | Ordinary outcome | Fatal signal outcome |
 | --- | --- | --- |
 | resource setup | propagates before queue claim | propagates |
 | transaction build | item fails with queue retry unless validation is terminal | propagates |
@@ -193,7 +208,7 @@ Runner failure dispositions:
 | reporting or notification | logged; intended queue outcome preserved | propagates |
 | `after_item` | logged; intended queue outcome preserved; skipped after confirmed lease loss | propagates |
 | final `complete()`/`fail()` transition | transient SQLite lock/busy is retried; non-transient errors propagate | propagates |
-| lease loss | increments `QueueRunSummary.failed`, logs `queue_item_lease_lost`, skips final transition, stops claiming work | propagates if heartbeat failure is `MemoryError` |
+| lease loss | increments `QueueRunSummary.failed`, logs `queue_item_lease_lost`, skips final transition, stops claiming work | propagates if heartbeat failure is fatal |
 | resource cleanup | propagates after already-decided queue outcomes | propagates |
 | `on_finish` | logged and swallowed | propagates |
 
@@ -201,7 +216,7 @@ The runner keeps a small number of broad `except Exception` boundaries to
 convert unexpected ordinary failures into explicit queue retry decisions, to
 preserve already-decided outcomes after reporting/callback failures, and to
 keep lifecycle cleanup observers from changing the run result. Those catch-all
-boundaries do not catch `MemoryError`.
+boundaries do not suppress fatal process signals.
 
 After confirmed lease loss, the old worker records the item as failed in its run
 summary but leaves the queue row untouched. If another worker already claimed

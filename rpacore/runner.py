@@ -35,6 +35,13 @@ _LEASE_RENEW_ATTEMPTS = 3
 _LEASE_RETRY_DELAY_SECONDS = 0.05
 _DEFAULT_LEASE_RENEWAL_INTERVAL_SECONDS = 10.0
 
+# Cleanup precedence:
+# - no active error + cleanup error: propagate the cleanup error
+# - active ordinary/fatal error + cleanup error: preserve the active error and
+#   attach the cleanup error as a note
+# - fatal error + truthy resource_scope.__exit__: propagate the fatal error
+_FATAL_SIGNALS = (MemoryError, KeyboardInterrupt, SystemExit)
+
 
 class _CheckpointError(RuntimeError):
     """Internal wrapper carrying queue retry policy for checkpoint failures."""
@@ -212,8 +219,14 @@ def run_queue_loop(
                 shared_resources=shared_resources,
                 summary=summary,
             )
-        except BaseException:
+        except BaseException as error:
             exc_info = sys.exc_info()
+            if isinstance(error, _FATAL_SIGNALS):
+                try:
+                    resource_scope.__exit__(*exc_info)
+                except BaseException as cleanup_error:
+                    _add_cleanup_failure_note(error, "resource_scope", cleanup_error)
+                raise
             if not resource_scope.__exit__(*exc_info):
                 raise
             result = summary
@@ -222,17 +235,33 @@ def run_queue_loop(
         _log_resource_scope(log, "resource_scope_released", worker_id, shared_resources)
         return result
     finally:
+        active_error = sys.exception()
         if on_finish is not None:
             try:
                 on_finish(summary)
-            except MemoryError:
-                raise
+            except _FATAL_SIGNALS as cleanup_error:
+                if isinstance(active_error, _FATAL_SIGNALS):
+                    _add_cleanup_failure_note(active_error, "on_finish", cleanup_error)
+                else:
+                    raise
             except Exception:
                 summary.lifecycle_errors += 1
                 log.exception(
                     "on_finish callback raised during lifecycle cleanup",
                     extra={"event": "on_finish_error", "worker_id": worker_id},
                 )
+
+
+def _add_cleanup_failure_note(
+    active_error: BaseException,
+    cleanup_name: str,
+    cleanup_error: BaseException,
+) -> None:
+    """Record a secondary cleanup failure without replacing an active fatal signal."""
+    active_error.add_note(
+        f"{cleanup_name} cleanup also raised "
+        f"{type(cleanup_error).__name__}: {cleanup_error}"
+    )
 
 
 def _run_items(
@@ -261,188 +290,221 @@ def _run_items(
             break
 
         summary.processed += 1
-        transaction: Transaction | None = None
-        ctx: ProcessContext | None = None
-        error: Exception | None = None
-        originally_intended_complete = False
-        callback_failed = False
-        lease_lost = False
-
         log.info(
             "Processing queue item",
             extra={"event": "queue_item_start", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
         )
         heartbeat = _start_lease_heartbeat(queue, item, worker_id=worker_id, log=log)
         try:
-            transaction = _transaction_for_queue_item(
-                queue,
-                item,
-                build_transaction,
-                transaction_db_path=transaction_db_path,
-                retry_business_failures=retry_business_failures,
-                worker_id=worker_id,
-                log=log,
-                summary=summary,
-            )
-            ctx = ProcessContext(
-                transaction=transaction,
+            should_continue = _run_claimed_item(
+                queue=queue,
+                engine=engine,
+                build_transaction=build_transaction,
                 config=config,
-                resources=dict(shared_resources),
                 credentials=credentials,
+                item=item,
+                worker_id=worker_id,
+                notifiers=notifiers,
+                log=log,
+                after_item=after_item,
+                retry_business_failures=retry_business_failures,
+                transaction_db_path=transaction_db_path,
+                shared_resources=shared_resources,
+                summary=summary,
+                heartbeat=heartbeat,
             )
-            checkpoint: Callable[[Transaction], None] | None = None
-            if transaction_db_path is not None:
-                checkpoint = _lease_checked_checkpoint(
-                    heartbeat,
-                    _strict_transaction_checkpoint(
-                        db_path=transaction_db_path,
-                        item=item,
-                        worker_id=worker_id,
-                        log=log,
-                        summary=summary,
-                    ),
-                )
-            else:
-                checkpoint = _lease_only_checkpoint(heartbeat)
-            engine.run(ctx, checkpoint=checkpoint)
-            heartbeat.raise_if_failed()
-            validate_json_object(ctx.transaction.state, path="transaction.state")
-            originally_intended_complete = ctx.transaction.status == Status.SUCCESSFUL
-        except MemoryError:
-            _stop_lease_heartbeat(heartbeat)
-            raise
-        except Exception as exc:
-            error = exc
-            lease_lost = isinstance(exc, QueueLeaseLostError)
-            log.exception(
-                "Unexpected error processing queue item",
-                extra={"event": "queue_item_error", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
-            )
+        finally:
+            _stop_lease_heartbeat_preserving_error(heartbeat)
 
-        if not lease_lost:
-            try:
-                heartbeat.raise_if_failed()
-            except QueueLeaseLostError as exc:
-                error = exc
-                lease_lost = True
-            except MemoryError:
-                _stop_lease_heartbeat(heartbeat)
-                raise
-            except Exception as exc:
-                if error is None:
-                    error = exc
-
-        if ctx is not None and not lease_lost:
-            try:
-                report = generate_report(ctx.transaction)
-            except MemoryError:
-                _stop_lease_heartbeat(heartbeat)
-                raise
-            except Exception as exc:
-                if error is None:
-                    error = exc
-                log.exception(
-                    "Post-run report generation failed; preserving queue outcome",
-                    extra={"event": "queue_item_postprocess_error", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
-                )
-            else:
-                def count_notification_error(notifier: str) -> None:
-                    summary.notification_errors += 1
-
-                dispatch(
-                    notifiers,
-                    report,
-                    logger=log,
-                    on_failure=count_notification_error,
-                )
-
-        if after_item is not None and not lease_lost:
-            try:
-                after_item(item, transaction, error)
-            except MemoryError:
-                _stop_lease_heartbeat(heartbeat)
-                raise
-            except Exception:
-                callback_failed = True
-                log.exception(
-                    "after_item callback raised during post-processing",
-                    extra={"event": "after_item_error", "queue_item_id": item.id, "worker_id": worker_id},
-                )
-
-        if not lease_lost:
-            try:
-                heartbeat.raise_if_failed()
-            except QueueLeaseLostError as exc:
-                error = exc
-                lease_lost = True
-            except MemoryError:
-                _stop_lease_heartbeat(heartbeat)
-                raise
-            except Exception as exc:
-                if error is None:
-                    error = exc
-
-        if lease_lost:
-            summary.failed += 1
-            _stop_lease_heartbeat(heartbeat)
-            _log_lease_lost(log, item, worker_id, error)
+        if not should_continue:
             break
 
-        if originally_intended_complete:
-            try:
-                transition_error = _complete_queue_item_with_retries(
-                    queue,
-                    item,
-                    worker_id=worker_id,
-                    log=log,
-                )
-                if transition_error is not None:
-                    raise transition_error
-                summary.completed += 1
-                if callback_failed:
-                    summary.callback_errors += 1
-                log.info(
-                    "Completed queue item",
-                    extra={"event": "queue_item_complete", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
-                )
-            finally:
-                _stop_lease_heartbeat(heartbeat)
-        else:
-            if isinstance(error, _CheckpointError):
-                retry = error.retry
-            elif isinstance(error, _DurableTransactionBindingError):
-                retry = False
-            elif isinstance(error, _LeaseRenewalError):
-                retry = True
-            elif isinstance(error, (ExecutionValidationError, JsonStateError)):
-                retry = False
-            else:
-                retry = (
-                    retry_business_failures
-                    or error is not None
-                    or not _transaction_has_only_business_failures(transaction)
-                )
-            try:
-                transition_error = _fail_queue_item_with_retries(
-                    queue,
-                    item,
-                    retry=retry,
-                    worker_id=worker_id,
-                    log=log,
-                )
-                if transition_error is not None:
-                    raise transition_error
-                summary.failed += 1
-                if not error and not callback_failed and ctx is not None:
-                    log.warning(
-                        "Queue item failed (transaction status: %s)",
-                        ctx.transaction.status,
-                        extra={"event": "queue_item_fail", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
-                    )
-            finally:
-                _stop_lease_heartbeat(heartbeat)
-
     return summary
+
+
+def _run_claimed_item(
+    queue: QueueProvider,
+    engine: Engine,
+    build_transaction: Callable[[QueueItem], Transaction],
+    config: dict[str, object],
+    credentials: CredentialProvider,
+    item: QueueItem,
+    *,
+    worker_id: str,
+    notifiers: list[Notifier],
+    log: logging.Logger,
+    after_item: Callable[[QueueItem, Transaction | None, Exception | None], None] | None,
+    retry_business_failures: bool,
+    transaction_db_path: str | None,
+    shared_resources: dict[str, object],
+    summary: QueueRunSummary,
+    heartbeat: _LeaseHeartbeat,
+) -> bool:
+    """Process one claimed item; return whether the queue loop should continue."""
+    transaction: Transaction | None = None
+    ctx: ProcessContext | None = None
+    error: Exception | None = None
+    originally_intended_complete = False
+    callback_failed = False
+    lease_lost = False
+
+    try:
+        transaction = _transaction_for_queue_item(
+            queue,
+            item,
+            build_transaction,
+            transaction_db_path=transaction_db_path,
+            retry_business_failures=retry_business_failures,
+            worker_id=worker_id,
+            log=log,
+            summary=summary,
+        )
+        ctx = ProcessContext(
+            transaction=transaction,
+            config=config,
+            resources=dict(shared_resources),
+            credentials=credentials,
+        )
+        if transaction_db_path is not None:
+            checkpoint = _lease_checked_checkpoint(
+                heartbeat,
+                _strict_transaction_checkpoint(
+                    db_path=transaction_db_path,
+                    item=item,
+                    worker_id=worker_id,
+                    log=log,
+                    summary=summary,
+                ),
+            )
+        else:
+            checkpoint = _lease_only_checkpoint(heartbeat)
+        engine.run(ctx, checkpoint=checkpoint)
+        heartbeat.raise_if_failed()
+        validate_json_object(ctx.transaction.state, path="transaction.state")
+        originally_intended_complete = ctx.transaction.status == Status.SUCCESSFUL
+    except _FATAL_SIGNALS:
+        raise
+    except Exception as exc:
+        error = exc
+        lease_lost = isinstance(exc, QueueLeaseLostError)
+        log.exception(
+            "Unexpected error processing queue item",
+            extra={"event": "queue_item_error", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
+        )
+
+    if not lease_lost:
+        try:
+            heartbeat.raise_if_failed()
+        except QueueLeaseLostError as exc:
+            error = exc
+            lease_lost = True
+        except _FATAL_SIGNALS:
+            raise
+        except Exception as exc:
+            if error is None:
+                error = exc
+
+    if ctx is not None and not lease_lost:
+        try:
+            report = generate_report(ctx.transaction)
+        except _FATAL_SIGNALS:
+            raise
+        except Exception as exc:
+            if error is None:
+                error = exc
+            log.exception(
+                "Post-run report generation failed; preserving queue outcome",
+                extra={"event": "queue_item_postprocess_error", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
+            )
+        else:
+            def count_notification_error(notifier: str) -> None:
+                summary.notification_errors += 1
+
+            dispatch(
+                notifiers,
+                report,
+                logger=log,
+                on_failure=count_notification_error,
+            )
+
+    if after_item is not None and not lease_lost:
+        try:
+            after_item(item, transaction, error)
+        except _FATAL_SIGNALS:
+            raise
+        except Exception:
+            callback_failed = True
+            log.exception(
+                "after_item callback raised during post-processing",
+                extra={"event": "after_item_error", "queue_item_id": item.id, "worker_id": worker_id},
+            )
+
+    if not lease_lost:
+        try:
+            heartbeat.raise_if_failed()
+        except QueueLeaseLostError as exc:
+            error = exc
+            lease_lost = True
+        except _FATAL_SIGNALS:
+            raise
+        except Exception as exc:
+            if error is None:
+                error = exc
+
+    if lease_lost:
+        summary.failed += 1
+        _log_lease_lost(log, item, worker_id, error)
+        return False
+
+    if originally_intended_complete:
+        transition_error = _complete_queue_item_with_retries(
+            queue,
+            item,
+            worker_id=worker_id,
+            log=log,
+        )
+        if transition_error is not None:
+            raise transition_error
+        summary.completed += 1
+        if callback_failed:
+            summary.callback_errors += 1
+        log.info(
+            "Completed queue item",
+            extra={"event": "queue_item_complete", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
+        )
+        return True
+
+    if isinstance(error, _CheckpointError):
+        retry = error.retry
+    elif isinstance(error, _DurableTransactionBindingError):
+        retry = False
+    elif isinstance(error, _LeaseRenewalError):
+        retry = True
+    elif isinstance(error, (ExecutionValidationError, JsonStateError)):
+        retry = False
+    else:
+        retry = (
+            retry_business_failures
+            or error is not None
+            or not _transaction_has_only_business_failures(transaction)
+        )
+    transition_error = _fail_queue_item_with_retries(
+        queue,
+        item,
+        retry=retry,
+        worker_id=worker_id,
+        log=log,
+    )
+    if transition_error is not None:
+        raise transition_error
+    summary.failed += 1
+    if not error and not callback_failed and ctx is not None:
+        log.warning(
+            "Queue item failed (transaction status: %s)",
+            ctx.transaction.status,
+            extra={"event": "queue_item_fail", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
+        )
+    return True
 
 
 def _lease_checked_checkpoint(
@@ -531,6 +593,17 @@ def _start_lease_heartbeat(
 def _stop_lease_heartbeat(heartbeat: _LeaseHeartbeat) -> None:
     heartbeat.stop_event.set()
     heartbeat.thread.join()
+
+
+def _stop_lease_heartbeat_preserving_error(heartbeat: _LeaseHeartbeat) -> None:
+    """Stop a heartbeat without replacing an exception already in flight."""
+    active_error = sys.exception()
+    try:
+        _stop_lease_heartbeat(heartbeat)
+    except BaseException as cleanup_error:
+        if active_error is None:
+            raise
+        _add_cleanup_failure_note(active_error, "lease heartbeat", cleanup_error)
 
 
 def _lease_renewal_interval(queue: QueueProvider) -> float:
@@ -762,14 +835,17 @@ def _transaction_for_queue_item(
         )
         if error is not None:
             raise error
-    except Exception as exc:
-        cleanup_error = _delete_transaction_with_retries(
-            transaction.id,
-            db_path=transaction_db_path,
-            log=log,
-            queue_item_id=item.id,
-            worker_id=worker_id,
-        )
+    except BaseException as exc:
+        try:
+            cleanup_error: BaseException | None = _delete_transaction_with_retries(
+                transaction.id,
+                db_path=transaction_db_path,
+                log=log,
+                queue_item_id=item.id,
+                worker_id=worker_id,
+            )
+        except BaseException as raised_cleanup_error:
+            cleanup_error = raised_cleanup_error
         if cleanup_error is not None:
             summary.persistence_errors += 1
             log.error(
@@ -784,6 +860,14 @@ def _transaction_for_queue_item(
                 },
                 exc_info=(type(cleanup_error), cleanup_error, cleanup_error.__traceback__),
             )
+        if isinstance(exc, _FATAL_SIGNALS):
+            if cleanup_error is not None:
+                _add_cleanup_failure_note(exc, "initial transaction", cleanup_error)
+            raise
+        if isinstance(cleanup_error, _FATAL_SIGNALS):
+            raise cleanup_error
+        if not isinstance(exc, Exception):
+            raise
         raise _DurableTransactionBindingError(
             f"Queue item {item.id!r} could not bind transaction {transaction.id!r}: {exc}"
         ) from exc
