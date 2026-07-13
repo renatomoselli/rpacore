@@ -59,8 +59,30 @@ Unhandled exceptions from skill code are recorded as system failures.
 | --- | --- | --- |
 | `load_config(path)` | Load and validate TOML configuration. | Reads a TOML file and resolves configured paths relative to it. |
 | `optional_config`, `require_config`, `require_section` | Validate config dictionaries. | No I/O. |
+| `ConfigField`, `validate_config` | Validate immutable flat field specifications, including dotted nested keys, and return a plain dictionary. | No mutation or I/O. Path, filesystem, and cross-field rules remain explicit Python. |
 | `resolve_config_path`, `resolve_config_paths` | Resolve path values from config. | No I/O beyond path normalization. |
 | `atomic_output_path` | Yield a temporary sibling path and publish it to the destination only after the writer succeeds. | Creates a temporary file beside the destination, fsyncs the temporary file, replaces the destination with `os.replace()`, and removes failed temporary files. |
+
+Use scalar helpers for one or two values. For repeated validation, define a
+flat immutable specification and keep non-local rules in ordinary Python:
+
+```python
+from rpacore import ConfigField, validate_config
+
+values = validate_config(
+    config,
+    (
+        ConfigField("log_level", str, choices=("INFO", "ERROR")),
+        ConfigField("queue.lease_timeout", int, min_value=1),
+        ConfigField("max_retries", int, required=False, default=0, min_value=0),
+    ),
+)
+```
+
+The result is keyed by the same flat names, including dotted keys. Optional
+defaults are validated like configured values. The helper does not mutate
+`config`, resolve paths, access the filesystem, load secrets, interpolate
+environment variables, or enforce cross-field rules.
 
 ## Credentials, Logging, Reports, and Notifications
 

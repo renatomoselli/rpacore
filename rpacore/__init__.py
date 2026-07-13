@@ -13,7 +13,7 @@ def _resolve_version() -> str:
 __version__ = _resolve_version()
 
 from rpacore.config import load_config
-from rpacore.config_validation import optional_config, require_config, require_section
+from rpacore.config_validation import ConfigField, optional_config, require_config, require_section, validate_config
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialNotFoundError, CredentialProvider, EnvCredentialProvider, KeyringCredentialProvider, build_credential_provider
 from rpacore.engine import Engine
@@ -42,6 +42,7 @@ __all__ = [
     "Artifact",
     "ArtifactReport",
     "BusinessException",
+    "ConfigField",
     "CredentialNotFoundError",
     "CredentialProvider",
     "EmailNotifier",
@@ -93,4 +94,5 @@ __all__ = [
     "run_queue_loop",
     "save_transaction",
     "serialize_transaction",
+    "validate_config",
 ]

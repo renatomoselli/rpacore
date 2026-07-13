@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 import rpacore
-from rpacore.config_validation import optional_config, require_config, require_section
+from rpacore.config_validation import (
+    ConfigField,
+    optional_config,
+    require_config,
+    require_section,
+    validate_config,
+)
 
 
 class TestRequireConfig:
@@ -64,6 +70,14 @@ class TestRequireConfig:
             "mode expected one of 'quiet', 'normal'; got str value='loud'"
         )
 
+    def test_string_choices_are_rejected_as_an_invalid_specification(self) -> None:
+        with pytest.raises(TypeError, match="mode choices must be a non-string iterable"):
+            require_config({"mode": "normal"}, "mode", str, choices="normal")
+
+    def test_empty_choices_are_rejected_as_an_invalid_specification(self) -> None:
+        with pytest.raises(ValueError, match="mode choices must not be empty"):
+            require_config({"mode": "normal"}, "mode", str, choices=())
+
     def test_min_value_validation(self) -> None:
         config: dict[str, object] = {"timeout": 0}
 
@@ -87,6 +101,20 @@ class TestRequireConfig:
             require_config(config, "timeout", int, max_value=60)
 
         assert str(exc_info.value) == "timeout expected int <= 60; got int value=61"
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_float_is_rejected_when_bounds_are_configured(
+        self,
+        value: float,
+    ) -> None:
+        with pytest.raises(ValueError, match="ratio expected finite float"):
+            require_config(
+                {"ratio": value},
+                "ratio",
+                float,
+                min_value=0.0,
+                max_value=1.0,
+            )
 
     def test_incomparable_max_value_raises_value_error(self) -> None:
         config: dict[str, object] = {"timeout": 5}
@@ -138,6 +166,12 @@ class TestOptionalConfig:
 
         assert config == {}
 
+    def test_missing_optional_default_is_validated(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            optional_config({}, "timeout", int, 0, min_value=1)
+
+        assert str(exc_info.value) == "timeout expected int >= 1; got int value=0"
+
     def test_present_optional_is_validated(self) -> None:
         config: dict[str, object] = {"timeout": "30"}
 
@@ -152,8 +186,91 @@ class TestOptionalConfig:
         assert optional_config(config, "timeout", int, 30, min_value=1, max_value=60) == 10
 
 
+class TestValidateConfig:
+    def test_batch_validates_required_optional_and_dotted_values(self) -> None:
+        config: dict[str, object] = {
+            "log_level": "INFO",
+            "queue": {"lease_timeout": 30, "enabled": True},
+        }
+
+        values = validate_config(
+            config,
+            (
+                ConfigField("log_level", str, choices=("INFO", "ERROR")),
+                ConfigField("queue.lease_timeout", int, min_value=1, max_value=60),
+                ConfigField("queue.enabled", bool),
+                ConfigField("max_retries", int, required=False, default=3, min_value=0),
+            ),
+        )
+
+        assert values == {
+            "log_level": "INFO",
+            "queue.lease_timeout": 30,
+            "queue.enabled": True,
+            "max_retries": 3,
+        }
+        assert "max_retries" not in config
+
+    def test_dotted_error_uses_complete_key(self) -> None:
+        config: dict[str, object] = {"queue": {"lease_timeout": True}}
+
+        with pytest.raises(TypeError) as exc_info:
+            validate_config(config, (ConfigField("queue.lease_timeout", int),))
+
+        assert str(exc_info.value) == (
+            "queue.lease_timeout expected int; got bool value=True"
+        )
+
+    def test_non_mapping_parent_has_actionable_error(self) -> None:
+        with pytest.raises(TypeError) as exc_info:
+            validate_config(
+                {"queue": "queue.db"},
+                (ConfigField("queue.lease_timeout", int),),
+            )
+
+        assert str(exc_info.value) == "queue expected dict; got str value='queue.db'"
+
+    def test_missing_dotted_value_uses_complete_key(self) -> None:
+        with pytest.raises(KeyError) as exc_info:
+            validate_config({"queue": {}}, (ConfigField("queue.db_path", str),))
+
+        assert str(exc_info.value) == "'Missing required config key: queue.db_path'"
+
+    def test_optional_default_is_validated(self) -> None:
+        with pytest.raises(TypeError, match="max_retries expected int"):
+            validate_config(
+                {},
+                (ConfigField("max_retries", int, required=False, default="3"),),
+            )
+
+    def test_duplicate_fields_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Duplicate config field: timeout"):
+            validate_config(
+                {"timeout": 1},
+                (ConfigField("timeout", int), ConfigField("timeout", int)),
+            )
+
+    @pytest.mark.parametrize("key", ["", ".queue", "queue.", "queue..timeout"])
+    def test_invalid_field_keys_are_rejected(self, key: str) -> None:
+        with pytest.raises(ValueError, match="non-empty dotted key"):
+            ConfigField(key, int)
+
+    def test_required_field_cannot_define_default(self) -> None:
+        with pytest.raises(ValueError, match="cannot define a default"):
+            ConfigField("timeout", int, default=30)
+
+    def test_batch_rejects_non_finite_bounded_value(self) -> None:
+        with pytest.raises(ValueError, match="ratio expected finite float"):
+            validate_config(
+                {"ratio": float("nan")},
+                (ConfigField("ratio", float, min_value=0.0),),
+            )
+
+
 class TestPackageExports:
     def test_helpers_are_reexported(self) -> None:
         assert rpacore.require_config is require_config
         assert rpacore.require_section is require_section
         assert rpacore.optional_config is optional_config
+        assert rpacore.ConfigField is ConfigField
+        assert rpacore.validate_config is validate_config

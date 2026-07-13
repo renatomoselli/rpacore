@@ -141,6 +141,7 @@ class TestPackageVersion:
             "Artifact",
             "ArtifactReport",
             "BusinessException",
+            "ConfigField",
             "CredentialNotFoundError",
             "CredentialProvider",
             "EmailNotifier",
@@ -192,6 +193,7 @@ class TestPackageVersion:
             "run_queue_loop",
             "save_transaction",
             "serialize_transaction",
+            "validate_config",
         }
         actual = set(rpacore.__all__)
 

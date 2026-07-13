@@ -10,6 +10,8 @@ All notable user-facing changes are recorded here.
   replaces destinations only after writer success.
 - Added `execute_transaction()` as a one-off transaction runner with strict
   SQLite checkpoint persistence and explicit `resource_scope` support.
+- Added `ConfigField` and `validate_config()` for immutable batch configuration
+  specifications with dotted nested keys and plain-dictionary results.
 
 ### Breaking
 
