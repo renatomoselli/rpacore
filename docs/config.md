@@ -60,6 +60,12 @@ include_transaction = false
 timeout = 10
 ```
 
+Email delivery negotiates STARTTLS with certificate validation and hostname
+checking before SMTP credentials are sent. Servers using a private or
+self-signed certificate authority must install that CA in the trust store used
+by the Python runtime. RPA Core does not provide a switch to disable TLS
+verification.
+
 Webhook URLs must use `http` or `https`. Local and private hosts are allowed
 because webhook endpoints are trusted operator configuration. Treat webhook
 targets as sensitive.

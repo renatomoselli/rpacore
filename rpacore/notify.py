@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import smtplib
+import ssl
 import urllib.parse
 import urllib.request
 from email.mime.application import MIMEApplication
@@ -152,7 +153,7 @@ class EmailNotifier:
                             pass
 
         with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as smtp:
-            smtp.starttls()
+            smtp.starttls(context=ssl.create_default_context())
             smtp.login(self.from_addr, password)
             smtp.sendmail(self.from_addr, self.to_addrs, msg.as_string())
 

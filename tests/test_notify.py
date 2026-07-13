@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import ssl
 from datetime import datetime, timezone
 from io import BytesIO
 from unittest.mock import MagicMock, patch
@@ -264,6 +266,57 @@ class TestEmailNotifierSend:
     def test_starttls_called(self):
         smtp = self._send()
         smtp.starttls.assert_called_once()
+        context = smtp.starttls.call_args.kwargs["context"]
+        assert isinstance(context, ssl.SSLContext)
+        assert context.verify_mode is ssl.CERT_REQUIRED
+        assert context.check_hostname is True
+
+    def test_starttls_completes_before_login(self):
+        smtp = self._send(password="mysecret")
+        method_names = [call[0] for call in smtp.method_calls]
+
+        assert method_names.index("starttls") < method_names.index("login")
+
+    def test_certificate_failure_prevents_login_and_send(self):
+        notifier = EmailNotifier(_email_config(), _creds("mysecret"))
+
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp.starttls.side_effect = ssl.SSLCertVerificationError(
+                "certificate verify failed"
+            )
+            mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            with pytest.raises(ssl.SSLCertVerificationError):
+                notifier.send(_make_report())
+
+        mock_smtp.login.assert_not_called()
+        mock_smtp.sendmail.assert_not_called()
+
+    def test_certificate_failure_is_contained_without_logging_credentials(self, caplog):
+        password = "smtp-password-must-stay-secret"
+        notifier = EmailNotifier(_email_config(), _creds(password))
+        logger = logging.getLogger("test.notify.tls")
+
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp.starttls.side_effect = ssl.SSLCertVerificationError(
+                "certificate verify failed"
+            )
+            mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+
+            with caplog.at_level(logging.ERROR, logger=logger.name):
+                dispatch([notifier], _make_report(), logger=logger)
+
+        mock_smtp.login.assert_not_called()
+        mock_smtp.sendmail.assert_not_called()
+        assert password not in caplog.text
+        assert any(
+            record.__dict__.get("event") == "notifier_error"
+            for record in caplog.records
+        )
 
     def test_smtp_constructed_with_timeout(self):
         notifier = EmailNotifier(_email_config(), _creds())
@@ -662,7 +715,6 @@ class TestDispatch:
         dispatch([bad], _make_report(), on_failure=callback)
 
     def test_exception_logged(self):
-        import logging
         bad = MagicMock(spec=Notifier)
         bad.send.side_effect = RuntimeError("fail")
 

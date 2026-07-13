@@ -40,6 +40,9 @@ All notable user-facing changes are recorded here.
 - Guaranteed that every queue-item exit stops and joins its lease heartbeat.
 - Prevented resource and lifecycle cleanup from suppressing or replacing
   `MemoryError`, `KeyboardInterrupt`, and `SystemExit`.
+- Enabled certificate and hostname verification for SMTP STARTTLS before email
+  credentials are sent. Private certificate authorities must be installed in
+  the Python runtime's trust store.
 
 ## v0.1.1 - 2026-07-06
 
