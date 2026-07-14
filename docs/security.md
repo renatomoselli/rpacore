@@ -67,6 +67,11 @@ permissions, backups, disk encryption where appropriate, and normal operational
 controls. Avoid placing transaction, queue, log, report, export, or screenshot
 files in shared directories unless every reader is trusted.
 
+Durable transaction fields are validated as JSON-safe data before execution and
+persistence. Loading also rejects malformed or non-object persisted skill
+arguments with transaction and skill identifiers so operators can repair the
+database explicitly; RPA Core does not silently normalize corrupt records.
+
 RPA Core rejects blank and `:memory:` durable database paths. Transaction CLI
 inspection opens existing files read-only and refuses missing or incompatible
 schemas without migration. Queue databases use rollback journal on the v0.1.x

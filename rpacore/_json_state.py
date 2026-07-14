@@ -6,7 +6,7 @@ import math
 
 
 class JsonStateError(TypeError):
-    """Raised when durable state or queue payload is not JSON-safe."""
+    """Raised when durable framework data is not JSON-safe."""
 
 
 def validate_json_safe(value: object, *, path: str) -> None:
@@ -61,6 +61,6 @@ def _enter_container(value: object, *, path: str, active: set[int]) -> None:
 def _state_type_error(path: str, expected: str, value: object) -> TypeError:
     return JsonStateError(
         f"{path} expected {expected}; got {type(value).__name__} value={value!r}. "
-        "Durable transaction state must be JSON-safe. Move runtime objects to "
+        "Durable RPA Core data must be JSON-safe. Move runtime objects to "
         "ctx.resources or persist an artifact path in ctx.state."
     )

@@ -2,11 +2,12 @@
 
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from rpacore.context import ProcessContext
-from rpacore.exceptions import BusinessException, SystemException
+from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.persistence import (
     _delete_unbound_pending_transaction,
     list_transactions,
@@ -424,6 +425,30 @@ class TestSaveAndLoad:
         assert "transaction.state['client'] expected JSON value" in message
         assert "ctx.resources" in message
 
+    def test_save_rejects_invalid_wiring_before_database_creation(self, tmp_path) -> None:
+        db_path = tmp_path / "invalid-wiring.db"
+        transaction = Transaction(reference="")
+
+        with pytest.raises(ExecutionValidationError, match="transaction.reference"):
+            save_transaction(transaction, str(db_path))
+
+        assert not db_path.exists()
+
+    def test_save_rejects_tuple_skill_arguments_before_database_creation(
+        self,
+        tmp_path,
+    ) -> None:
+        db_path = tmp_path / "invalid-arguments.db"
+        transaction = Transaction(
+            reference="tuple-arguments",
+            skills=[Skill("tuple", 1, arguments={"value": (1, 2)})],
+        )
+
+        with pytest.raises(TypeError, match=r"arguments\['value'\]"):
+            save_transaction(transaction, str(db_path))
+
+        assert not db_path.exists()
+
     def test_save_rejects_circular_transaction_state(self, db_path) -> None:
         tx = make_transaction()
         tx.state["self"] = tx.state
@@ -521,6 +546,35 @@ class TestSaveAndLoad:
             load_transaction(tx.id, db_path)
 
         assert "transaction.state expected JSON object" in str(exc_info.value)
+
+    @pytest.mark.parametrize("stored_arguments", ["not-json", "[]"])
+    def test_load_rejects_corrupt_skill_arguments(
+        self,
+        db_path,
+        stored_arguments: str,
+    ) -> None:
+        transaction = make_transaction(skills=[Skill("submit", 1)])
+        save_transaction(transaction, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE skills SET arguments = ? WHERE transaction_id = ?",
+                (stored_arguments, transaction.id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(SystemException) as exc_info:
+            load_transaction(transaction.id, db_path)
+
+        assert "Persisted skill arguments are invalid" in str(exc_info.value)
+        assert transaction.id in str(exc_info.value)
+        assert "submit" in str(exc_info.value)
+        assert (
+            exc_info.value.action
+            == "repair skill arguments in the persistence database"
+        )
 
     def test_load_rejects_corrupt_transaction_timestamp(self, db_path) -> None:
         tx = make_transaction()
@@ -812,8 +866,10 @@ class TestSaveAndLoad:
         s1 = Skill("dup", 1)
         s2 = Skill("dup", 1)
         tx = make_transaction(skills=[s1, s2])
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(ExecutionValidationError, match="skill.name must be unique"):
             save_transaction(tx, db_path)
+
+        assert not Path(db_path).exists()
 
     def test_save_locked_database_exposes_sqlite_lock_error(self, db_path) -> None:
         save_transaction(make_transaction(), db_path)

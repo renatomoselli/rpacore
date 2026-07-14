@@ -786,6 +786,7 @@ def _transaction_for_queue_item(
     if transaction_db_path is None:
         transaction = build_transaction(item)
         _seed_transaction_state_from_payload(transaction, item, worker_id=worker_id, log=log)
+        transaction.validate_for_execution()
         return transaction
 
     if item.transaction_id:
@@ -797,7 +798,13 @@ def _transaction_for_queue_item(
                 db_path=transaction_db_path,
                 retry_business_failures=retry_business_failures,
             )
-        except (KeyError, sqlite3.Error, SystemException, ValueError) as exc:
+        except (
+            KeyError,
+            sqlite3.Error,
+            SystemException,
+            ValueError,
+            JsonStateError,
+        ) as exc:
             raise _DurableTransactionBindingError(
                 f"Queue item {item.id!r} is bound to transaction "
                 f"{item.transaction_id!r}, but it cannot be resumed: {exc}"
@@ -805,6 +812,7 @@ def _transaction_for_queue_item(
 
     transaction = build_transaction(item)
     _seed_transaction_state_from_payload(transaction, item, worker_id=worker_id, log=log)
+    transaction.validate_for_execution()
     error = _save_transaction_with_retries(
         transaction,
         db_path=transaction_db_path,
@@ -827,7 +835,10 @@ def _transaction_for_queue_item(
             },
             exc_info=(type(error), error, error.__traceback__),
         )
-        raise _CheckpointError(error, retry=True) from error
+        raise _CheckpointError(
+            error,
+            retry=not isinstance(error, (ExecutionValidationError, JsonStateError)),
+        ) from error
     try:
         error = _bind_transaction_with_retries(
             queue,
@@ -986,7 +997,13 @@ def _strict_transaction_checkpoint(
         )
         raise _CheckpointError(
             error,
-            retry=_checkpoint_failure_allows_queue_retry(transaction, db_path=db_path),
+            retry=(
+                not isinstance(error, (ExecutionValidationError, JsonStateError))
+                and _checkpoint_failure_allows_queue_retry(
+                    transaction,
+                    db_path=db_path,
+                )
+            ),
         ) from error
 
     return checkpoint

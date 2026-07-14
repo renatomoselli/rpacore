@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from rpacore._json_state import validate_json_object
 from rpacore.exceptions import BusinessException
 from rpacore.skill import Skill
 from rpacore.transaction import Artifact, HistoryEntry, Transaction
@@ -14,9 +13,8 @@ TRANSACTION_FORMAT_VERSION = 1
 
 
 def serialize_transaction(transaction: Transaction) -> dict[str, object]:
-    """Return the canonical JSON-safe transaction record."""
-    validate_json_object(transaction.state, path="transaction.state")
-    validate_json_object(transaction.metadata, path="transaction.metadata")
+    """Return a canonical record after durable-data, but not wiring, validation."""
+    transaction.validate_durable_data()
     return {
         "transaction_format_version": TRANSACTION_FORMAT_VERSION,
         "id": transaction.id,
@@ -38,7 +36,6 @@ def serialize_transaction(transaction: Transaction) -> dict[str, object]:
 
 
 def _skill_record(skill: Skill) -> dict[str, object]:
-    validate_json_object(skill.arguments, path=f"transaction.skills[{skill.name!r}].arguments")
     return {
         "name": skill.name,
         "execution_order": skill.execution_order,
@@ -76,10 +73,6 @@ def _history_record(entry: HistoryEntry) -> dict[str, object]:
 
 
 def _artifact_record(artifact: Artifact, index: int) -> dict[str, object]:
-    validate_json_object(
-        artifact.metadata,
-        path=f"transaction.artifacts[{index}].metadata",
-    )
     return {
         "id": artifact.id,
         "name": artifact.name,

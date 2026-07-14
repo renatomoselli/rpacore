@@ -87,8 +87,10 @@ def test_skill_reports_service_timeout(skill) -> None:
 
 ## State and Artifacts
 
-`ctx.state` is durable JSON-safe transaction state. Assert exact keys and
-values that later skills or persisted records depend on.
+`ctx.state` is durable JSON-safe transaction state. Skill arguments,
+transaction metadata, and artifact metadata follow the same JSON-safe contract.
+Use lists rather than tuples and assert exact shapes and values that later
+skills or persisted records depend on.
 
 Use `ctx.add_artifact()` to register generated file paths. Tests should assert
 the artifact record, not read artifact contents through the reporting or

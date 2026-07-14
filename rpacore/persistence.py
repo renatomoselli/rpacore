@@ -249,6 +249,26 @@ def _load_transaction_state(row: sqlite3.Row) -> dict[str, object]:
     return state
 
 
+def _load_skill_arguments(
+    transaction_id: str,
+    row: sqlite3.Row,
+) -> dict[str, object]:
+    """Load one Skill argument mapping or raise actionable repair guidance."""
+    try:
+        arguments = json.loads(row["arguments"])
+        validate_json_object(
+            arguments,
+            path=f"transaction.skills[{row['name']!r}].arguments",
+        )
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise SystemException(
+            f"Persisted skill arguments are invalid for transaction "
+            f"{transaction_id!r} skill {row['name']!r}: {exc}",
+            action="repair skill arguments in the persistence database",
+        ) from exc
+    return arguments
+
+
 def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
@@ -378,7 +398,7 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
     Safe to call multiple times. Skills are deleted and reinserted on each save,
     so removed or reordered skills are correctly reflected.
     """
-    validate_json_object(transaction.state, path="transaction.state")
+    transaction.validate_for_execution()
     state_json = json.dumps(transaction.state)
     metadata_json = _metadata_to_storage(transaction.metadata)
     artifact_rows = [
@@ -605,7 +625,11 @@ def load_transaction(
 
         skills: list[Skill] = []
         for sr in skill_rows:
-            skill = Skill(sr["name"], sr["execution_order"], arguments=json.loads(sr["arguments"]))
+            skill = Skill(
+                sr["name"],
+                sr["execution_order"],
+                arguments=_load_skill_arguments(transaction_id, sr),
+            )
             skill.status = Status(sr["status"])
 
             exc_rows = conn.execute(

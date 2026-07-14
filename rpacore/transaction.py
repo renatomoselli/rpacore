@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 
+from rpacore._json_state import validate_json_object
 from rpacore.exceptions import ExecutionValidationError
 from rpacore.skill import Skill
 from rpacore.status import Status
@@ -116,7 +117,7 @@ class Transaction:
         return entry
 
     def validate_for_execution(self) -> None:
-        """Validate transaction wiring before Engine starts skill execution."""
+        """Validate transaction wiring and durable data before execution."""
         if not isinstance(self.reference, str):
             raise ExecutionValidationError(
                 f"transaction.reference must be a non-empty str, got {self.reference!r}"
@@ -154,3 +155,20 @@ class Transaction:
                     f"{order!r}"
                 )
             orders.add(order)
+
+        self.validate_durable_data()
+
+    def validate_durable_data(self) -> None:
+        """Validate every JSON-backed value owned by the transaction."""
+        validate_json_object(self.state, path="transaction.state")
+        validate_json_object(self.metadata, path="transaction.metadata")
+        for index, artifact in enumerate(self.artifacts):
+            validate_json_object(
+                artifact.metadata,
+                path=f"transaction.artifacts[{index}].metadata",
+            )
+        for skill in self.skills:
+            validate_json_object(
+                skill.arguments,
+                path=f"transaction.skills[{skill.name!r}].arguments",
+            )

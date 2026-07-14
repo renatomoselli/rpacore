@@ -26,12 +26,23 @@ def resume_transaction(
     should still check transaction status first to avoid unnecessary work.
     """
     transaction = load_transaction(tx_id, db_path)
+    transaction.validate_for_execution()
     interrupted = _is_interrupted(transaction)
     already_resumed = (
         bool(transaction.history)
         and transaction.history[-1].event is HistoryEvent.TRANSACTION_RESUMED
     )
     preserve_recovery_state = interrupted or already_resumed
+    stop_propagated_skips = _stop_propagated_skipped_skill_keys(transaction)
+    preserved_skips = {
+        (skill.name, skill.execution_order)
+        for skill in transaction.skills
+        if preserve_recovery_state and skill.status is Status.SKIPPED
+    }
+    if not preserve_recovery_state:
+        preserved_skips.update(stop_propagated_skips)
+    if retry_business_failures:
+        preserved_skips.difference_update(stop_propagated_skips)
 
     provided: dict[tuple[str, int], Skill] = {}
     for skill in skills:
@@ -59,7 +70,7 @@ def resume_transaction(
         concrete.status = _resumed_skill_status(
             loaded_skill.status,
             concrete.exceptions,
-            preserve_recovery_state=preserve_recovery_state,
+            preserve_skipped=key in preserved_skips,
             retry_business_failures=retry_business_failures,
         )
 
@@ -95,15 +106,43 @@ def _resumed_skill_status(
     status: Status,
     exceptions: list[BaseException],
     *,
-    preserve_recovery_state: bool,
+    preserve_skipped: bool,
     retry_business_failures: bool,
 ) -> Status:
     """Return the skill status to use after explicit resume."""
     if status is Status.SUCCESSFUL:
         return Status.SUCCESSFUL
-    if preserve_recovery_state and status is Status.SKIPPED:
+    if preserve_skipped and status is Status.SKIPPED:
         return Status.SKIPPED
     if status is Status.FAILED and exceptions:
         if isinstance(exceptions[-1], BusinessException):
             return Status.PENDING if retry_business_failures else Status.FAILED
     return Status.PENDING
+
+
+def _stop_propagated_skipped_skill_keys(
+    transaction: Transaction,
+) -> set[tuple[str, int]]:
+    """Return causal skips from engine-emitted ``SKILL_SKIPPED`` history."""
+    stopping_failures = {
+        (skill.execution_order, skill.exceptions[-1].retry_number)
+        for skill in transaction.skills
+        if skill.status is Status.FAILED
+        and skill.exceptions
+        and isinstance(skill.exceptions[-1], BusinessException)
+        and skill.exceptions[-1].stops_execution
+    }
+    if not stopping_failures:
+        return set()
+
+    return {
+        (entry.skill_name, entry.skill_execution_order)
+        for entry in transaction.history
+        if entry.event is HistoryEvent.SKILL_SKIPPED
+        and entry.skill_execution_order is not None
+        and any(
+            stopping_order < entry.skill_execution_order
+            and stopping_retry == entry.retry_number
+            for stopping_order, stopping_retry in stopping_failures
+        )
+    }

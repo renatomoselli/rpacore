@@ -47,6 +47,10 @@ All notable user-facing changes are recorded here.
   markers from mutation, made transaction CLI inspection read-only, selected
   rollback journal for queue safety, and moved initial-transaction cleanup into
   persistence ownership.
+- Validated transaction wiring and all durable JSON data before initial
+  persistence, rejected skill-argument shape coercion and corrupt stored
+  arguments, and preserved history-proven downstream skips from stopping
+  business failures during recovery.
 
 ## v0.1.1 - 2026-07-06
 

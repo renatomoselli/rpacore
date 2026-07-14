@@ -19,12 +19,14 @@ contract. Public submodules remain implementation locations; see
 | `execute_transaction` | Run one transaction with a `ProcessContext`, optional strict SQLite checkpoints, and optional runtime resources. | Mutates the transaction through `Engine.run()`. When `transaction_db_path` is set, creates or migrates the SQLite transaction database and checkpoints each transition. |
 | `ProcessContext` | Runtime context passed to skills. | Carries durable `state`, runtime-only `resources`, config, and transaction reference. Resources are not serialized. |
 | `Skill` | Base class for user-authored work units. | User subclasses implement `execute(ctx)`. Side effects belong to user code. |
-| `Transaction` | Unit of execution and persistence. | Stores reference, status, skills, durable state, metadata, artifacts, and history. |
+| `Transaction` | Unit of execution and persistence. | Stores reference, status, skills, durable state, metadata, artifacts, and history. Validates wiring and JSON-safe durable data before execution or persistence. |
 | `Status` | Transaction and skill status enum. | No side effects. |
 
-`Engine.run(ctx, checkpoint=...)` validates wiring before user skill code runs.
-When a checkpoint callback is supplied, it is called after each transaction or
-skill state transition. Checkpoint failures propagate and stop execution.
+`Engine.run(ctx, checkpoint=...)` validates wiring and JSON-safe transaction
+state, metadata, skill arguments, and artifact metadata before user skill code
+runs. When a checkpoint callback is supplied, it is called after each
+transaction or skill state transition. Checkpoint failures propagate and stop
+execution.
 
 Use `execute_transaction(transaction, transaction_db_path=...)` for ordinary
 one-off runs that should persist strict SQLite checkpoints. Use raw
@@ -46,11 +48,11 @@ Unhandled exceptions from skill code are recorded as system failures.
 
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
-| `save_transaction(transaction, db_path)` | Save one transaction to SQLite. | Creates or migrates the SQLite database and writes transaction rows. |
+| `save_transaction(transaction, db_path)` | Validate and save one transaction to SQLite. | Invalid wiring or durable data fails before the database is opened; valid input creates or migrates the database and writes transaction rows. |
 | `load_transaction(transaction_id, db_path, readonly=False)` | Load one transaction from SQLite. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite and preserves persisted status values; default mode can migrate older schemas. |
 | `list_transactions(db_path, readonly=False)` | List persisted transactions. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite; default mode can migrate older schemas. |
-| `resume_transaction(transaction_id, skills, db_path=...)` | Load and prepare a persisted transaction for retry. | Mutates in-memory statuses, reattaches executable skills, and appends resume history when needed. |
-| `serialize_transaction(transaction)` | Convert a transaction to JSON-safe data. | No I/O. |
+| `resume_transaction(transaction_id, skills, db_path=...)` | Load, validate, and prepare a persisted transaction for retry. | Mutates in-memory statuses only after validation, reattaches executable skills, preserves history-proven skips caused by a stopping business failure, and appends resume history when needed. |
+| `serialize_transaction(transaction)` | Convert a transaction to JSON-safe data. | Validates durable JSON fields without requiring executable wiring; no I/O. |
 | `TRANSACTION_FORMAT_VERSION` | Current serialized transaction format version. | No side effects. |
 
 ## Configuration and Paths

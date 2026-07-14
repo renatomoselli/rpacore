@@ -26,6 +26,24 @@ class _TrackingSkill(Skill):
         self._counts[self.name] = self._counts.get(self.name, 0) + 1
 
 
+class _StoppingBusinessSkill(Skill):
+    def execute(self, ctx: ProcessContext) -> None:
+        raise BusinessException("stop", action=self.name, stop=True)
+
+
+def _save_stopped_transaction(db_path: str) -> Transaction:
+    transaction = Transaction(
+        reference="stopping-business-failure",
+        skills=[
+            _StoppingBusinessSkill("validate", 1),
+            Skill("downstream", 2),
+        ],
+    )
+    Engine().run(ProcessContext(transaction=transaction))
+    save_transaction(transaction, db_path)
+    return transaction
+
+
 def test_resume_reruns_only_non_successful_skills(db_path) -> None:
     counts: dict[str, int] = {}
 
@@ -282,6 +300,80 @@ def test_resume_does_not_rerun_business_failed_skills(db_path) -> None:
     assert resumed.status is Status.FAILED
 
 
+def test_resume_preserves_downstream_skip_from_stopping_business_failure(
+    db_path,
+) -> None:
+    transaction = _save_stopped_transaction(db_path)
+    counts: dict[str, int] = {}
+
+    resumed = resume_transaction(
+        transaction.id,
+        [
+            _TrackingSkill("validate", 1, counts),
+            _TrackingSkill("downstream", 2, counts),
+        ],
+        db_path=db_path,
+    )
+
+    assert [skill.status for skill in resumed.skills] == [
+        Status.FAILED,
+        Status.SKIPPED,
+    ]
+
+    Engine().run(ProcessContext(transaction=resumed))
+
+    assert counts == {}
+    assert resumed.status is Status.FAILED
+
+
+def test_resume_does_not_infer_stop_causality_without_skip_history(db_path) -> None:
+    failed = Skill("validate", 1)
+    failed.status = Status.FAILED
+    failed.exceptions.append(
+        BusinessException("stop", action="validate", stop=True)
+    )
+    skipped = Skill("downstream", 2)
+    skipped.status = Status.SKIPPED
+    transaction = Transaction(
+        reference="manual-skip",
+        status=Status.FAILED,
+        skills=[failed, skipped],
+    )
+    save_transaction(transaction, db_path)
+
+    resumed = resume_transaction(
+        transaction.id,
+        [Skill("validate", 1), Skill("downstream", 2)],
+        db_path=db_path,
+    )
+
+    assert [skill.status for skill in resumed.skills] == [
+        Status.FAILED,
+        Status.PENDING,
+    ]
+
+
+def test_repeated_resume_preserves_stopping_business_skip(db_path) -> None:
+    transaction = _save_stopped_transaction(db_path)
+
+    first = resume_transaction(
+        transaction.id,
+        [Skill("validate", 1), Skill("downstream", 2)],
+        db_path=db_path,
+    )
+    save_transaction(first, db_path)
+    second = resume_transaction(
+        transaction.id,
+        [Skill("validate", 1), Skill("downstream", 2)],
+        db_path=db_path,
+    )
+
+    assert [skill.status for skill in second.skills] == [
+        Status.FAILED,
+        Status.SKIPPED,
+    ]
+
+
 def test_resume_can_retry_business_failed_skills_when_policy_allows_it(db_path) -> None:
     counts: dict[str, int] = {}
     failed = Skill("failed", 1)
@@ -302,6 +394,33 @@ def test_resume_can_retry_business_failed_skills_when_policy_allows_it(db_path) 
     Engine().run(ProcessContext(transaction=resumed))
 
     assert counts == {"failed": 1}
+    assert resumed.status is Status.SUCCESSFUL
+
+
+def test_business_retry_policy_resets_stopping_failure_and_causal_skip(
+    db_path,
+) -> None:
+    transaction = _save_stopped_transaction(db_path)
+    counts: dict[str, int] = {}
+
+    resumed = resume_transaction(
+        transaction.id,
+        [
+            _TrackingSkill("validate", 1, counts),
+            _TrackingSkill("downstream", 2, counts),
+        ],
+        db_path=db_path,
+        retry_business_failures=True,
+    )
+
+    assert [skill.status for skill in resumed.skills] == [
+        Status.PENDING,
+        Status.PENDING,
+    ]
+
+    Engine().run(ProcessContext(transaction=resumed))
+
+    assert counts == {"validate": 1, "downstream": 1}
     assert resumed.status is Status.SUCCESSFUL
 
 

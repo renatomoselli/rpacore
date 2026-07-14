@@ -22,12 +22,14 @@ If `build_transaction()` pre-populates `Transaction.state` with a key that is
 also present in the queue item payload, the queue payload value wins. The runner
 logs the collision at warning level with the overlapping keys.
 
-State must be JSON-safe: dictionaries with string keys, lists, strings, numbers,
-booleans, or `None`. RPA Core validates durable state at explicit boundaries
-where bytes are produced or persisted. `save_transaction()` validates the full
-transaction state before writing, and the queue runner validates item payload
-before seeding state. Errors include the path to the offending value and direct
-runtime objects toward `ProcessContext.resources` or durable artifact paths.
+Durable transaction data must be JSON-safe: dictionaries with string keys,
+lists, strings, numbers, booleans, or `None`. This contract covers transaction
+state and metadata, skill arguments, and artifact metadata. RPA Core validates
+the complete durable data model at explicit execution, serialization, recovery,
+and persistence boundaries. Errors include the path to the offending value and
+direct runtime objects toward `ProcessContext.resources` or durable artifact
+paths. Tuples and other Python-only containers are rejected rather than silently
+coerced into a different shape during persistence.
 
 `ProcessContext.resources` is for ephemeral runtime objects such as clients,
 sessions, handles, and open files. Resources are never persisted with
@@ -113,10 +115,12 @@ One-off transaction lifecycle:
 When `run_queue_loop()` is configured with `transaction_db_path`, queue items
 also retain a durable `transaction_id` binding. On the first claim, the runner
 builds the transaction, validates and seeds queue payload into transaction state,
-strictly persists the pending transaction, binds that transaction id to the
-claimed queue item, and only then begins skill execution. The binding is guarded
-by the queue claim owner, so a worker that no longer owns the claim cannot attach
-a transaction.
+then validates transaction wiring and all durable data before opening the
+transaction database. Only a valid pending transaction is persisted and bound to
+the claimed queue item before skill execution begins. Deterministic validation
+failure terminally fails the queue item without creating or binding a durable
+transaction. The binding is guarded by the queue claim owner, so a worker that
+no longer owns the claim cannot attach a transaction.
 
 On a later queue retry, a bound item resumes the same persisted transaction with
 fresh executable skill instances from `build_transaction(item)`. Persisted state
@@ -125,6 +129,11 @@ bound transaction is missing or cannot be matched to the supplied skills, the
 runner fails the item loudly instead of creating a replacement transaction. When
 transaction persistence is not configured, queue retries rebuild work from the
 beginning because no durable transaction binding exists.
+
+If a bound transaction is missing, corrupt, or fails execution validation,
+resume fails terminally without creating a replacement. The existing binding
+and any durable record are retained for operator inspection and repair; the
+runner never deletes a transaction that has already been bound to a queue item.
 
 Initial transaction persistence and queue binding touch separate SQLite write
 domains. The runner persists the pending transaction first, then binds the queue
@@ -299,6 +308,13 @@ latest exception is a `BusinessException` remain `FAILED`; bad input or
 business-rule failures are terminal until user code or durable state is changed
 explicitly. When the resumed transaction is passed to `Engine.run()`, those
 recovered business-failed skills are not re-executed.
+
+When a persisted `BusinessException(stop=True)` caused the engine to skip
+downstream skills, those causal skips also remain `SKIPPED`. Recovery requires
+the corresponding persisted `skill_skipped` history; it does not infer causality
+from status and execution order alone. Passing `retry_business_failures=True`
+explicitly resets both the stopping failure and its causal downstream skips to
+`PENDING`.
 
 Repeated resume calls do not append duplicate `transaction_resumed` history
 entries when the latest persisted history entry already records the resume.
@@ -526,10 +542,13 @@ final queue `complete()`/`fail()` transitions. Other SQLite operational errors
 remain loud and are not retried merely because they came from SQLite.
 
 Deterministic input and wiring failures are terminal queue outcomes. Invalid
-transaction wiring, invalid queue payload/state JSON, and invalid durable state
-are failed without queue retry. System failures and unexpected processing errors
-remain retryable unless a checkpoint boundary proves retry would risk replaying
-already completed or terminal business-failed work.
+transaction wiring, invalid queue payload/state JSON, and invalid durable data
+are failed after one delivery attempt without queue retry. Initial validation
+applies queue payload precedence first, then validates wiring, state, transaction
+metadata, artifact metadata, and skill arguments before any transaction database
+write or queue binding. System failures and unexpected processing errors remain
+retryable unless a checkpoint boundary proves retry would risk replaying already
+completed or terminal business-failed work.
 
 An unavoidable boundary remains: external side effects can happen just before
 the checkpoint that records their success. Skills should still be idempotent

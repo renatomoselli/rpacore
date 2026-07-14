@@ -194,6 +194,19 @@ def test_serializer_rejects_non_json_safe_skill_arguments_with_path() -> None:
         serialize_transaction(tx)
 
 
+def test_serializer_rejects_tuple_skill_arguments_without_coercion() -> None:
+    tx = Transaction(
+        reference="invoice",
+        skills=[Skill("download", 1, arguments={"ids": (1, 2)})],
+    )
+
+    with pytest.raises(
+        JsonStateError,
+        match=r"transaction\.skills\['download'\]\.arguments\['ids'\]",
+    ):
+        serialize_transaction(tx)
+
+
 @pytest.mark.parametrize("state", [None, "string", []])
 def test_serializer_rejects_non_object_transaction_state_with_path(state: object) -> None:
     tx = Transaction(reference="invoice")

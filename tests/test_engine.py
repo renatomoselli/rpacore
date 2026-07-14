@@ -477,6 +477,19 @@ class TestEngineCheckpointing:
         assert calls == 2
         assert tx.skills[0].status is Status.SUCCESSFUL
 
+    def test_preflight_rejects_arguments_before_transaction_mutation(self) -> None:
+        tx = Transaction(
+            reference="T1",
+            skills=[Skill("invalid", 1, arguments={"ids": (1, 2)})],
+        )
+
+        with pytest.raises(TypeError, match=r"arguments\['ids'\]"):
+            Engine().run(_ctx(tx))
+
+        assert tx.status is Status.PENDING
+        assert tx.skills[0].status is Status.PENDING
+        assert tx.history == []
+
     def test_memory_error_is_not_masked_by_checkpoint_error(self) -> None:
         class MemoryFailSkill(Skill):
             def execute(self, ctx: ProcessContext) -> None:

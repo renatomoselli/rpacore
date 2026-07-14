@@ -248,14 +248,15 @@ PENDING -> IN_PROGRESS -> SUCCESSFUL
                        -> FAILED
 ```
 
-`Engine.run()` validates transaction wiring before any skill runs. Transaction
-references and skill names must be non-empty, skill names must be unique within
-the transaction, and skill execution orders must be unique positive integers.
-Malformed wiring raises `ExecutionValidationError`, marks the transaction
-`FAILED`, and should be treated as a permanent configuration or code issue, not
-as a retryable runtime failure. The same validation applies to loaded
-transactions before resume, so persisted malformed skill wiring must be fixed
-rather than silently re-run.
+`Engine.run()` validates transaction wiring and durable JSON data before any
+skill runs. Transaction references and skill names must be non-empty, skill
+names must be unique within the transaction, and skill execution orders must be
+unique positive integers. Transaction state and metadata, skill arguments, and
+artifact metadata must contain only JSON-safe values. Malformed input raises
+`ExecutionValidationError` or `JsonStateError` and should be treated as a
+permanent configuration or code issue, not as a retryable runtime failure. The
+same validation applies before persistence and recovery, so invalid data is not
+partially persisted or silently coerced.
 
 Persistence is written by user wiring. For strict crash boundaries in ordinary
 one-off runs, use `execute_transaction(transaction, transaction_db_path=...)`;

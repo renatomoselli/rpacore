@@ -12,6 +12,7 @@ from typing import Iterator
 
 import pytest
 
+from rpacore._json_state import JsonStateError
 from rpacore.context import ProcessContext
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
@@ -927,6 +928,55 @@ class TestRunnerManagedTransactionPersistence:
         assert queue.failed == ["ok"]
         assert queue.fail_retries == [True]
 
+    def test_checkpoint_validation_error_fails_without_queue_retry(
+        self,
+        tmp_path,
+    ) -> None:
+        queue = SqliteQueue(
+            {
+                "db_path": str(tmp_path / "queue.db"),
+                "max_retries": 3,
+            }
+        )
+        item = QueueItem(reference="invalid-checkpoint", payload={})
+        queue.add(item)
+        transaction_db = str(tmp_path / "transactions.db")
+        executions = 0
+
+        class _InvalidMetadataSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                nonlocal executions
+                executions += 1
+                ctx.transaction.metadata["client"] = object()
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda queue_item: Transaction(
+                reference=queue_item.reference,
+                skills=[_InvalidMetadataSkill("invalid", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=transaction_db,
+        )
+
+        stored = queue.get_item(item.id)
+        assert stored is not None
+        assert summary.processed == 1
+        assert summary.failed == 1
+        assert summary.persistence_errors == 1
+        assert executions == 1
+        assert stored.status is QueueStatus.FAILED
+        assert stored.retry_count == 1
+        assert stored.transaction_id
+        durable = load_transaction(stored.transaction_id, transaction_db)
+        assert durable.status is Status.IN_PROGRESS
+        assert durable.skills[0].status is Status.IN_PROGRESS
+        assert durable.metadata == {}
+        assert durable.history[-1].event is HistoryEvent.SKILL_STARTED
+
     def test_checkpoint_retry_decision_uses_durable_skipped_history(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
         tx = Transaction(reference="skip")
@@ -1032,6 +1082,73 @@ class TestRunnerManagedTransactionPersistence:
 
         assert events == ["bind", "execute"]
         assert queue.bindings[0][1] == item.transaction_id
+
+    @pytest.mark.parametrize(
+        ("case", "expected_error"),
+        [
+            ("wiring", "transaction.reference"),
+            ("state", "transaction.state['client']"),
+            ("arguments", "arguments['ids']"),
+        ],
+    )
+    def test_invalid_initial_transaction_fails_without_write_bind_or_retry(
+        self,
+        tmp_path,
+        case: str,
+        expected_error: str,
+    ) -> None:
+        transaction_db = tmp_path / "transactions.db"
+        queue = SqliteQueue(
+            {
+                "db_path": str(tmp_path / "queue.db"),
+                "max_retries": 3,
+            }
+        )
+        item = QueueItem(reference=f"invalid-{case}", payload={})
+        queue.add(item)
+        build_count = 0
+        after_items: list[tuple[Transaction | None, Exception | None]] = []
+
+        def build(_: QueueItem) -> Transaction:
+            nonlocal build_count
+            build_count += 1
+            if case == "wiring":
+                return Transaction(reference="")
+            if case == "state":
+                return Transaction(
+                    reference="invalid-state",
+                    state={"client": object()},
+                )
+            return Transaction(
+                reference="invalid-arguments",
+                skills=[Skill("submit", 1, arguments={"ids": (1, 2)})],
+            )
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=build,
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=str(transaction_db),
+            after_item=lambda _item, transaction, error: after_items.append(
+                (transaction, error)
+            ),
+        )
+
+        stored = queue.get_item(item.id)
+        assert stored is not None
+        assert summary.processed == 1
+        assert summary.failed == 1
+        assert summary.persistence_errors == 0
+        assert build_count == 1
+        assert stored.status is QueueStatus.FAILED
+        assert stored.retry_count == 1
+        assert stored.transaction_id == ""
+        assert not transaction_db.exists()
+        assert after_items[0][0] is None
+        assert expected_error in str(after_items[0][1])
 
     def test_bind_failure_removes_initial_transaction_and_fails_without_retry(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
@@ -1411,6 +1528,69 @@ class TestRunnerManagedTransactionPersistence:
         assert queue.fail_retries == [False]
         assert errors
         assert "tx-bound" in str(errors[0])
+
+    def test_bound_transaction_json_error_has_binding_context(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        item = _item("json-resume")
+        item.transaction_id = "tx-bound"
+        errors: list[Exception | None] = []
+
+        def _fail_resume(*args: object, **kwargs: object) -> None:
+            raise JsonStateError("invalid persisted metadata")
+
+        monkeypatch.setattr(runner_module, "resume_transaction", _fail_resume)
+
+        summary, queue = _run(
+            [item],
+            transaction_db_path=db_path,
+            after_item=lambda item, tx, err: errors.append(err),
+        )
+
+        assert summary.failed == 1
+        assert queue.fail_retries == [False]
+        assert errors
+        assert "tx-bound" in str(errors[0])
+        assert "invalid persisted metadata" in str(errors[0])
+
+    def test_invalid_bound_transaction_fails_terminally_and_remains_for_repair(
+        self,
+        tmp_path,
+    ) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        transaction = Transaction(
+            reference="valid-before-corruption",
+            skills=[Skill("step", 1)],
+        )
+        save_transaction(transaction, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE transactions SET reference = '' WHERE id = ?",
+                (transaction.id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        item = _item("invalid-bound")
+        item.transaction_id = transaction.id
+        errors: list[Exception | None] = []
+
+        summary, queue = _run(
+            [item],
+            transaction_db_path=db_path,
+            after_item=lambda item, tx, err: errors.append(err),
+        )
+
+        assert summary.failed == 1
+        assert queue.fail_retries == [False]
+        assert item.transaction_id == transaction.id
+        assert load_transaction(transaction.id, db_path).reference == ""
+        assert errors
+        assert "transaction.reference" in str(errors[0])
 
     def test_default_transaction_db_path_preserves_current_behavior(self, monkeypatch) -> None:
         calls: list[Transaction] = []

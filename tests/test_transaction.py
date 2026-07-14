@@ -302,3 +302,15 @@ class TestTransactionExecutionValidation:
         tx = Transaction(reference="INV-001", skills=[Skill("login", 1), Skill("submit", 1)])
         with pytest.raises(ExecutionValidationError, match="skill.execution_order must be unique"):
             tx.validate_for_execution()
+
+    def test_non_json_safe_skill_arguments_raise_before_execution(self) -> None:
+        tx = Transaction(
+            reference="INV-001",
+            skills=[Skill("submit", 1, arguments={"ids": (1, 2)})],
+        )
+
+        with pytest.raises(
+            TypeError,
+            match=r"transaction\.skills\['submit'\]\.arguments\['ids'\]",
+        ):
+            tx.validate_for_execution()
