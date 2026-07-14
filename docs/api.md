@@ -50,7 +50,7 @@ Unhandled exceptions from skill code are recorded as system failures.
 | --- | --- | --- |
 | `save_transaction(transaction, db_path)` | Validate and save one transaction to SQLite. | Invalid wiring or durable data fails before the database is opened; valid input creates or migrates the database and writes transaction rows. |
 | `load_transaction(transaction_id, db_path, readonly=False)` | Load one transaction from SQLite. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite and preserves persisted status values; default mode can migrate older schemas. |
-| `list_transactions(db_path, readonly=False)` | List persisted transactions. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite; default mode can migrate older schemas. |
+| `list_transactions(db_path, readonly=False)` | List persisted transactions. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite; default mode can migrate older schemas. A selected transaction removed by concurrent cleanup before deferred load is omitted; other load failures propagate. |
 | `resume_transaction(transaction_id, skills, db_path=...)` | Load, validate, and prepare a persisted transaction for retry. | Mutates in-memory statuses only after validation, reattaches executable skills, preserves history-proven skips caused by a stopping business failure, and appends resume history when needed. |
 | `serialize_transaction(transaction)` | Convert a transaction to JSON-safe data. | Validates durable JSON fields without requiring executable wiring; no I/O. |
 | `TRANSACTION_FORMAT_VERSION` | Current serialized transaction format version. | No side effects. |

@@ -22,6 +22,7 @@ from rpacore import (
     list_transactions,
     save_transaction,
 )
+from rpacore.persistence import _delete_unbound_pending_transaction
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -649,6 +650,123 @@ class TestCliTransaction:
         assert result == 0
         assert captured.err == ""
         assert json.loads(captured.out)["transactions"] == []
+
+    def test_transaction_export_does_not_block_concurrent_checkpoint(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        db_path = tmp_path / "transactions.db"
+        older = Transaction(
+            reference="older",
+            created_at=datetime(2026, 7, 14, 10, 0, tzinfo=timezone.utc),
+        )
+        newer = Transaction(
+            reference="newer",
+            created_at=datetime(2026, 7, 14, 11, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(older, str(db_path))
+        save_transaction(newer, str(db_path))
+        checkpoint = Transaction(
+            reference="checkpoint-during-export",
+            created_at=datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc),
+        )
+        serialize_transaction = cli_module.serialize_transaction
+        checkpoint_saved = False
+
+        def serialize_with_checkpoint(transaction: Transaction) -> dict[str, object]:
+            nonlocal checkpoint_saved
+            if not checkpoint_saved:
+                checkpoint_saved = True
+                save_transaction(checkpoint, str(db_path))
+            return serialize_transaction(transaction)
+
+        monkeypatch.setattr(
+            cli_module,
+            "serialize_transaction",
+            serialize_with_checkpoint,
+        )
+
+        result = cli_module.main(
+            [
+                "transaction",
+                "export",
+                "--db",
+                str(db_path),
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert result == 0
+        assert captured.err == ""
+        exported = json.loads(captured.out)["transactions"]
+        exported_references = [transaction["reference"] for transaction in exported]
+        assert checkpoint.reference not in exported_references
+        assert exported_references == [
+            "newer",
+            "older",
+        ]
+        assert {transaction.id for transaction in list_transactions(str(db_path))} == {
+            older.id,
+            newer.id,
+            checkpoint.id,
+        }
+
+    def test_transaction_export_omits_transaction_deleted_during_export(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        db_path = tmp_path / "transactions.db"
+        deleted_during_export = Transaction(
+            reference="deleted-during-export",
+            created_at=datetime(2026, 7, 14, 10, 0, tzinfo=timezone.utc),
+        )
+        first = Transaction(
+            reference="first",
+            created_at=datetime(2026, 7, 14, 11, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(deleted_during_export, str(db_path))
+        save_transaction(first, str(db_path))
+        serialize_transaction = cli_module.serialize_transaction
+        cleanup_complete = False
+
+        def serialize_after_cleanup(transaction: Transaction) -> dict[str, object]:
+            nonlocal cleanup_complete
+            if not cleanup_complete:
+                cleanup_complete = True
+                _delete_unbound_pending_transaction(
+                    deleted_during_export.id,
+                    db_path=str(db_path),
+                )
+            return serialize_transaction(transaction)
+
+        monkeypatch.setattr(
+            cli_module,
+            "serialize_transaction",
+            serialize_after_cleanup,
+        )
+
+        result = cli_module.main(
+            [
+                "transaction",
+                "export",
+                "--db",
+                str(db_path),
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert result == 0
+        assert captured.err == ""
+        exported = json.loads(captured.out)["transactions"]
+        assert [transaction["id"] for transaction in exported] == [first.id]
 
     def test_transaction_export_ndjson_serialization_error_writes_no_stdout(
         self,

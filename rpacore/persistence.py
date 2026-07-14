@@ -724,6 +724,9 @@ def list_transactions(
         metadata_filter:
                   Exact-match filter for top-level transaction metadata values.
         limit:   Maximum number of results. Defaults to 100.
+
+    A selected transaction removed by concurrent cleanup before its deferred
+    load is omitted. Every other load failure propagates.
     """
     metadata_json = (
         _metadata_to_storage(metadata_filter, path="metadata_filter")
@@ -765,10 +768,18 @@ def list_transactions(
     finally:
         conn.close()
 
-    return [
-        load_transaction(tx_id, db_path, readonly=readonly)
-        for tx_id in transaction_ids
-    ]
+    transactions: list[Transaction] = []
+    for transaction_id in transaction_ids:
+        try:
+            transaction = load_transaction(
+                transaction_id,
+                db_path,
+                readonly=readonly,
+            )
+        except KeyError:
+            continue
+        transactions.append(transaction)
+    return transactions
 
 
 def iter_transactions(
@@ -779,7 +790,14 @@ def iter_transactions(
     metadata_filter: dict[str, object] | None = None,
     readonly: bool = False,
 ) -> Iterator[Transaction]:
-    """Yield transactions matching optional filters, newest first."""
+    """Yield a fixed matching transaction set, newest first.
+
+    Matching identifiers are snapshotted and the inspection connection is
+    closed before the first transaction is yielded. Inserts after iteration
+    starts are excluded, while updates to a snapshotted transaction are visible
+    when that transaction is loaded. A transaction deleted before its deferred
+    load is omitted. Every other load failure propagates.
+    """
     metadata_json = (
         _metadata_to_storage(metadata_filter, path="metadata_filter")
         if metadata_filter is not None
@@ -814,7 +832,17 @@ def iter_transactions(
             )
             params.extend([key, value_json])
         query += " ORDER BY created_at DESC, id ASC"
-        for row in conn.execute(query, params):
-            yield load_transaction(row["id"], db_path, readonly=readonly)
+        transaction_ids = [row["id"] for row in conn.execute(query, params)]
     finally:
         conn.close()
+
+    for transaction_id in transaction_ids:
+        try:
+            transaction = load_transaction(
+                transaction_id,
+                db_path,
+                readonly=readonly,
+            )
+        except KeyError:
+            continue
+        yield transaction

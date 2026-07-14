@@ -69,4 +69,10 @@ rpacore transaction export --format ndjson
 `--limit N` to choose a different cap.
 
 Human output is for operators. `--json` and `export` output are parseable on
-stdout; diagnostics go to stderr.
+stdout; diagnostics go to stderr. Export snapshots its ordered transaction-ID
+set before writing output, so transactions inserted after iteration starts are
+not included and a paused export does not hold a SQLite read lock against
+checkpoints. A selected transaction deleted by concurrent cleanup before its
+record is loaded is omitted by both list and export. Export has no 100-record
+cap, so its identifier snapshot memory scales with the selected transaction
+count.

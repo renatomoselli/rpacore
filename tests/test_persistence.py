@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
+import rpacore.persistence as persistence_module
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.persistence import (
     _delete_unbound_pending_transaction,
+    iter_transactions,
     list_transactions,
     load_transaction,
     save_transaction,
@@ -930,6 +932,256 @@ class TestSaveAndLoad:
         save_transaction(tx, db_path)
 
         assert [item.id for item in list_transactions(db_path, metadata_filter={})] == [tx.id]
+
+    def test_list_skips_transaction_deleted_after_identifier_selection(
+        self,
+        db_path,
+        monkeypatch,
+    ) -> None:
+        deleted_during_list = Transaction(
+            reference="deleted-during-list",
+            created_at=datetime(2026, 7, 14, 11, 0, tzinfo=timezone.utc),
+        )
+        retained = Transaction(
+            reference="retained",
+            created_at=datetime(2026, 7, 14, 10, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(deleted_during_list, db_path)
+        save_transaction(retained, db_path)
+        load_transaction = persistence_module.load_transaction
+
+        def load_after_cleanup(
+            transaction_id: str,
+            database_path: str,
+            *,
+            readonly: bool = False,
+        ) -> Transaction:
+            if transaction_id == deleted_during_list.id:
+                _delete_unbound_pending_transaction(
+                    transaction_id,
+                    db_path=database_path,
+                )
+            return load_transaction(
+                transaction_id,
+                database_path,
+                readonly=readonly,
+            )
+
+        monkeypatch.setattr(
+            persistence_module,
+            "load_transaction",
+            load_after_cleanup,
+        )
+
+        assert [
+            transaction.id
+            for transaction in list_transactions(db_path, readonly=True)
+        ] == [retained.id]
+
+    def test_iterator_is_not_limited_to_list_default(self, db_path) -> None:
+        created_at = datetime(2026, 7, 14, 10, 0, tzinfo=timezone.utc)
+        for index in range(101):
+            save_transaction(
+                Transaction(
+                    id=f"transaction-{index:03d}",
+                    reference=f"transaction-{index:03d}",
+                    created_at=created_at,
+                ),
+                db_path,
+            )
+
+        assert len(list_transactions(db_path, readonly=True)) == 100
+        assert len(list(iter_transactions(db_path, readonly=True))) == 101
+
+    @pytest.mark.parametrize("reader", ["list", "iterator"])
+    def test_snapshot_readers_propagate_non_missing_load_failures(
+        self,
+        db_path,
+        monkeypatch,
+        reader: str,
+    ) -> None:
+        save_transaction(Transaction(reference="corrupt"), db_path)
+
+        def fail_load(
+            _transaction_id: str,
+            _database_path: str,
+            *,
+            readonly: bool = False,
+        ) -> Transaction:
+            del readonly
+            raise ValueError("corrupt transaction record")
+
+        monkeypatch.setattr(persistence_module, "load_transaction", fail_load)
+
+        with pytest.raises(ValueError, match="corrupt transaction record"):
+            if reader == "list":
+                list_transactions(db_path, readonly=True)
+            else:
+                list(iter_transactions(db_path, readonly=True))
+
+    def test_paused_iterator_does_not_block_checkpoint_and_keeps_membership_snapshot(
+        self,
+        db_path,
+    ) -> None:
+        older = Transaction(
+            reference="older",
+            created_at=datetime(2026, 7, 14, 10, 0, tzinfo=timezone.utc),
+        )
+        newer = Transaction(
+            reference="newer",
+            created_at=datetime(2026, 7, 14, 11, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(older, db_path)
+        save_transaction(newer, db_path)
+        transactions = iter_transactions(db_path, readonly=True)
+
+        assert next(transactions).id == newer.id
+        older.reference = "updated-after-snapshot"
+        save_transaction(older, db_path)
+        inserted_later = Transaction(
+            reference="inserted-later",
+            created_at=datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(inserted_later, db_path)
+
+        remaining = list(transactions)
+        assert [transaction.id for transaction in remaining] == [older.id]
+        assert remaining[0].reference == "updated-after-snapshot"
+
+    def test_closing_partially_consumed_iterator_releases_resources(
+        self,
+        db_path,
+    ) -> None:
+        older = Transaction(
+            reference="older",
+            created_at=datetime(2026, 7, 14, 10, 0, tzinfo=timezone.utc),
+        )
+        newer = Transaction(
+            reference="newer",
+            created_at=datetime(2026, 7, 14, 11, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(older, db_path)
+        save_transaction(newer, db_path)
+        transactions = iter_transactions(db_path, readonly=True)
+
+        assert next(transactions).id == newer.id
+        transactions.close()
+
+        save_transaction(Transaction(reference="after-close"), db_path)
+
+    def test_iterator_skips_transaction_deleted_after_membership_snapshot(
+        self,
+        db_path,
+    ) -> None:
+        deleted_during_iteration = Transaction(
+            reference="deleted-during-iteration",
+            created_at=datetime(2026, 7, 14, 10, 0, tzinfo=timezone.utc),
+        )
+        first = Transaction(
+            reference="first",
+            created_at=datetime(2026, 7, 14, 11, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(deleted_during_iteration, db_path)
+        save_transaction(first, db_path)
+        transactions = iter_transactions(db_path, readonly=True)
+
+        assert next(transactions).id == first.id
+        _delete_unbound_pending_transaction(
+            deleted_during_iteration.id,
+            db_path=db_path,
+        )
+
+        assert list(transactions) == []
+
+    def test_iterator_yields_nothing_when_every_selected_transaction_is_deleted(
+        self,
+        db_path,
+        monkeypatch,
+    ) -> None:
+        selected = [
+            Transaction(reference="first"),
+            Transaction(reference="second"),
+        ]
+        for transaction in selected:
+            save_transaction(transaction, db_path)
+        load_transaction = persistence_module.load_transaction
+
+        def load_after_cleanup(
+            transaction_id: str,
+            database_path: str,
+            *,
+            readonly: bool = False,
+        ) -> Transaction:
+            _delete_unbound_pending_transaction(
+                transaction_id,
+                db_path=database_path,
+            )
+            return load_transaction(
+                transaction_id,
+                database_path,
+                readonly=readonly,
+            )
+
+        monkeypatch.setattr(
+            persistence_module,
+            "load_transaction",
+            load_after_cleanup,
+        )
+
+        assert list(iter_transactions(db_path, readonly=True)) == []
+
+    def test_iterator_preserves_order_and_filters(self, db_path) -> None:
+        matching_older = Transaction(
+            reference="matching-older",
+            status=Status.SUCCESSFUL,
+            created_at=datetime(2026, 7, 14, 10, 0, tzinfo=timezone.utc),
+            metadata={"customer": "acme"},
+        )
+        matching_newer = Transaction(
+            reference="matching-newer",
+            status=Status.SUCCESSFUL,
+            created_at=datetime(2026, 7, 14, 11, 0, tzinfo=timezone.utc),
+            metadata={"customer": "acme"},
+        )
+        wrong_status = Transaction(
+            reference="wrong-status",
+            status=Status.FAILED,
+            created_at=datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc),
+            metadata={"customer": "acme"},
+        )
+        wrong_metadata = Transaction(
+            reference="wrong-metadata",
+            status=Status.SUCCESSFUL,
+            created_at=datetime(2026, 7, 14, 13, 0, tzinfo=timezone.utc),
+            metadata={"customer": "other"},
+        )
+        before_cutoff = Transaction(
+            reference="before-cutoff",
+            status=Status.SUCCESSFUL,
+            created_at=datetime(2026, 7, 13, 23, 59, tzinfo=timezone.utc),
+            metadata={"customer": "acme"},
+        )
+        for transaction in (
+            matching_older,
+            matching_newer,
+            wrong_status,
+            wrong_metadata,
+            before_cutoff,
+        ):
+            save_transaction(transaction, db_path)
+
+        transactions = iter_transactions(
+            db_path,
+            status=Status.SUCCESSFUL,
+            since=datetime(2026, 7, 14, tzinfo=timezone.utc),
+            metadata_filter={"customer": "acme"},
+            readonly=True,
+        )
+
+        assert [transaction.id for transaction in transactions] == [
+            matching_newer.id,
+            matching_older.id,
+        ]
 
 
 class TestCrashRecovery:

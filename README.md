@@ -149,7 +149,13 @@ JSON to stdout with diagnostics only on stderr. Transaction inspection JSON uses
 Transaction export writes portable machine-readable records for all persisted
 transactions. JSON export uses an envelope with `export_format_version = 1`,
 `framework_version`, `exported_at`, and `transactions`. NDJSON export writes one
-record per line with `export_format_version = 1` on each record.
+record per line with `export_format_version = 1` on each record. Export freezes
+the ordered set of matching transaction identifiers when iteration starts and
+releases the inspection connection before loading records, so a slow export
+does not block concurrent checkpoints. A selected transaction deleted by
+concurrent cleanup before it is loaded is omitted from the export. Unlike
+`transaction list`, export has no 100-record cap; identifier memory therefore
+scales with the number of persisted transactions selected for export.
 
 Machine-readable transaction records include user-supplied state, metadata,
 skill arguments, exception messages, and artifact metadata. These fields can

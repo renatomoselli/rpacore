@@ -56,6 +56,10 @@ All notable user-facing changes are recorded here.
   and isolated report and notifier snapshots from observer mutation. Text logs
   can now append traceback and stack sections, and JSON v1 can include additive
   `exception` and `stack` fields.
+- Prevented paused transaction exports from blocking concurrent checkpoints by
+  snapshotting the ordered matching identifiers before records are yielded.
+  Export intentionally has no transaction-list limit and omits identifiers
+  removed by concurrent cleanup before deferred loading.
 
 ## v0.1.1 - 2026-07-06
 
