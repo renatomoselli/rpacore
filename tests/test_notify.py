@@ -6,13 +6,14 @@ import json
 import logging
 import ssl
 from datetime import datetime, timezone
-from io import BytesIO
+from io import BytesIO, StringIO
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.exceptions import BusinessException, SystemException
+from rpacore.logger import configure_logger
 from rpacore.notify import (
     EmailNotifier,
     Notifier,
@@ -681,8 +682,15 @@ class TestDispatch:
         n1, n2 = MagicMock(spec=Notifier), MagicMock(spec=Notifier)
         report = _make_report()
         dispatch([n1, n2], report)
-        n1.send.assert_called_once_with(report)
-        n2.send.assert_called_once_with(report)
+        n1.send.assert_called_once()
+        n2.send.assert_called_once()
+        first_report = n1.send.call_args.args[0]
+        second_report = n2.send.call_args.args[0]
+        assert first_report == report
+        assert second_report == report
+        assert first_report is not report
+        assert second_report is not report
+        assert first_report is not second_report
 
     def test_notifier_exception_swallowed(self):
         bad = MagicMock(spec=Notifier)
@@ -690,7 +698,54 @@ class TestDispatch:
         good = MagicMock(spec=Notifier)
         report = _make_report()
         dispatch([bad, good], report)  # must not raise
-        good.send.assert_called_once_with(report)
+        good.send.assert_called_once()
+        assert good.send.call_args.args[0] == report
+        assert good.send.call_args.args[0] is not report
+
+    def test_notifier_mutation_cannot_reach_later_views_or_source_report(self):
+        report = _make_report()
+        report.metadata = {"nested": {"values": ["original"]}}
+        report.artifacts[0].metadata = {
+            "nested": {"values": ["original"]}
+        }
+        report.skills = [
+            SkillReport(
+                name="validate",
+                execution_order=1,
+                status=Status.FAILED,
+                icon="✗",
+                exceptions=[BusinessException("invalid", action="original")],
+            )
+        ]
+        observed: list[TransactionReport] = []
+
+        class _MutatingNotifier:
+            def send(self, view: TransactionReport) -> None:
+                view.metadata["nested"]["values"].append("mutated")
+                view.artifacts[0].metadata["nested"]["values"].append("mutated")
+                view.skills[0].exceptions[0].action = "mutated"
+                view.transaction_record["metadata"]["customer"] = "mutated"
+
+        class _CapturingNotifier:
+            def send(self, view: TransactionReport) -> None:
+                observed.append(view)
+
+        dispatch([_MutatingNotifier(), _CapturingNotifier()], report)
+
+        assert report.metadata == {"nested": {"values": ["original"]}}
+        assert report.artifacts[0].metadata == {
+            "nested": {"values": ["original"]}
+        }
+        assert report.skills[0].exceptions[0].action == "original"
+        assert report.transaction_record["metadata"] == {"customer": "acme"}
+        assert observed[0].metadata == {"nested": {"values": ["original"]}}
+        assert observed[0].artifacts[0].metadata == {
+            "nested": {"values": ["original"]}
+        }
+        assert observed[0].skills[0].exceptions[0].action == "original"
+        assert observed[0].transaction_record["metadata"] == {
+            "customer": "acme"
+        }
 
     def test_empty_notifiers_is_noop(self):
         assert dispatch([], _make_report()) is None
@@ -730,6 +785,26 @@ class TestDispatch:
 
         dispatch([bad], _make_report(), logger=log)
         assert cap.records, "Expected an error log record"
+
+    def test_swallowed_notifier_error_retains_json_exception_evidence(self):
+        bad = MagicMock(spec=Notifier)
+        bad.send.side_effect = RuntimeError("notification diagnostic")
+        stream = StringIO()
+        logger = configure_logger(
+            name="rpacore.test.dispatch.exception",
+            fmt="json",
+            stream=stream,
+        )
+
+        dispatch([bad], _make_report(), logger=logger)
+
+        payload = json.loads(stream.getvalue())
+        assert payload["event"] == "notifier_error"
+        assert payload["exception"]["type"] == "RuntimeError"
+        assert payload["exception"]["message"] == "notification diagnostic"
+        assert "RuntimeError: notification diagnostic" in (
+            payload["exception"]["traceback"]
+        )
 
     def test_memory_error_propagates(self):
         bad = MagicMock(spec=Notifier)

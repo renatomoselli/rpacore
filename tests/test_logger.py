@@ -2,6 +2,8 @@
 
 import io
 import json
+import logging
+import sys
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -11,7 +13,12 @@ from rpacore.context import ProcessContext
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException
-from rpacore.logger import LOG_FORMAT_VERSION, configure_logger
+from rpacore.logger import (
+    LOG_FORMAT_VERSION,
+    JsonFormatter,
+    TextFormatter,
+    configure_logger,
+)
 from rpacore.runner import run_queue_loop
 from rpacore.skill import Skill
 from rpacore.status import Status
@@ -157,9 +164,149 @@ class TestConfigureLogger:
         assert payload["labels"] == ["alpha", "beta"]
         assert payload["mixed"] == ["a", 1]
 
+    def test_text_and_json_formats_include_exception_diagnostics(self) -> None:
+        logger = logging.getLogger("rpacore.test.exception-format")
+        try:
+            raise RuntimeError("diagnostic detail")
+        except RuntimeError:
+            exc_info = sys.exc_info()
+        record = logger.makeRecord(
+            logger.name,
+            logging.ERROR,
+            __file__,
+            1,
+            "operation failed",
+            (),
+            exc_info,
+            extra={"event": "operation_failed"},
+        )
+
+        text = TextFormatter().format(record)
+        payload = json.loads(JsonFormatter().format(record))
+
+        assert "RuntimeError: diagnostic detail" in text
+        assert "Traceback (most recent call last)" in text
+        assert payload["exception"]["type"] == "RuntimeError"
+        assert payload["exception"]["message"] == "diagnostic detail"
+        assert "RuntimeError: diagnostic detail" in payload["exception"]["traceback"]
+
+    def test_text_and_json_formats_include_stack_information(self) -> None:
+        record = logging.makeLogRecord(
+            {
+                "levelno": logging.WARNING,
+                "levelname": "WARNING",
+                "msg": "slow operation",
+                "stack_info": "Stack (most recent call last):\n  operator.py:10",
+            }
+        )
+
+        text = TextFormatter().format(record)
+        payload = json.loads(JsonFormatter().format(record))
+
+        assert "operator.py:10" in text
+        assert "operator.py:10" in payload["stack"]
+
+    def test_text_and_json_formats_share_sensitive_extra_redaction(self) -> None:
+        record = logging.makeLogRecord(
+            {
+                "levelno": logging.INFO,
+                "levelname": "INFO",
+                "msg": "safe",
+                "config": {"token": "top-secret"},
+                "credentials": "credential-secret",
+                "resources": {"session": "resource-secret"},
+                "details": {
+                    "credentials": "nested-secret",
+                    "visible": "ok",
+                },
+            }
+        )
+
+        text = TextFormatter().format(record)
+        structured = JsonFormatter().format(record)
+
+        for secret in (
+            "top-secret",
+            "credential-secret",
+            "resource-secret",
+            "nested-secret",
+        ):
+            assert secret not in text
+            assert secret not in structured
+        assert "visible" in text
+        assert json.loads(structured)["details"] == {"visible": "ok"}
+
+    def test_json_extras_cannot_replace_canonical_envelope(self) -> None:
+        record = logging.makeLogRecord(
+            {
+                "levelno": logging.INFO,
+                "levelname": "INFO",
+                "msg": "ok",
+                "event": "operation_completed",
+                "level": "critical",
+                "log_format_version": 999,
+                "timestamp": "forged",
+                "exception": {"type": "Forged"},
+                "stack": "forged",
+            }
+        )
+
+        payload = json.loads(JsonFormatter().format(record))
+
+        assert payload["log_format_version"] == LOG_FORMAT_VERSION
+        assert datetime.fromisoformat(payload["timestamp"]).tzinfo is not None
+        assert payload["level"] == "info"
+        assert payload["event"] == "operation_completed"
+        assert "exception" not in payload
+        assert "stack" not in payload
+
     def test_invalid_format_raises(self) -> None:
         with pytest.raises(ValueError, match="fmt must be 'text' or 'json'"):
             configure_logger(name="rpacore.test.invalid", fmt="xml")
+
+    def test_invalid_reconfiguration_preserves_working_logger(self) -> None:
+        stream = io.StringIO()
+        logger = configure_logger(
+            name="rpacore.test.atomic",
+            fmt="text",
+            stream=stream,
+        )
+        original_handlers = list(logger.handlers)
+        original_level = logger.level
+
+        with pytest.raises(ValueError, match="fmt must be"):
+            configure_logger(
+                name="rpacore.test.atomic",
+                fmt="xml",
+                stream=stream,
+            )
+        with pytest.raises(ValueError, match="Unknown level"):
+            configure_logger(
+                name="rpacore.test.atomic",
+                level="LOUD",
+                stream=stream,
+            )
+
+        assert logger.handlers == original_handlers
+        assert logger.level == original_level
+        logger.info("still available")
+        assert "still available" in stream.getvalue()
+
+    def test_reconfiguration_preserves_application_handlers(self) -> None:
+        name = "rpacore.test.application-handler"
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        application_handler = logging.StreamHandler(io.StringIO())
+        logger.addHandler(application_handler)
+        try:
+            configure_logger(name=name, fmt="text", stream=io.StringIO())
+            configure_logger(name=name, fmt="json", stream=io.StringIO())
+
+            assert application_handler in logger.handlers
+            assert len(logger.handlers) == 2
+        finally:
+            logger.handlers.clear()
+            application_handler.close()
 
     def test_reconfigure_does_not_duplicate_handlers(self) -> None:
         stream = io.StringIO()

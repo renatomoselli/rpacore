@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import string
+from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -82,7 +83,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
                 execution_order=skill.execution_order,
                 status=skill.status,
                 icon=_ICONS.get(skill.status, "?"),
-                exceptions=list(skill.exceptions),
+                exceptions=[copy(exc) for exc in skill.exceptions],
             )
         )
     artifact_reports = [
@@ -92,7 +93,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
             path=artifact.path,
             kind=artifact.kind,
             created_at=artifact.created_at,
-            metadata=dict(artifact.metadata),
+            metadata=_snapshot_json_mapping(artifact.metadata),
         )
         for artifact in transaction.artifacts
     ]
@@ -110,11 +111,65 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         created_at=transaction.created_at,
         started_at=transaction.started_at,
         finished_at=transaction.finished_at,
-        metadata=dict(transaction.metadata),
+        metadata=_snapshot_json_mapping(transaction.metadata),
         artifacts=artifact_reports,
         history=list(transaction.history),
         transaction_record=transaction_record,
     )
+
+
+def _snapshot_report(report: TransactionReport) -> TransactionReport:
+    """Return an observer-local copy of a report's mutable diagnostic data."""
+    return TransactionReport(
+        transaction_id=report.transaction_id,
+        reference=report.reference,
+        status=report.status,
+        retry_count=report.retry_count,
+        skills=[
+            SkillReport(
+                name=skill.name,
+                execution_order=skill.execution_order,
+                status=skill.status,
+                icon=skill.icon,
+                exceptions=[copy(exc) for exc in skill.exceptions],
+            )
+            for skill in report.skills
+        ],
+        created_at=report.created_at,
+        started_at=report.started_at,
+        finished_at=report.finished_at,
+        metadata=_snapshot_json_mapping(report.metadata),
+        artifacts=[
+            ArtifactReport(
+                id=artifact.id,
+                name=artifact.name,
+                path=artifact.path,
+                kind=artifact.kind,
+                created_at=artifact.created_at,
+                metadata=_snapshot_json_mapping(artifact.metadata),
+            )
+            for artifact in report.artifacts
+        ],
+        history=list(report.history),
+        transaction_record=_snapshot_json_mapping(report.transaction_record),
+        generated_at=report.generated_at,
+    )
+
+
+def _snapshot_json_mapping(value: dict[str, object]) -> dict[str, object]:
+    """Copy nested JSON containers while leaving unsupported objects opaque."""
+    return {key: _snapshot_json_value(item) for key, item in value.items()}
+
+
+def _snapshot_json_value(value: object) -> object:
+    if isinstance(value, list):
+        return [_snapshot_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _snapshot_json_value(item)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _format_dt(value: datetime | None) -> str:

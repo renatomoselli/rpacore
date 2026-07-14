@@ -91,9 +91,22 @@ environment variables, or enforce cross-field rules.
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
 | `CredentialProvider`, `EnvCredentialProvider`, `KeyringCredentialProvider`, `CredentialNotFoundError`, `build_credential_provider` | Resolve credentials from documented providers. | Environment/keyring reads depending on provider. Credentials are not persisted by RPA Core. |
-| `configure_logger`, `get_logger` | Configure stdlib logging. | Mutates logger handlers/formatters. |
-| `ArtifactReport`, `SkillReport`, `TransactionReport`, `generate_report`, `render_html`, `render_text` | Build and render transaction reports. | Report generation reads transaction data; rendering has no file I/O. |
-| `Notifier`, `EmailNotifier`, `WebhookNotifier`, `build_notifiers`, `dispatch` | Send notifications. | SMTP or HTTP requests when configured. Payloads can contain sensitive transaction data. |
+| `configure_logger`, `get_logger` | Configure stdlib logging. | Successful configuration atomically replaces RPA Core-owned handlers while preserving application handlers. Invalid configuration leaves the logger unchanged. |
+| `ArtifactReport`, `SkillReport`, `TransactionReport`, `generate_report`, `render_html`, `render_text` | Build and render transaction reports. | Report generation snapshots JSON-safe nested data and exceptions; rendering has no file I/O. |
+| `Notifier`, `EmailNotifier`, `WebhookNotifier`, `build_notifiers`, `dispatch` | Send notifications. | Dispatch gives each notifier an isolated report snapshot. SMTP or HTTP requests occur when configured. Payloads can contain sensitive transaction data. |
+
+### Logging format contract
+
+`TextFormatter` emits human-readable sections separated by ` | `. Exception
+tracebacks and explicit stack information are appended as additional sections
+when present, so consumers must not assume a fixed number of delimiters. Use
+`JsonFormatter` for machine parsing.
+
+JSON log format v1 always includes `log_format_version`, UTC `timestamp`,
+`event`, `level`, and `message`. It additionally includes an `exception` object
+with `type`, `message`, and `traceback` when exception information is present,
+and a `stack` string when stack information is present. These optional fields
+are additive within v1; strict consumers must allow them.
 
 ## Queue Processing
 

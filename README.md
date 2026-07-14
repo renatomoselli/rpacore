@@ -175,6 +175,9 @@ payloads include artifact records and paths, not artifact file contents.
 Set `log_format = "json"` and pass it to `configure_logger(..., fmt=...)` for
 line-delimited JSON logs. Each JSON log line contains `log_format_version`,
 UTC `timestamp`, `event`, `level`, and `message`, plus sanitized event fields.
+User extras cannot replace canonical envelope fields. Logged exceptions add an
+`exception` object with `type`, `message`, and `traceback`; explicit stack data
+uses `stack`. Text logs preserve the same diagnostic evidence.
 
 Exit behavior is stable across platforms:
 

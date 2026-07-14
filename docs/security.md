@@ -40,6 +40,20 @@ clients, sessions, handles, and secrets in `ctx.resources` or credential
 providers instead of copying them into durable state, metadata, arguments,
 exceptions, artifact metadata, or output files.
 
+Text and JSON log formatters apply the same structural extra-field policy:
+top-level `config`, `credentials`, and `resources` fields are omitted, those
+keys are also omitted from nested mappings, and unsupported runtime objects are
+represented by type name. User extras cannot replace canonical JSON envelope
+fields. The `event` extra is the documented selector for the canonical event
+name.
+
+Exception messages, formatted tracebacks, explicit stack information, and
+ordinary string values are emitted verbatim; RPA Core cannot reliably infer
+which free-form content is secret. Do not place credentials or sensitive
+payload values in exception messages, local variables rendered by custom
+tracebacks, event names, or log strings. Apply access controls and retention
+policy to both text and JSON logs.
+
 ## Credentials and Generated Projects
 
 Generated projects default to the environment credential provider. Environment

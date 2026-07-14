@@ -245,6 +245,12 @@ The extension surface stays explicit:
 - reports, notification payloads, and canonical transaction serialization expose
   completed transaction records without reading artifact contents
 
+`generate_report()` snapshots nested JSON-safe metadata, artifact metadata,
+exceptions, history, and the canonical transaction record. `dispatch()` gives
+each notifier a fresh snapshot, so one notifier cannot mutate the transaction,
+the source report, or a later notifier's view. Unsupported arbitrary runtime
+objects are not recursively cloned; they do not belong in durable report data.
+
 These mechanisms cover the demonstrated extension needs without adding an
 in-process handler chain inside `Engine.run()`. A generic event bus would require
 new decisions about handler timing, handler failure disposition, transaction

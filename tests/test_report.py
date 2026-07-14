@@ -126,6 +126,31 @@ class TestGenerateReport:
 
         assert tx.metadata == {"customer": "acme", "nested": {"b": 2, "a": 1}}
 
+    def test_report_nested_data_and_exceptions_are_snapshot_isolated(self):
+        error = biz("invalid", action="original")
+        skill = make_skill("validate", 1, Status.FAILED)
+        skill.exceptions = [error]
+        tx = make_transaction(status=Status.FAILED, skills=[skill])
+        tx.metadata = {"nested": {"values": ["original"]}}
+        tx.artifacts = [
+            Artifact(
+                name="audit",
+                path="audit.json",
+                metadata={"nested": {"values": ["original"]}},
+            )
+        ]
+
+        report = generate_report(tx)
+        report.metadata["nested"]["values"].append("report")
+        report.artifacts[0].metadata["nested"]["values"].append("report")
+        report.skills[0].exceptions[0].action = "report"
+
+        assert tx.metadata == {"nested": {"values": ["original"]}}
+        assert tx.artifacts[0].metadata == {
+            "nested": {"values": ["original"]}
+        }
+        assert error.action == "original"
+
     def test_report_includes_canonical_transaction_record(self):
         tx = make_transaction()
 

@@ -51,6 +51,11 @@ All notable user-facing changes are recorded here.
   persistence, rejected skill-argument shape coercion and corrupt stored
   arguments, and preserved history-proven downstream skips from stopping
   business failures during recovery.
+- Preserved exception and stack diagnostics in text and JSON logs, protected
+  canonical JSON fields, made logger reconfiguration atomic and ownership-aware,
+  and isolated report and notifier snapshots from observer mutation. Text logs
+  can now append traceback and stack sections, and JSON v1 can include additive
+  `exception` and `stack` fields.
 
 ## v0.1.1 - 2026-07-06
 

@@ -18,7 +18,12 @@ from rpacore._validation import type_error, value_error
 from rpacore.credentials import CredentialProvider
 from rpacore.exceptions import BusinessException
 from rpacore.logger import get_logger
-from rpacore.report import TransactionReport, render_html, render_text
+from rpacore.report import (
+    TransactionReport,
+    _snapshot_report,
+    render_html,
+    render_text,
+)
 
 
 @runtime_checkable
@@ -274,7 +279,7 @@ def dispatch(
     for notifier in notifiers:
         notifier_name = type(notifier).__name__
         try:
-            notifier.send(report)
+            notifier.send(_snapshot_report(report))
         except MemoryError:
             raise
         except Exception:
