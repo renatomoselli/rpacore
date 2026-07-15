@@ -42,12 +42,21 @@ max_retries = 3
 
 Relative `transaction_db_path`, `screenshot_dir`, and `queue.db_path` values are
 resolved relative to the config file. The removed top-level `db_path` key is
-rejected; use `transaction_db_path`.
+rejected; use `transaction_db_path`. The exact empty `screenshot_dir = ""`
+value remains unchanged and disables automatic screenshots. Whitespace-only
+values and the SQLite `:memory:` sentinel, with or without surrounding
+whitespace, are invalid screenshot directories.
+Absolute paths and parent-directory components remain supported operator-owned
+filesystem paths; config path resolution is not a filesystem sandbox.
+Config paths and manifest paths have independent authorities: values in
+`rpacore.toml` resolve from the manifest's directory, even when a key has the
+same name.
 
 Transaction and queue database paths must name non-empty filesystem paths.
-Blank paths and `:memory:` are rejected because RPA Core opens multiple SQLite
-connections for checkpoints, inspection, queue transitions, and heartbeats;
-SQLite in-memory databases would give those connections unrelated state.
+Blank paths and `:memory:` with or without surrounding whitespace are rejected
+because RPA Core opens multiple SQLite connections for checkpoints, inspection,
+queue transitions, and heartbeats; SQLite in-memory databases would give those
+connections unrelated state.
 
 Notification settings are optional:
 

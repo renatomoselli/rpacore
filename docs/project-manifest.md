@@ -33,10 +33,18 @@ Entrypoints are explicit Python imports. `main:main` imports module `main` from
 the project directory and resolves attribute `main`. Dotted attributes are
 allowed, for example `main:app.run`. The resolved object must be callable with
 no arguments. It may return `None` or an integer exit code; `rpacore run`
-defines how those return values map to process exit codes.
+defines how those return values map to process exit codes. Resolution does not
+change the process working directory. If a same-named entrypoint package from a
+different project is cached, only that conflicting package namespace is
+replaced. A failed import or callable validation restores previous modules and
+package attributes within the entrypoint's top-level package. Dependencies
+imported outside that namespace retain normal Python import-cache semantics and
+are never globally purged by RPA Core.
 
 `storage.transaction_db_path` is resolved relative to the directory containing
-`rpacore.toml` unless it is already absolute.
+`rpacore.toml` unless it is already absolute. It must name a non-blank durable
+SQLite file path; `:memory:` with or without surrounding whitespace is rejected.
+This manifest-relative authority is independent from config-file-relative paths.
 
 ## Discovery
 

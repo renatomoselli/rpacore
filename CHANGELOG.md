@@ -60,6 +60,11 @@ All notable user-facing changes are recorded here.
   snapshotting the ordered matching identifiers before records are yielded.
   Export intentionally has no transaction-list limit and omits identifiers
   removed by concurrent cleanup before deferred loading.
+- Resolved dotted entrypoints from each manifest's project even when another
+  same-named package was cached, and made non-empty `screenshot_dir` paths
+  resolve relative to their configuration file. Whitespace-only values and the
+  SQLite-only `:memory:` sentinel, including whitespace-padded forms, are
+  rejected as screenshot directories and durable database paths.
 
 ## v0.1.1 - 2026-07-06
 

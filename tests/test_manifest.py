@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -29,6 +31,27 @@ def write_manifest(project_dir: Path, *, entrypoint: str = "main:main", db_path:
         encoding="utf-8",
     )
     return manifest
+
+
+def remove_module_tree(root_name: str) -> None:
+    for module_name in list(sys.modules):
+        if module_name == root_name or module_name.startswith(f"{root_name}."):
+            sys.modules.pop(module_name, None)
+
+
+def write_package_entrypoint(
+    project_dir: Path,
+    *,
+    root_name: str,
+    source: str,
+) -> None:
+    package = project_dir / root_name
+    jobs = package / "jobs"
+    jobs.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (jobs / "__init__.py").write_text("", encoding="utf-8")
+    (jobs / "run.py").write_text(source, encoding="utf-8")
+    write_manifest(project_dir, entrypoint=f"{root_name}.jobs.run:main")
 
 
 class TestFindProjectManifest:
@@ -93,6 +116,17 @@ class TestLoadProjectManifest:
         manifest = load_project_manifest(manifest_path)
 
         assert manifest.transaction_db_path == str(manifest.project_dir / "data" / "rpacore.db")
+
+    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:", " :memory: "])
+    def test_transient_transaction_db_path_rejected(
+        self,
+        tmp_path: Path,
+        db_path: str,
+    ) -> None:
+        write_manifest(tmp_path, db_path=db_path)
+
+        with pytest.raises(ValueError, match="storage.transaction_db_path"):
+            load_project_manifest(tmp_path)
 
     def test_missing_manifest_path_raises(self, tmp_path: Path) -> None:
         with pytest.raises(FileNotFoundError, match="Project manifest not found"):
@@ -188,6 +222,284 @@ class TestResolveProjectEntrypoint:
         entrypoint = resolve_project_entrypoint(load_project_manifest(tmp_path))
 
         assert entrypoint() == 0
+
+    def test_successful_nonconflicting_import_preserves_existing_module_cache(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module_name = "rpacore_patch007_no_conflict"
+        write_manifest(tmp_path, entrypoint=f"{module_name}:main")
+        (tmp_path / f"{module_name}.py").write_text(
+            "def main():\n    return 'project'\n",
+            encoding="utf-8",
+        )
+        remove_module_tree(module_name)
+        modules_before = dict(sys.modules)
+
+        try:
+            entrypoint = resolve_project_entrypoint(
+                load_project_manifest(tmp_path)
+            )
+
+            assert entrypoint() == "project"
+            assert set(sys.modules) - set(modules_before) == {module_name}
+            assert all(
+                sys.modules.get(name) is module
+                for name, module in modules_before.items()
+            )
+        finally:
+            remove_module_tree(module_name)
+
+    def test_partial_import_marker_is_replaced_by_project_module(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module_name = "rpacore_patch007_partial_import"
+        write_manifest(tmp_path, entrypoint=f"{module_name}:main")
+        (tmp_path / f"{module_name}.py").write_text(
+            "def main():\n    return 'project'\n",
+            encoding="utf-8",
+        )
+        remove_module_tree(module_name)
+        sys.modules[module_name] = None  # type: ignore[assignment]
+
+        try:
+            entrypoint = resolve_project_entrypoint(
+                load_project_manifest(tmp_path)
+            )
+
+            assert entrypoint() == "project"
+            assert sys.modules[module_name] is not None
+        finally:
+            remove_module_tree(module_name)
+
+    def test_project_path_takes_temporary_precedence_when_already_on_sys_path(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ) -> None:
+        module_name = "rpacore_patch007_path_order"
+        project = tmp_path / "project"
+        decoy = tmp_path / "decoy"
+        project.mkdir()
+        decoy.mkdir()
+        write_manifest(project, entrypoint=f"{module_name}:main")
+        (project / f"{module_name}.py").write_text(
+            "def main():\n    return 'project'\n",
+            encoding="utf-8",
+        )
+        (decoy / f"{module_name}.py").write_text(
+            "def main():\n    return 'decoy'\n",
+            encoding="utf-8",
+        )
+        remove_module_tree(module_name)
+        monkeypatch.syspath_prepend(str(decoy))
+        sys.path.append(str(project.resolve()))
+        original_project_index = sys.path.index(str(project.resolve()))
+
+        try:
+            entrypoint = resolve_project_entrypoint(
+                load_project_manifest(project)
+            )
+
+            assert entrypoint() == "project"
+            assert sys.path.index(str(project.resolve())) == original_project_index
+        finally:
+            remove_module_tree(module_name)
+            try:
+                sys.path.remove(str(project.resolve()))
+            except ValueError:
+                pass
+
+    def test_sequential_same_name_nested_packages_resolve_from_each_project(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        root_name = "rpacore_patch007_shared"
+        unrelated_name = "rpacore_patch007_unrelated"
+        unrelated_module = SimpleNamespace(marker="keep")
+        project_a = tmp_path / "project-a"
+        project_b = tmp_path / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+        write_package_entrypoint(
+            project_a,
+            root_name=root_name,
+            source="def main():\n    return 'project-a'\n",
+        )
+        write_package_entrypoint(
+            project_b,
+            root_name=root_name,
+            source="def main():\n    return 'project-b'\n",
+        )
+        remove_module_tree(root_name)
+        sys.modules[unrelated_name] = unrelated_module
+
+        try:
+            entrypoint_a = resolve_project_entrypoint(
+                load_project_manifest(project_a)
+            )
+            entrypoint_b = resolve_project_entrypoint(
+                load_project_manifest(project_b)
+            )
+
+            assert entrypoint_a() == "project-a"
+            assert entrypoint_b() == "project-b"
+            assert sys.modules[unrelated_name] is unrelated_module
+        finally:
+            remove_module_tree(root_name)
+            sys.modules.pop(unrelated_name, None)
+
+    @pytest.mark.parametrize(
+        ("failing_source", "error_type", "message"),
+        [
+            (
+                "raise RuntimeError('project-b import failed')\n",
+                RuntimeError,
+                "project-b import failed",
+            ),
+            (
+                "other = 1\n",
+                AttributeError,
+                "Project entrypoint attribute not found",
+            ),
+            (
+                "raise SystemExit('project-b stopped')\n",
+                SystemExit,
+                "project-b stopped",
+            ),
+        ],
+    )
+    def test_failed_conflicting_resolution_restores_previous_project_modules(
+        self,
+        tmp_path: Path,
+        failing_source: str,
+        error_type: type[BaseException],
+        message: str,
+    ) -> None:
+        root_name = "rpacore_patch007_restore"
+        project_a = tmp_path / "project-a"
+        project_b = tmp_path / "project-b"
+        project_a.mkdir()
+        project_b.mkdir()
+        write_package_entrypoint(
+            project_a,
+            root_name=root_name,
+            source="def main():\n    return 'project-a'\n",
+        )
+        write_package_entrypoint(
+            project_b,
+            root_name=root_name,
+            source=failing_source,
+        )
+        remove_module_tree(root_name)
+
+        try:
+            entrypoint_a = resolve_project_entrypoint(
+                load_project_manifest(project_a)
+            )
+            previous_modules = {
+                name: module
+                for name, module in sys.modules.items()
+                if name == root_name or name.startswith(f"{root_name}.")
+            }
+
+            with pytest.raises(error_type, match=message):
+                resolve_project_entrypoint(load_project_manifest(project_b))
+
+            assert entrypoint_a() == "project-a"
+            assert {
+                name: module
+                for name, module in sys.modules.items()
+                if name == root_name or name.startswith(f"{root_name}.")
+            } == previous_modules
+        finally:
+            remove_module_tree(root_name)
+
+    def test_failed_deep_conflict_removes_new_sibling_modules_and_attributes(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        root_name = "rpacore_patch007_deep_restore"
+        project = tmp_path / "project"
+        project.mkdir()
+        write_package_entrypoint(
+            project,
+            root_name=root_name,
+            source=(
+                f"import {root_name}.other\n"
+                "raise RuntimeError('entrypoint import failed')\n"
+            ),
+        )
+        (project / root_name / "other.py").write_text(
+            "VALUE = 'new sibling'\n",
+            encoding="utf-8",
+        )
+        remove_module_tree(root_name)
+        sys.path.insert(0, str(project))
+        try:
+            root_module = importlib.import_module(root_name)
+        finally:
+            sys.path.remove(str(project))
+        stale_submodule = ModuleType(f"{root_name}.jobs")
+        stale_submodule.__file__ = str(
+            tmp_path / "stale" / "jobs" / "__init__.py"
+        )
+        sys.modules[f"{root_name}.jobs"] = stale_submodule
+        setattr(root_module, "jobs", stale_submodule)
+        modules_before = {
+            name: module
+            for name, module in sys.modules.items()
+            if name == root_name or name.startswith(f"{root_name}.")
+        }
+
+        try:
+            with pytest.raises(RuntimeError, match="entrypoint import failed"):
+                resolve_project_entrypoint(load_project_manifest(project))
+
+            assert {
+                name: module
+                for name, module in sys.modules.items()
+                if name == root_name or name.startswith(f"{root_name}.")
+            } == modules_before
+            assert root_module.jobs is stale_submodule
+            assert not hasattr(root_module, "other")
+        finally:
+            remove_module_tree(root_name)
+
+    def test_failed_import_keeps_external_dependency_cache_side_effect(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        root_name = "rpacore_patch007_external_failure"
+        dependency_name = "rpacore_patch007_external_dependency"
+        project = tmp_path / "project"
+        project.mkdir()
+        write_package_entrypoint(
+            project,
+            root_name=root_name,
+            source=(
+                f"import {dependency_name}\n"
+                "raise RuntimeError('entrypoint import failed')\n"
+            ),
+        )
+        (project / f"{dependency_name}.py").write_text(
+            "VALUE = 'normal import side effect'\n",
+            encoding="utf-8",
+        )
+        remove_module_tree(root_name)
+        remove_module_tree(dependency_name)
+
+        try:
+            with pytest.raises(RuntimeError, match="entrypoint import failed"):
+                resolve_project_entrypoint(load_project_manifest(project))
+
+            dependency = sys.modules[dependency_name]
+            assert dependency is not None
+            assert dependency.VALUE == "normal import side effect"  # type: ignore[attr-defined]
+        finally:
+            remove_module_tree(root_name)
+            remove_module_tree(dependency_name)
 
     def test_non_callable_entrypoint_raises(self, tmp_path: Path) -> None:
         write_manifest(tmp_path)

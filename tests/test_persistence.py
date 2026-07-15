@@ -37,7 +37,7 @@ def lock_database(db_path: str) -> sqlite3.Connection:
 
 
 class TestPersistencePaths:
-    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:"])
+    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:", " :memory: "])
     def test_transient_durable_path_rejected(self, db_path: str) -> None:
         with pytest.raises(ValueError, match="transaction_db_path"):
             save_transaction(make_transaction(), db_path)

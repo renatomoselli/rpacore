@@ -118,6 +118,64 @@ class TestLoadConfig:
 
         assert config["queue"]["db_path"] == str(tmp_path.resolve() / "queue.db")  # type: ignore[index]
 
+    def test_screenshot_dir_resolved_relative_to_nested_config_directory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_dir = tmp_path / "project" / "config"
+        config_dir.mkdir(parents=True)
+        toml = config_dir / "settings.toml"
+        toml.write_text('screenshot_dir = "screenshots"\n', encoding="utf-8")
+
+        config = load_config(toml)
+
+        assert config["screenshot_dir"] == str(config_dir.resolve() / "screenshots")
+
+    def test_empty_screenshot_dir_remains_disabled(self, tmp_path: Path) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text('screenshot_dir = ""\n', encoding="utf-8")
+
+        config = load_config(toml)
+
+        assert config["screenshot_dir"] == ""
+
+    @pytest.mark.parametrize("value", ["   ", ":memory:", " :memory: "])
+    def test_invalid_screenshot_dir_raises(
+        self,
+        tmp_path: Path,
+        value: str,
+    ) -> None:
+        toml = tmp_path / "config.toml"
+        toml.write_text(f'screenshot_dir = "{value}"\n', encoding="utf-8")
+
+        with pytest.raises(ValueError, match="screenshot_dir expected"):
+            load_config(toml)
+
+    def test_parent_relative_screenshot_dir_remains_supported(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        config_dir = tmp_path / "project" / "config"
+        config_dir.mkdir(parents=True)
+        toml = config_dir / "settings.toml"
+        toml.write_text('screenshot_dir = "../screenshots"\n', encoding="utf-8")
+
+        config = load_config(toml)
+
+        assert config["screenshot_dir"] == str(
+            config_dir.resolve() / ".." / "screenshots"
+        )
+
+    def test_absolute_screenshot_dir_not_modified(self, tmp_path: Path) -> None:
+        absolute = str((tmp_path / "screenshots").resolve())
+        toml_value = absolute.replace("\\", "\\\\")
+        toml = tmp_path / "config.toml"
+        toml.write_text(f'screenshot_dir = "{toml_value}"\n', encoding="utf-8")
+
+        config = load_config(toml)
+
+        assert config["screenshot_dir"] == absolute
+
     def test_absolute_transaction_db_path_not_modified(self, tmp_path: Path) -> None:
         absolute = str((tmp_path / "absolute.db").resolve())
         toml_value = absolute.replace("\\", "\\\\")
@@ -306,7 +364,7 @@ class TestLoadConfig:
 
         assert str(exc_info.value) == "transaction_db_path expected str; got int value=123"
 
-    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:"])
+    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:", " :memory: "])
     def test_transient_transaction_db_path_rejected(
         self,
         tmp_path: Path,
@@ -318,7 +376,7 @@ class TestLoadConfig:
         with pytest.raises(ValueError, match="transaction_db_path"):
             load_config(toml)
 
-    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:"])
+    @pytest.mark.parametrize("db_path", ["", "   ", ":memory:", " :memory: "])
     def test_transient_queue_db_path_rejected(
         self,
         tmp_path: Path,

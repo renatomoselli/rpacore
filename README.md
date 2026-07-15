@@ -123,7 +123,11 @@ plain skill instances and `ProcessContext`; see [Testing RPA Core Skills](docs/t
 `rpacore run` discovers `rpacore.toml` from the current directory, resolves the
 declared `module:callable` entrypoint, and invokes it. The CLI does not build
 skills, transactions, config, or persistence automatically; that wiring remains
-in project Python code.
+in project Python code. Entrypoint imports temporarily prioritize the manifest's
+project directory and replace only conflicting cached modules in that Python
+package namespace; the process working directory is unchanged. Dependencies
+outside the entrypoint's top-level package follow normal Python import-cache
+semantics and are never globally purged by RPA Core.
 
 Inspect persisted local transactions:
 
@@ -327,6 +331,13 @@ max_retries = 3
 # url = "https://hooks.example.com/rpacore"
 # include_transaction = false
 ```
+
+Relative `transaction_db_path`, `queue.db_path`, and non-empty
+`screenshot_dir` values are resolved from the directory containing
+`config.toml`. An empty `screenshot_dir` remains the disabled sentinel;
+whitespace-only values and `:memory:` with or without surrounding whitespace
+are invalid screenshot directories. These config paths are independent from
+paths declared in `rpacore.toml`, which resolve from the manifest's directory.
 
 ## Exception Model
 

@@ -23,7 +23,7 @@ def validate_durable_sqlite_path(db_path: str, *, field: str) -> str:
         raise type_error(field, "str", db_path)
     if not db_path.strip():
         raise value_error(field, "non-empty SQLite file path", db_path)
-    if db_path == ":memory:":
+    if db_path.strip() == ":memory:":
         raise value_error(field, "SQLite file path (not :memory:)", db_path)
     return db_path
 

@@ -32,7 +32,12 @@ Exit codes:
 
 Finds `rpacore.toml` from the current directory, resolves `[project].entrypoint`,
 and calls that Python callable. RPA Core does not discover skills or build a
-pipeline from configuration; user code owns transaction wiring.
+pipeline from configuration; user code owns transaction wiring. Resolution
+temporarily prioritizes the manifest's project directory and replaces a cached
+entrypoint package only when it belongs to another project. The resolver never
+purges modules outside the entrypoint's top-level package, although ordinary
+Python imports may cache external dependencies. The process working directory
+is unchanged.
 
 Exit codes:
 

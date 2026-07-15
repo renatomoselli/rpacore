@@ -59,7 +59,7 @@ Unhandled exceptions from skill code are recorded as system failures.
 
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
-| `load_config(path)` | Load and validate TOML configuration. | Reads a TOML file and resolves configured paths relative to it. |
+| `load_config(path)` | Load and validate TOML configuration. | Reads a TOML file and resolves database and non-empty screenshot paths relative to it. |
 | `optional_config`, `require_config`, `require_section` | Validate config dictionaries. | No I/O. |
 | `ConfigField`, `validate_config` | Validate immutable flat field specifications, including dotted nested keys, and return a plain dictionary. | No mutation or I/O. Path, filesystem, and cross-field rules remain explicit Python. |
 | `resolve_config_path`, `resolve_config_paths` | Resolve path values from config. | No I/O beyond path normalization. |
@@ -119,7 +119,7 @@ are additive within v1; strict consumers must allow them.
 
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
-| `ProjectManifest`, `find_project_manifest`, `load_project_manifest`, `resolve_project_entrypoint` | Locate and load `rpacore.toml` and resolve the configured Python entrypoint. | Reads files and imports the configured module during entrypoint resolution. |
+| `ProjectManifest`, `find_project_manifest`, `load_project_manifest`, `resolve_project_entrypoint` | Locate and load `rpacore.toml` and resolve the configured Python entrypoint. | Reads files, temporarily modifies `sys.path`, and replaces cached modules only within a conflicting entrypoint package namespace. Failed resolution restores that namespace; dependencies outside it retain normal Python import-cache side effects. |
 
 ## Artifacts and History
 

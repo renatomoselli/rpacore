@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from rpacore._sqlite import validate_durable_sqlite_path
 from rpacore._validation import type_error, value_error
 
 
@@ -67,8 +68,10 @@ def load_project_manifest(path: str | Path | None = None) -> ProjectManifest:
 
     if not isinstance(transaction_db_path, str):
         raise type_error("storage.transaction_db_path", "str", transaction_db_path)
-    if not transaction_db_path:
-        raise value_error("storage.transaction_db_path", "non-empty str", transaction_db_path)
+    validate_durable_sqlite_path(
+        transaction_db_path,
+        field="storage.transaction_db_path",
+    )
 
     project_dir = manifest_path.resolve().parent
     return ProjectManifest(
@@ -84,30 +87,62 @@ def resolve_project_entrypoint(manifest: ProjectManifest) -> Callable[[], object
     module_name, attribute_path = manifest.entrypoint.split(":", 1)
     project_dir = str(manifest.project_dir)
     with _IMPORT_LOCK:
-        inserted = False
-        if project_dir not in sys.path:
-            sys.path.insert(0, project_dir)
-            inserted = True
+        modules_before = set(sys.modules)
+        conflicting_root = _conflicting_module_root(
+            module_name,
+            manifest.project_dir,
+        )
+        evicted_modules = _evict_conflicting_modules(
+            conflicting_root,
+            manifest.project_dir,
+        )
+        cleanup_root = module_name.split(".", 1)[0]
         try:
-            existing = sys.modules.get(module_name)
-            if existing is not None and not _module_belongs_to_project(existing, manifest.project_dir):
-                del sys.modules[module_name]
+            original_path_index: int | None = sys.path.index(project_dir)
+        except ValueError:
+            original_path_index = None
+        if original_path_index is not None:
+            sys.path.pop(original_path_index)
+        sys.path.insert(0, project_dir)
+        try:
             importlib.invalidate_caches()
             module = importlib.import_module(module_name)
+            target = _resolve_entrypoint_target(
+                module,
+                attribute_path=attribute_path,
+                entrypoint=manifest.entrypoint,
+            )
+        except BaseException:
+            _restore_modules_after_failure(
+                cleanup_root,
+                modules_before=modules_before,
+                evicted_modules=evicted_modules,
+            )
+            raise
         finally:
-            if inserted:
-                try:
-                    sys.path.remove(project_dir)
-                except ValueError:
-                    pass
+            try:
+                sys.path.remove(project_dir)
+            except ValueError:
+                pass
+            if original_path_index is not None:
+                restored_index = min(original_path_index, len(sys.path))
+                sys.path.insert(restored_index, project_dir)
+    return target
 
+
+def _resolve_entrypoint_target(
+    module: object,
+    *,
+    attribute_path: str,
+    entrypoint: str,
+) -> Callable[[], object]:
     target: object = module
     for attribute in attribute_path.split("."):
         try:
             target = getattr(target, attribute)
         except AttributeError as exc:
             raise AttributeError(
-                f"Project entrypoint attribute not found: {manifest.entrypoint}"
+                f"Project entrypoint attribute not found: {entrypoint}"
             ) from exc
 
     if not callable(target):
@@ -115,13 +150,13 @@ def resolve_project_entrypoint(manifest: ProjectManifest) -> Callable[[], object
     if inspect.isclass(target):
         raise TypeError(
             f"project.entrypoint must be a function or callable object instance, not a class: "
-            f"{manifest.entrypoint}"
+            f"{entrypoint}"
         )
     try:
         inspect.signature(target).bind()
     except (TypeError, ValueError) as exc:
         raise TypeError(
-            f"project.entrypoint must be callable without arguments: {manifest.entrypoint}"
+            f"project.entrypoint must be callable without arguments: {entrypoint}"
         ) from exc
     return target
 
@@ -192,3 +227,73 @@ def _module_belongs_to_project(module: object, project_dir: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _conflicting_module_root(
+    module_name: str,
+    project_dir: Path,
+) -> str | None:
+    parts = module_name.split(".")
+    for length in range(1, len(parts) + 1):
+        prefix = ".".join(parts[:length])
+        if prefix not in sys.modules:
+            continue
+        module = sys.modules[prefix]
+        if module is None or not _module_belongs_to_project(module, project_dir):
+            return prefix
+    return None
+
+
+def _evict_conflicting_modules(
+    conflicting_root: str | None,
+    project_dir: Path,
+) -> dict[str, object]:
+    if conflicting_root is None:
+        return {}
+    evicted: dict[str, object] = {}
+    for name, module in list(sys.modules.items()):
+        if not _module_is_at_or_below(name, conflicting_root):
+            continue
+        if module is not None and _module_belongs_to_project(module, project_dir):
+            continue
+        evicted[name] = sys.modules.pop(name)
+    return evicted
+
+
+def _restore_modules_after_failure(
+    cleanup_root: str,
+    *,
+    modules_before: set[str],
+    evicted_modules: dict[str, object],
+) -> None:
+    removed_modules: dict[str, object] = {}
+    for name in list(sys.modules):
+        if not _module_is_at_or_below(name, cleanup_root):
+            continue
+        if name not in modules_before or name in evicted_modules:
+            removed_modules[name] = sys.modules.pop(name)
+    sys.modules.update(evicted_modules)
+
+    missing = object()
+    for name, removed_module in sorted(
+        removed_modules.items(),
+        key=lambda item: item[0].count("."),
+    ):
+        parent_name, separator, attribute = name.rpartition(".")
+        if not separator:
+            continue
+        parent = sys.modules.get(parent_name)
+        if parent is None:
+            continue
+        parent_namespace = getattr(parent, "__dict__", None)
+        if not isinstance(parent_namespace, dict):
+            continue
+        restored_module = sys.modules.get(name, missing)
+        if restored_module is not missing:
+            parent_namespace[attribute] = restored_module
+        elif parent_namespace.get(attribute, missing) is removed_module:
+            parent_namespace.pop(attribute, None)
+
+
+def _module_is_at_or_below(module_name: str, root_name: str) -> bool:
+    return module_name == root_name or module_name.startswith(f"{root_name}.")

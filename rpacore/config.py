@@ -84,6 +84,14 @@ def _validate(config: dict[str, object]) -> None:
     screenshot_dir = config["screenshot_dir"]
     if not isinstance(screenshot_dir, str):
         raise type_error("screenshot_dir", "str", screenshot_dir)
+    if screenshot_dir and (
+        not screenshot_dir.strip() or screenshot_dir.strip() == ":memory:"
+    ):
+        raise value_error(
+            "screenshot_dir",
+            "empty string or filesystem directory path",
+            screenshot_dir,
+        )
 
     credential_provider = config["credential_provider"]
     if not isinstance(credential_provider, str):
@@ -93,7 +101,7 @@ def _validate(config: dict[str, object]) -> None:
 
 
 def _resolve_config_path_value(base: Path, value: str) -> str:
-    if not value.strip() or value == ":memory:":
+    if not value.strip() or value.strip() == ":memory:":
         return value
     path = Path(value)
     if path.is_absolute():
@@ -101,7 +109,7 @@ def _resolve_config_path_value(base: Path, value: str) -> str:
     return str(base / path)
 
 
-def _resolve_database_paths(config: dict[str, object], *, base_dir: Path) -> None:
+def _resolve_config_paths(config: dict[str, object], *, base_dir: Path) -> None:
     transaction_db_path = config["transaction_db_path"]
     if isinstance(transaction_db_path, str):
         config["transaction_db_path"] = _resolve_config_path_value(base_dir, transaction_db_path)
@@ -112,6 +120,13 @@ def _resolve_database_paths(config: dict[str, object], *, base_dir: Path) -> Non
         if isinstance(queue_db_path, str):
             queue["db_path"] = _resolve_config_path_value(base_dir, queue_db_path)
 
+    screenshot_dir = config["screenshot_dir"]
+    if isinstance(screenshot_dir, str) and screenshot_dir:
+        config["screenshot_dir"] = _resolve_config_path_value(
+            base_dir,
+            screenshot_dir,
+        )
+
 
 def load_config(path: str | Path = "config.toml", *, require_file: bool = False) -> dict[str, object]:
     """Load configuration from a TOML file and return a plain dict.
@@ -121,20 +136,22 @@ def load_config(path: str | Path = "config.toml", *, require_file: bool = False)
     Known keys are validated at load time. Unknown keys pass through.
     log_level is normalized to uppercase and log_format is normalized to
     lowercase in the returned dict.
-    transaction_db_path and queue.db_path are resolved relative to the config
-    file's directory.
+    transaction_db_path, queue.db_path, and non-empty screenshot_dir are
+    resolved relative to the config file's directory.
     """
     config = dict(_DEFAULTS)
     resolved = Path(path)
+    base_dir: Path | None = None
 
     if resolved.exists():
         with open(resolved, "rb") as f:
             overrides = tomllib.load(f)
         config.update(overrides)
-
-        _resolve_database_paths(config, base_dir=resolved.resolve().parent)
+        base_dir = resolved.resolve().parent
     elif require_file:
         raise FileNotFoundError(f"Config file not found: {resolved}")
 
     _validate(config)
+    if base_dir is not None:
+        _resolve_config_paths(config, base_dir=base_dir)
     return config
