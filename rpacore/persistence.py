@@ -4,12 +4,15 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime
+from pathlib import Path
 
 from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore._sqlite import (
+    QUEUE_SCHEMA_VERSION,
     SCHEMA_VERSION_TABLE,
     TRANSACTION_SCHEMA_VERSION,
     component_schema_version,
+    configure_rollback_journal,
     connect_sqlite,
     ensure_database_compatibility,
     ensure_supported_schema,
@@ -24,6 +27,10 @@ from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transactio
 _SCHEMA_TABLE = SCHEMA_VERSION_TABLE
 _TRANSACTION_SCHEMA_COMPONENT = "transactions"
 _TRANSACTION_SCHEMA_VERSION = TRANSACTION_SCHEMA_VERSION
+
+
+class TransactionFenceError(RuntimeError):
+    """Raised when a queue checkpoint no longer owns its claim or revision."""
 
 
 def _connect(db_path: str, *, readonly: bool = False) -> sqlite3.Connection:
@@ -194,6 +201,14 @@ def _migrate_transactions_to_v5(conn: sqlite3.Connection) -> None:
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 5)
 
 
+def _migrate_transactions_to_v6(conn: sqlite3.Connection) -> None:
+    """Add queue-attempt identity and an optimistic persistence revision."""
+    _ensure_column(conn, "transactions", "revision", "revision INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "transactions", "queue_item_id", "queue_item_id TEXT NOT NULL DEFAULT ''")
+    _ensure_column(conn, "transactions", "claim_token", "claim_token TEXT NOT NULL DEFAULT ''")
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 6)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run explicit transaction schema migrations through the latest version."""
     with conn:
@@ -226,6 +241,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 5:
             _migrate_transactions_to_v5(conn)
             current_version = 5
+        if current_version < 6:
+            _migrate_transactions_to_v6(conn)
+            current_version = 6
         if current_version != _TRANSACTION_SCHEMA_VERSION:
             raise RuntimeError(
                 "Unsupported transaction schema version "
@@ -392,12 +410,10 @@ def _load_history(transaction_id: str, rows: list[sqlite3.Row]) -> list[HistoryE
     return history
 
 
-def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> None:
-    """Persist a transaction and all its skills and exceptions.
-
-    Safe to call multiple times. Skills are deleted and reinserted on each save,
-    so removed or reordered skills are correctly reflected.
-    """
+def _serialized_transaction(
+    transaction: Transaction,
+) -> tuple[str, dict[str, str], list[tuple[str, int, str, str, str, str, str]]]:
+    """Validate and serialize durable values before opening SQLite."""
     transaction.validate_for_execution()
     state_json = json.dumps(transaction.state)
     metadata_json = _metadata_to_storage(transaction.metadata)
@@ -413,124 +429,304 @@ def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> N
         )
         for index, artifact in enumerate(transaction.artifacts)
     ]
+    return state_json, metadata_json, artifact_rows
+
+
+def _write_transaction_rows(
+    conn: sqlite3.Connection,
+    transaction: Transaction,
+    *,
+    state_json: str,
+    metadata_json: dict[str, str],
+    artifact_rows: list[tuple[str, int, str, str, str, str, str]],
+    expected_revision: int | None,
+    queue_item_id: str = "",
+    claim_token: str = "",
+) -> int:
+    """Write one full transaction snapshot and return its new revision."""
+    created_at = _timestamp_to_storage(transaction.created_at)
+    started_at = _timestamp_to_storage(transaction.started_at)
+    finished_at = _timestamp_to_storage(transaction.finished_at)
+
+    conn.execute(
+        "INSERT OR IGNORE INTO transactions "
+        "(id, reference, status, retry_count, created_at, started_at, finished_at, state) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            transaction.id,
+            transaction.reference,
+            transaction.status,
+            transaction.retry_count,
+            created_at,
+            started_at or None,
+            finished_at or None,
+            state_json,
+        ),
+    )
+    params: tuple[object, ...] = (
+        transaction.reference,
+        transaction.status,
+        transaction.retry_count,
+        created_at,
+        started_at or None,
+        finished_at or None,
+        state_json,
+    )
+    if expected_revision is None:
+        result = conn.execute(
+            "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
+            "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END, "
+            "started_at = ?, finished_at = ?, state = ?, revision = revision + 1 "
+            "WHERE id = ?",
+            (*params, transaction.id),
+        )
+    else:
+        result = conn.execute(
+            "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
+            "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END, "
+            "started_at = ?, finished_at = ?, state = ?, revision = revision + 1, "
+            "queue_item_id = ?, claim_token = ? "
+            "WHERE id = ? AND revision = ?",
+            (*params, queue_item_id, claim_token, transaction.id, expected_revision),
+        )
+        if result.rowcount != 1:
+            raise TransactionFenceError(
+                f"Transaction {transaction.id!r} revision {expected_revision} is stale"
+            )
+
+    conn.execute("DELETE FROM skills WHERE transaction_id = ?", (transaction.id,))
+    for skill in transaction.skills:
+        sid = _skill_id(transaction.id, skill)
+        conn.execute(
+            "INSERT INTO skills "
+            "(id, transaction_id, name, execution_order, status, arguments) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                sid,
+                transaction.id,
+                skill.name,
+                skill.execution_order,
+                skill.status,
+                json.dumps(skill.arguments),
+            ),
+        )
+        for exc in skill.exceptions:
+            conn.execute(
+                "INSERT INTO exceptions "
+                "(skill_id, exception_type, message, action, retry_number, "
+                "datetime_occurred, screenshot_path, stops_execution) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    sid,
+                    "business" if isinstance(exc, BusinessException) else "system",
+                    str(exc),
+                    exc.action,
+                    exc.retry_number,
+                    exc.datetime_occurred.isoformat(),
+                    exc.screenshot_path,
+                    1 if exc.stops_execution else 0,
+                ),
+            )
+    for entry in transaction.history:
+        conn.execute(
+            "INSERT OR IGNORE INTO transaction_history "
+            "(transaction_id, sequence, timestamp, event, status, retry_number, "
+            "skill_name, skill_execution_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                transaction.id,
+                entry.sequence,
+                entry.timestamp.isoformat(),
+                entry.event,
+                entry.status,
+                entry.retry_number,
+                entry.skill_name,
+                entry.skill_execution_order,
+            ),
+        )
+    conn.execute("DELETE FROM transaction_metadata WHERE transaction_id = ?", (transaction.id,))
+    for key, value_json in metadata_json.items():
+        conn.execute(
+            "INSERT INTO transaction_metadata (transaction_id, key, value_json) VALUES (?, ?, ?)",
+            (transaction.id, key, value_json),
+        )
+    conn.execute("DELETE FROM transaction_artifacts WHERE transaction_id = ?", (transaction.id,))
+    for artifact_id, sequence, name, path, kind, created_at, artifact_metadata in artifact_rows:
+        conn.execute(
+            "INSERT INTO transaction_artifacts "
+            "(transaction_id, sequence, id, name, path, kind, created_at, metadata) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                transaction.id,
+                sequence,
+                artifact_id,
+                name,
+                path,
+                kind,
+                created_at,
+                artifact_metadata,
+            ),
+        )
+    row = conn.execute(
+        "SELECT revision FROM transactions WHERE id = ?", (transaction.id,)
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"Transaction disappeared while saving: {transaction.id!r}")
+    return int(row["revision"])
+
+
+def save_transaction(transaction: Transaction, db_path: str = "rpacore.db") -> None:
+    """Persist a non-queue transaction snapshot unconditionally.
+
+    Queue runners use an internal fenced save instead. Calling this function for
+    a queue-bound transaction deliberately advances its revision, causing any
+    concurrent queue runner with an older revision to fail closed.
+    """
+    state_json, metadata_json, artifact_rows = _serialized_transaction(transaction)
 
     conn = _connect(db_path)
     try:
         _ensure_schema(conn)
         with conn:
-            # INSERT OR IGNORE creates the row when needed; the UPDATE below
-            # preserves an existing created_at unless a legacy row needs backfill.
-            created_at = _timestamp_to_storage(transaction.created_at)
-            started_at = _timestamp_to_storage(transaction.started_at)
-            finished_at = _timestamp_to_storage(transaction.finished_at)
+            _write_transaction_rows(
+                conn,
+                transaction,
+                state_json=state_json,
+                metadata_json=metadata_json,
+                artifact_rows=artifact_rows,
+                expected_revision=None,
+            )
+    finally:
+        conn.close()
 
-            conn.execute(
-                "INSERT OR IGNORE INTO transactions "
-                "(id, reference, status, retry_count, created_at, started_at, finished_at, state) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    transaction.id,
-                    transaction.reference,
-                    transaction.status,
-                    transaction.retry_count,
-                    created_at,
-                    started_at or None,
-                    finished_at or None,
-                    state_json,
-                ),
+
+def _prepare_transaction_database(db_path: str) -> None:
+    """Create or migrate transaction storage before a queue item is claimed."""
+    conn = _connect(db_path)
+    try:
+        ensure_database_compatibility(conn)
+        ensure_supported_schema(
+            conn,
+            component=_TRANSACTION_SCHEMA_COMPONENT,
+            supported_version=_TRANSACTION_SCHEMA_VERSION,
+            label="transaction",
+        )
+        configure_rollback_journal(conn)
+        _ensure_schema(conn)
+    finally:
+        conn.close()
+
+
+def _load_transaction_revision(transaction_id: str, db_path: str) -> int:
+    """Return the current durable revision for a bound queue transaction."""
+    conn = _connect(db_path)
+    try:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT revision FROM transactions WHERE id = ?", (transaction_id,)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"Transaction not found: {transaction_id!r}")
+        return int(row["revision"])
+    finally:
+        conn.close()
+
+
+def _qualified_queue_schema_version(conn: sqlite3.Connection, schema: str) -> int:
+    table = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master "
+        "WHERE type = 'table' AND name = ?",
+        (SCHEMA_VERSION_TABLE,),
+    ).fetchone()
+    if table is None:
+        return 0
+    row = conn.execute(
+        f"SELECT version FROM {schema}.{SCHEMA_VERSION_TABLE} WHERE component = 'queue'"
+    ).fetchone()
+    return 0 if row is None else int(row["version"])
+
+
+def _save_queue_transaction_fenced(
+    transaction: Transaction,
+    *,
+    db_path: str,
+    queue_db_path: str,
+    queue_item_id: str,
+    claimed_by: str,
+    claim_token: str,
+    expected_revision: int,
+) -> int:
+    """Atomically validate a queue claim and persist one transaction snapshot."""
+    if not claim_token:
+        raise TransactionFenceError(
+            f"Queue item {queue_item_id!r} has no claim credential"
+        )
+    if expected_revision < 0:
+        raise ValueError(f"expected_revision must be >= 0, got {expected_revision}")
+    state_json, metadata_json, artifact_rows = _serialized_transaction(transaction)
+
+    transaction_path = Path(db_path).resolve()
+    queue_path = Path(queue_db_path).resolve()
+    conn = _connect(str(transaction_path))
+    transaction_started = False
+    try:
+        _ensure_schema(conn)
+        transaction_journal_mode = str(
+            conn.execute("PRAGMA main.journal_mode").fetchone()[0]
+        ).lower()
+        if transaction_journal_mode != "delete":
+            raise RuntimeError(
+                "Queue claim fencing requires transaction rollback journal mode; "
+                f"got {transaction_journal_mode!r}"
             )
-            conn.execute(
-                "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
-                "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END, "
-                "started_at = ?, finished_at = ?, "
-                "state = ? "
-                "WHERE id = ?",
-                (
-                    transaction.reference,
-                    transaction.status,
-                    transaction.retry_count,
-                    created_at,
-                    started_at or None,
-                    finished_at or None,
-                    state_json,
-                    transaction.id,
-                ),
+        queue_schema = "main"
+        if queue_path != transaction_path:
+            conn.execute("ATTACH DATABASE ? AS queue_guard", (str(queue_path),))
+            queue_schema = "queue_guard"
+
+        queue_version = _qualified_queue_schema_version(conn, queue_schema)
+        if queue_version != QUEUE_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Unsupported queue schema version {queue_version}; "
+                f"expected {QUEUE_SCHEMA_VERSION}; migrate queue and transaction databases offline"
             )
-            # Delete all existing skills (cascades to exceptions via ON DELETE CASCADE).
-            conn.execute("DELETE FROM skills WHERE transaction_id = ?", (transaction.id,))
-            for skill in transaction.skills:
-                sid = _skill_id(transaction.id, skill)
-                conn.execute(
-                    "INSERT INTO skills "
-                    "(id, transaction_id, name, execution_order, status, arguments) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        sid,
-                        transaction.id,
-                        skill.name,
-                        skill.execution_order,
-                        skill.status,
-                        json.dumps(skill.arguments),
-                    ),
-                )
-                for exc in skill.exceptions:
-                    conn.execute(
-                        "INSERT INTO exceptions "
-                        "(skill_id, exception_type, message, action, retry_number, "
-                        "datetime_occurred, screenshot_path, stops_execution) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            sid,
-                            "business" if isinstance(exc, BusinessException) else "system",
-                            str(exc),
-                            exc.action,
-                            exc.retry_number,
-                            exc.datetime_occurred.isoformat(),
-                            exc.screenshot_path,
-                            1 if exc.stops_execution else 0,
-                        ),
-                    )
-            for entry in transaction.history:
-                conn.execute(
-                    "INSERT OR IGNORE INTO transaction_history "
-                    "(transaction_id, sequence, timestamp, event, status, retry_number, "
-                    "skill_name, skill_execution_order) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        transaction.id,
-                        entry.sequence,
-                        entry.timestamp.isoformat(),
-                        entry.event,
-                        entry.status,
-                        entry.retry_number,
-                        entry.skill_name,
-                        entry.skill_execution_order,
-                    ),
-                )
-            conn.execute("DELETE FROM transaction_metadata WHERE transaction_id = ?", (transaction.id,))
-            for key, value_json in metadata_json.items():
-                conn.execute(
-                    "INSERT INTO transaction_metadata (transaction_id, key, value_json) "
-                    "VALUES (?, ?, ?)",
-                    (transaction.id, key, value_json),
-                )
-            conn.execute("DELETE FROM transaction_artifacts WHERE transaction_id = ?", (transaction.id,))
-            for artifact_id, sequence, name, path, kind, created_at, artifact_metadata in artifact_rows:
-                conn.execute(
-                    "INSERT INTO transaction_artifacts "
-                    "(transaction_id, sequence, id, name, path, kind, created_at, metadata) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        transaction.id,
-                        sequence,
-                        artifact_id,
-                        name,
-                        path,
-                        kind,
-                        created_at,
-                        artifact_metadata,
-                    ),
-                )
+        journal_mode = str(
+            conn.execute(f"PRAGMA {queue_schema}.journal_mode").fetchone()[0]
+        ).lower()
+        if journal_mode != "delete":
+            raise RuntimeError(
+                f"Queue claim fencing requires rollback journal mode; got {journal_mode!r}"
+            )
+
+        conn.execute("BEGIN IMMEDIATE")
+        transaction_started = True
+        claim = conn.execute(
+            f"SELECT 1 FROM {queue_schema}.queue_items "
+            "WHERE id = ? AND status = 'in_progress' AND claimed_by = ? "
+            "AND claim_token = ? AND claim_token != '' "
+            "AND (transaction_id = '' OR transaction_id = ?)",
+            (queue_item_id, claimed_by, claim_token, transaction.id),
+        ).fetchone()
+        if claim is None:
+            raise TransactionFenceError(
+                f"Queue item {queue_item_id!r} claim is stale or bound to another transaction"
+            )
+        new_revision = _write_transaction_rows(
+            conn,
+            transaction,
+            state_json=state_json,
+            metadata_json=metadata_json,
+            artifact_rows=artifact_rows,
+            expected_revision=expected_revision,
+            queue_item_id=queue_item_id,
+            claim_token=claim_token,
+        )
+        conn.execute("COMMIT")
+        transaction_started = False
+        return new_revision
+    except Exception:
+        if transaction_started:
+            conn.execute("ROLLBACK")
+        raise
     finally:
         conn.close()
 

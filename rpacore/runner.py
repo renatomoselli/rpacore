@@ -22,11 +22,14 @@ from rpacore.engine import Engine
 from rpacore.logger import get_logger
 from rpacore.notify import Notifier, dispatch
 from rpacore.persistence import (
+    TransactionFenceError,
     _delete_unbound_pending_transaction,
+    _load_transaction_revision,
+    _prepare_transaction_database,
+    _save_queue_transaction_fenced,
     load_transaction,
-    save_transaction,
 )
-from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider
+from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider, SqliteQueue
 from rpacore.recovery import resume_transaction
 from rpacore.report import generate_report
 from rpacore.status import Status
@@ -139,6 +142,8 @@ def run_queue_loop(
       only renews the queue lease. If the lease is lost, the next checkpoint or
       final transition raises QueueLeaseLostError, skips the final queue
       transition, logs the loss, and stops the worker from claiming more work.
+      A stale transaction token or revision raises TransactionFenceError with
+      the same stop-without-transition behavior.
 
     Args:
         queue:             The queue to drain.
@@ -162,8 +167,10 @@ def run_queue_loop(
                            failures are terminal queue outcomes.
         transaction_db_path:
                            Optional SQLite transaction database path. When set, the
-                           runner supplies strict checkpoints throughout engine.run(ctx).
-                           Checkpoint failures stop execution and prevent queue completion.
+                           queue must be SqliteQueue. The runner supplies atomic
+                           claim-token and revision-fenced checkpoints throughout
+                           engine.run(ctx). Checkpoint failures stop execution and
+                           prevent queue completion.
         resource_scope:    Optional context manager entered before queue claims and
                            exited after processing. It may return shared resources
                            shallow-copied into every item context. Cleanup failures
@@ -181,6 +188,13 @@ def run_queue_loop(
     summary = QueueRunSummary()
 
     try:
+        if transaction_db_path is not None:
+            if not isinstance(queue, SqliteQueue):
+                raise TypeError(
+                    "transaction_db_path requires SqliteQueue so queue claims and "
+                    "transaction checkpoints can be fenced atomically"
+                )
+            _prepare_transaction_database(transaction_db_path)
         shared_resources: dict[str, object] = {}
         if resource_scope is None:
             return _run_items(
@@ -353,7 +367,7 @@ def _run_claimed_item(
     lease_lost = False
 
     try:
-        transaction = _transaction_for_queue_item(
+        transaction, transaction_revision = _transaction_for_queue_item(
             queue,
             item,
             build_transaction,
@@ -374,7 +388,9 @@ def _run_claimed_item(
                 heartbeat,
                 _strict_transaction_checkpoint(
                     db_path=transaction_db_path,
+                    queue_db_path=queue.db_path,
                     item=item,
+                    initial_revision=transaction_revision,
                     worker_id=worker_id,
                     log=log,
                     summary=summary,
@@ -390,7 +406,7 @@ def _run_claimed_item(
         raise
     except Exception as exc:
         error = exc
-        lease_lost = isinstance(exc, QueueLeaseLostError)
+        lease_lost = isinstance(exc, (QueueLeaseLostError, TransactionFenceError))
         log.exception(
             "Unexpected error processing queue item",
             extra={"event": "queue_item_error", "queue_item_id": item.id, "queue_reference": item.reference, "worker_id": worker_id},
@@ -571,6 +587,7 @@ def _start_lease_heartbeat(
                 queue,
                 item.id,
                 claimed_by=item.claimed_by,
+                claim_token=item.claim_token,
                 log=log,
                 worker_id=worker_id,
             )
@@ -629,12 +646,17 @@ def _renew_lease_with_retries(
     item_id: str,
     *,
     claimed_by: str,
+    claim_token: str,
     log: logging.Logger,
     worker_id: str,
 ) -> Exception | None:
     for attempt in range(_LEASE_RENEW_ATTEMPTS):
         try:
-            queue.renew_lease(item_id, claimed_by=claimed_by)
+            queue.renew_lease(
+                item_id,
+                claimed_by=claimed_by,
+                claim_token=claim_token,
+            )
             return None
         except sqlite3.OperationalError as exc:
             if not is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
@@ -667,7 +689,11 @@ def _complete_queue_item_with_retries(
     """Complete a queue item, retrying short-lived SQLite lock failures."""
     for attempt in range(_LEASE_RENEW_ATTEMPTS):
         try:
-            queue.complete(item.id, claimed_by=item.claimed_by)
+            queue.complete(
+                item.id,
+                claimed_by=item.claimed_by,
+                claim_token=item.claim_token,
+            )
             return None
         except sqlite3.OperationalError as exc:
             if not is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
@@ -701,7 +727,12 @@ def _fail_queue_item_with_retries(
     """Fail a queue item, retrying short-lived SQLite lock failures."""
     for attempt in range(_LEASE_RENEW_ATTEMPTS):
         try:
-            queue.fail(item.id, retry=retry, claimed_by=item.claimed_by)
+            queue.fail(
+                item.id,
+                retry=retry,
+                claimed_by=item.claimed_by,
+                claim_token=item.claim_token,
+            )
             return None
         except sqlite3.OperationalError as exc:
             if not is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
@@ -782,21 +813,25 @@ def _transaction_for_queue_item(
     worker_id: str,
     log: logging.Logger,
     summary: QueueRunSummary,
-) -> Transaction:
+) -> tuple[Transaction, int]:
     if transaction_db_path is None:
         transaction = build_transaction(item)
         _seed_transaction_state_from_payload(transaction, item, worker_id=worker_id, log=log)
         transaction.validate_for_execution()
-        return transaction
+        return transaction, 0
 
     if item.transaction_id:
         try:
             candidate = build_transaction(item)
-            return resume_transaction(
+            transaction = resume_transaction(
                 item.transaction_id,
                 candidate.skills,
                 db_path=transaction_db_path,
                 retry_business_failures=retry_business_failures,
+            )
+            return transaction, _load_transaction_revision(
+                item.transaction_id,
+                transaction_db_path,
             )
         except (
             KeyError,
@@ -813,15 +848,21 @@ def _transaction_for_queue_item(
     transaction = build_transaction(item)
     _seed_transaction_state_from_payload(transaction, item, worker_id=worker_id, log=log)
     transaction.validate_for_execution()
-    error = _save_transaction_with_retries(
+    _validate_initial_queue_transaction(transaction)
+    revision, error = _save_queue_transaction_with_retries(
         transaction,
         db_path=transaction_db_path,
+        queue_db_path=queue.db_path,
+        item=item,
+        expected_revision=0,
         log=log,
         event="transaction_initial_persistence_retry",
         queue_item_id=item.id,
         worker_id=worker_id,
     )
     if error is not None:
+        if isinstance(error, TransactionFenceError):
+            raise error
         summary.persistence_errors += 1
         log.error(
             "Initial transaction persistence failed",
@@ -845,6 +886,7 @@ def _transaction_for_queue_item(
             item.id,
             transaction.id,
             claimed_by=item.claimed_by,
+            claim_token=item.claim_token,
             log=log,
             worker_id=worker_id,
         )
@@ -887,7 +929,9 @@ def _transaction_for_queue_item(
             f"Queue item {item.id!r} could not bind transaction {transaction.id!r}: {exc}"
         ) from exc
     item.transaction_id = transaction.id
-    return transaction
+    if revision is None:
+        raise RuntimeError("Initial fenced transaction save returned no revision")
+    return transaction, revision
 
 
 def _bind_transaction_with_retries(
@@ -896,13 +940,19 @@ def _bind_transaction_with_retries(
     transaction_id: str,
     *,
     claimed_by: str,
+    claim_token: str,
     log: logging.Logger,
     worker_id: str,
 ) -> Exception | None:
     """Bind a queue item to a transaction, retrying short-lived SQLite locks."""
     for attempt in range(_LEASE_RENEW_ATTEMPTS):
         try:
-            queue.bind_transaction(item_id, transaction_id, claimed_by=claimed_by)
+            queue.bind_transaction(
+                item_id,
+                transaction_id,
+                claimed_by=claimed_by,
+                claim_token=claim_token,
+            )
             return None
         except sqlite3.OperationalError as exc:
             if not is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
@@ -950,6 +1000,18 @@ def _seed_transaction_state_from_payload(
     transaction.state = {**transaction.state, **item.payload}
 
 
+def _validate_initial_queue_transaction(transaction: Transaction) -> None:
+    """Reject pre-started transactions before their provisional durable save."""
+    if transaction.status is not Status.PENDING:
+        raise ExecutionValidationError(
+            "queue transaction.status must be pending before initial binding"
+        )
+    if transaction.history:
+        raise ExecutionValidationError(
+            "queue transaction.history must be empty before initial binding"
+        )
+
+
 def _transaction_has_only_business_failures(transaction: Transaction | None) -> bool:
     """Return True when all failed skills ended with business exceptions."""
     if transaction is None:
@@ -964,24 +1026,37 @@ def _transaction_has_only_business_failures(transaction: Transaction | None) -> 
 def _strict_transaction_checkpoint(
     *,
     db_path: str,
+    queue_db_path: str,
     item: QueueItem,
+    initial_revision: int,
     worker_id: str,
     log: logging.Logger,
     summary: QueueRunSummary,
 ) -> Callable[[Transaction], None]:
     """Return a checkpoint that raises when transaction persistence fails."""
 
+    revision = initial_revision
+
     def checkpoint(transaction: Transaction) -> None:
-        error = _save_transaction_with_retries(
+        nonlocal revision
+        new_revision, error = _save_queue_transaction_with_retries(
             transaction,
             db_path=db_path,
+            queue_db_path=queue_db_path,
+            item=item,
+            expected_revision=revision,
             log=log,
             event="transaction_checkpoint_retry",
             queue_item_id=item.id,
             worker_id=worker_id,
         )
         if error is None:
+            if new_revision is None:
+                raise RuntimeError("Fenced checkpoint returned no revision")
+            revision = new_revision
             return
+        if isinstance(error, TransactionFenceError):
+            raise error
         summary.persistence_errors += 1
         log.error(
             "Transaction checkpoint failed",
@@ -1010,21 +1085,36 @@ def _strict_transaction_checkpoint(
 
 
 def _checkpoint_failure_allows_queue_retry(transaction: Transaction, *, db_path: str) -> bool:
-    """Return False once durable state proves retrying would duplicate terminal work."""
+    """Return False only when the current durable snapshot proves retry is unsafe."""
     try:
         durable = load_transaction(transaction.id, db_path)
     except Exception:
-        if transaction.history and transaction.history[-1].event == HistoryEvent.SKILL_FAILED:
-            return not _has_business_failed_skill(transaction)
-        return True
+        return _in_memory_checkpoint_failure_allows_queue_retry(transaction)
 
-    if not durable.history:
+    # A failed checkpoint did not publish the in-memory change that triggered
+    # it.  Only use the durable retry guard when the snapshot is exactly the
+    # same history; an older snapshot must not decide the new outcome.
+    if durable.history != transaction.history:
+        return _in_memory_checkpoint_failure_allows_queue_retry(transaction)
+    return _transaction_history_allows_queue_retry(durable)
+
+
+def _in_memory_checkpoint_failure_allows_queue_retry(transaction: Transaction) -> bool:
+    """Retry after an unpersisted checkpoint unless it recorded a business failure."""
+    if transaction.history and transaction.history[-1].event == HistoryEvent.SKILL_FAILED:
+        return not _has_business_failed_skill(transaction)
+    return True
+
+
+def _transaction_history_allows_queue_retry(transaction: Transaction) -> bool:
+    """Apply checkpoint retry policy to one transaction history snapshot."""
+    if not transaction.history:
         return True
-    last_event = durable.history[-1].event
+    last_event = transaction.history[-1].event
     if last_event == HistoryEvent.SKILL_SUCCEEDED:
         return False
     if last_event == HistoryEvent.SKILL_FAILED:
-        return not _has_business_failed_skill(durable)
+        return not _has_business_failed_skill(transaction)
     return True
 
 
@@ -1035,26 +1125,37 @@ def _has_business_failed_skill(transaction: Transaction) -> bool:
     )
 
 
-def _save_transaction_with_retries(
+def _save_queue_transaction_with_retries(
     transaction: Transaction,
     *,
     db_path: str,
+    queue_db_path: str,
+    item: QueueItem,
+    expected_revision: int,
     log: logging.Logger,
     event: str,
     queue_item_id: str,
     worker_id: str,
-) -> Exception | None:
-    """Save a transaction, retrying short-lived SQLite lock failures."""
+) -> tuple[int | None, Exception | None]:
+    """Save a fenced queue transaction, retrying short-lived SQLite locks."""
     for attempt in range(_PERSISTENCE_SAVE_ATTEMPTS):
         try:
-            save_transaction(transaction, db_path=db_path)
-            return None
+            revision = _save_queue_transaction_fenced(
+                transaction,
+                db_path=db_path,
+                queue_db_path=queue_db_path,
+                queue_item_id=item.id,
+                claimed_by=item.claimed_by,
+                claim_token=item.claim_token,
+                expected_revision=expected_revision,
+            )
+            return revision, None
         except sqlite3.OperationalError as exc:
             if (
                 not is_transient_sqlite_lock(exc)
                 or attempt == _PERSISTENCE_SAVE_ATTEMPTS - 1
             ):
-                return exc
+                return None, exc
             _sleep_before_sqlite_retry(
                 attempt,
                 delay_seconds=_PERSISTENCE_RETRY_DELAY_SECONDS,
@@ -1069,8 +1170,8 @@ def _save_transaction_with_retries(
         except MemoryError:
             raise
         except Exception as exc:
-            return exc
-    return None
+            return None, exc
+    raise RuntimeError("Fenced transaction save exhausted without a result")
 
 
 def _delete_transaction_with_retries(

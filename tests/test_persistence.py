@@ -10,7 +10,9 @@ import rpacore.persistence as persistence_module
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.persistence import (
+    TransactionFenceError,
     _delete_unbound_pending_transaction,
+    _save_queue_transaction_fenced,
     iter_transactions,
     list_transactions,
     load_transaction,
@@ -34,6 +36,52 @@ def lock_database(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, timeout=1)
     conn.execute("BEGIN EXCLUSIVE")
     return conn
+
+
+def transaction_storage_snapshot(db_path: str, transaction_id: str) -> dict[str, list[tuple]]:
+    """Return every persisted row owned by one transaction."""
+    conn = sqlite3.connect(db_path)
+    try:
+        skill_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM skills WHERE transaction_id = ? ORDER BY id",
+                (transaction_id,),
+            ).fetchall()
+        ]
+        placeholders = ", ".join("?" for _ in skill_ids)
+        exceptions = (
+            conn.execute(
+                f"SELECT * FROM exceptions WHERE skill_id IN ({placeholders}) ORDER BY id",
+                skill_ids,
+            ).fetchall()
+            if skill_ids
+            else []
+        )
+        return {
+            "transactions": conn.execute(
+                "SELECT * FROM transactions WHERE id = ?", (transaction_id,)
+            ).fetchall(),
+            "skills": conn.execute(
+                "SELECT * FROM skills WHERE transaction_id = ? ORDER BY id",
+                (transaction_id,),
+            ).fetchall(),
+            "exceptions": exceptions,
+            "history": conn.execute(
+                "SELECT * FROM transaction_history WHERE transaction_id = ? ORDER BY sequence",
+                (transaction_id,),
+            ).fetchall(),
+            "metadata": conn.execute(
+                "SELECT * FROM transaction_metadata WHERE transaction_id = ? ORDER BY key",
+                (transaction_id,),
+            ).fetchall(),
+            "artifacts": conn.execute(
+                "SELECT * FROM transaction_artifacts WHERE transaction_id = ? ORDER BY sequence",
+                (transaction_id,),
+            ).fetchall(),
+        }
+    finally:
+        conn.close()
 
 
 class TestPersistencePaths:
@@ -1184,6 +1232,168 @@ class TestSaveAndLoad:
         ]
 
 
+class TestQueueClaimFencing:
+    def test_stale_same_label_checkpoint_changes_no_transaction_rows(self, tmp_path) -> None:
+        from rpacore.queue import QueueItem, SqliteQueue
+
+        queue_db = str(tmp_path / "queue.db")
+        transaction_db = str(tmp_path / "transactions.db")
+        queue = SqliteQueue({"db_path": queue_db, "lease_timeout": 1})
+        queue.add(QueueItem(reference="fenced", payload={}))
+        stale = queue.next_item("shared-worker")
+        assert stale is not None
+        transaction = Transaction(
+            reference="fenced",
+            metadata={"source": "initial"},
+            artifacts=[Artifact(name="initial", path="initial.txt")],
+            skills=[Skill("step", 1)],
+        )
+        revision = _save_queue_transaction_fenced(
+            transaction,
+            db_path=transaction_db,
+            queue_db_path=queue_db,
+            queue_item_id=stale.id,
+            claimed_by=stale.claimed_by,
+            claim_token=stale.claim_token,
+            expected_revision=0,
+        )
+        assert revision == 1
+        queue.bind_transaction(
+            stale.id,
+            transaction.id,
+            claimed_by=stale.claimed_by,
+            claim_token=stale.claim_token,
+        )
+
+        conn = sqlite3.connect(queue_db)
+        try:
+            conn.execute(
+                "UPDATE queue_items SET claimed_at = datetime('now', '-10 seconds') "
+                "WHERE id = ?",
+                (stale.id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        current = queue.next_item("shared-worker")
+        assert current is not None
+        assert current.claim_token != stale.claim_token
+
+        transaction.state["stale"] = True
+        transaction.metadata = {"source": "stale"}
+        transaction.artifacts = [Artifact(name="stale", path="stale.txt")]
+        transaction.skills[0].status = Status.SUCCESSFUL
+        transaction.append_history(HistoryEvent.SKILL_SUCCEEDED, skill=transaction.skills[0])
+        before = transaction_storage_snapshot(transaction_db, transaction.id)
+
+        with pytest.raises(TransactionFenceError, match="claim is stale"):
+            _save_queue_transaction_fenced(
+                transaction,
+                db_path=transaction_db,
+                queue_db_path=queue_db,
+                queue_item_id=stale.id,
+                claimed_by=stale.claimed_by,
+                claim_token=stale.claim_token,
+                expected_revision=revision,
+            )
+
+        assert transaction_storage_snapshot(transaction_db, transaction.id) == before
+        assert _save_queue_transaction_fenced(
+            transaction,
+            db_path=transaction_db,
+            queue_db_path=queue_db,
+            queue_item_id=current.id,
+            claimed_by=current.claimed_by,
+            claim_token=current.claim_token,
+            expected_revision=revision,
+        ) == 2
+
+    def test_manual_save_advances_revision_and_fences_older_queue_snapshot(self, tmp_path) -> None:
+        from rpacore.queue import QueueItem, SqliteQueue
+
+        queue_db = str(tmp_path / "queue.db")
+        transaction_db = str(tmp_path / "transactions.db")
+        queue = SqliteQueue({"db_path": queue_db})
+        queue.add(QueueItem(reference="revision", payload={}))
+        claim = queue.next_item("worker")
+        assert claim is not None
+        transaction = Transaction(reference="revision", skills=[Skill("step", 1)])
+        revision = _save_queue_transaction_fenced(
+            transaction,
+            db_path=transaction_db,
+            queue_db_path=queue_db,
+            queue_item_id=claim.id,
+            claimed_by=claim.claimed_by,
+            claim_token=claim.claim_token,
+            expected_revision=0,
+        )
+        queue.bind_transaction(
+            claim.id,
+            transaction.id,
+            claimed_by=claim.claimed_by,
+            claim_token=claim.claim_token,
+        )
+
+        transaction.state["manual"] = True
+        save_transaction(transaction, transaction_db)
+        before = transaction_storage_snapshot(transaction_db, transaction.id)
+        transaction.state["stale"] = True
+
+        with pytest.raises(TransactionFenceError, match="revision 1 is stale"):
+            _save_queue_transaction_fenced(
+                transaction,
+                db_path=transaction_db,
+                queue_db_path=queue_db,
+                queue_item_id=claim.id,
+                claimed_by=claim.claimed_by,
+                claim_token=claim.claim_token,
+                expected_revision=revision,
+            )
+
+        assert transaction_storage_snapshot(transaction_db, transaction.id) == before
+
+    def test_child_write_failure_rolls_back_header_and_children(self, monkeypatch, tmp_path) -> None:
+        from rpacore.queue import QueueItem, SqliteQueue
+
+        queue_db = str(tmp_path / "queue.db")
+        transaction_db = str(tmp_path / "transactions.db")
+        queue = SqliteQueue({"db_path": queue_db})
+        queue.add(QueueItem(reference="rollback", payload={}))
+        claim = queue.next_item("worker")
+        assert claim is not None
+        transaction = Transaction(reference="rollback", skills=[Skill("step", 1)])
+        revision = _save_queue_transaction_fenced(
+            transaction,
+            db_path=transaction_db,
+            queue_db_path=queue_db,
+            queue_item_id=claim.id,
+            claimed_by=claim.claimed_by,
+            claim_token=claim.claim_token,
+            expected_revision=0,
+        )
+        before = transaction_storage_snapshot(transaction_db, transaction.id)
+        transaction.state["not-durable"] = True
+        real_write = persistence_module._write_transaction_rows
+
+        def write_then_fail(*args, **kwargs):
+            real_write(*args, **kwargs)
+            raise sqlite3.OperationalError("injected child write failure")
+
+        monkeypatch.setattr(persistence_module, "_write_transaction_rows", write_then_fail)
+        with pytest.raises(sqlite3.OperationalError, match="injected child write failure"):
+            _save_queue_transaction_fenced(
+                transaction,
+                db_path=transaction_db,
+                queue_db_path=queue_db,
+                queue_item_id=claim.id,
+                claimed_by=claim.claimed_by,
+                claim_token=claim.claim_token,
+                expected_revision=revision,
+            )
+
+        assert transaction_storage_snapshot(transaction_db, transaction.id) == before
+
+
 class TestCrashRecovery:
     def test_in_progress_skill_loaded_faithfully(self, db_path) -> None:
         skill = Skill("process", 1)
@@ -1428,7 +1638,7 @@ class TestSchemaMigration:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert version == 5
+        assert version == 6
 
     def test_transaction_and_queue_schema_versions_can_share_database(self, db_path) -> None:
         from rpacore.queue import QueueItem, SqliteQueue
@@ -1445,7 +1655,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 2), ("transactions", 5)]
+        assert rows == [("queue", 3), ("transactions", 6)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)
@@ -1456,13 +1666,13 @@ class TestSchemaMigration:
             )
             conn.execute(
                 "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
-                ("transactions", 6),
+                ("transactions", 7),
             )
             conn.commit()
         finally:
             conn.close()
 
-        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 6"):
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 7"):
             list_transactions(db_path)
 
     @pytest.mark.parametrize("readonly", [False, True])

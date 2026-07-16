@@ -113,14 +113,33 @@ One-off transaction lifecycle:
   engine outcome
 
 When `run_queue_loop()` is configured with `transaction_db_path`, queue items
-also retain a durable `transaction_id` binding. On the first claim, the runner
-builds the transaction, validates and seeds queue payload into transaction state,
-then validates transaction wiring and all durable data before opening the
-transaction database. Only a valid pending transaction is persisted and bound to
-the claimed queue item before skill execution begins. Deterministic validation
-failure terminally fails the queue item without creating or binding a durable
-transaction. The binding is guarded by the queue claim owner, so a worker that
-no longer owns the claim cannot attach a transaction.
+also retain a durable `transaction_id` binding. This mode requires the concrete
+`SqliteQueue`; a custom `QueueProvider` cannot promise one atomic transaction
+across RPA Core's SQLite queue and transaction rows. The runner creates or
+migrates transaction storage before claiming work so an old/future schema cannot
+strand a newly claimed item. On the first claim, it builds the transaction,
+seeds queue payload into transaction state, and validates transaction wiring and
+all durable data before writing a transaction row. Only a valid, unstarted
+pending transaction is persisted and bound before skill execution begins.
+Deterministic validation failure terminally fails the queue item without
+creating or binding a durable transaction row. The preflight database and
+current schema may already exist.
+
+Every claim has a fresh opaque `claim_token`; `claimed_by` remains a diagnostic
+worker label and is not a credential. Binding, renewal, completion, and failure
+require both the label and current token. A reclaimed item receives a different
+token even when the new worker uses the same label. Queue-run transaction
+checkpoints also require the token and the transaction's expected persistence
+revision. The queue guard, revision update, transaction header, skills,
+exceptions, history, metadata, and artifacts are committed in one SQLite
+transaction. A stale token or revision raises `TransactionFenceError` before
+child rows are changed, and any later write failure rolls the entire snapshot
+back.
+
+The token, revision, and queue-item binding are persistence-fencing records,
+not public `Transaction` attributes. `load_transaction()` returns the domain
+transaction snapshot; the runner owns the private fencing values needed to
+persist its next checkpoint safely.
 
 On a later queue retry, a bound item resumes the same persisted transaction with
 fresh executable skill instances from `build_transaction(item)`. Persisted state
@@ -135,14 +154,15 @@ resume fails terminally without creating a replacement. The existing binding
 and any durable record are retained for operator inspection and repair; the
 runner never deletes a transaction that has already been bound to a queue item.
 
-Initial transaction persistence and queue binding touch separate SQLite write
-domains. The runner persists the pending transaction first, then binds the queue
-item to that id with bounded retry for transient SQLite `locked` or `busy`
-errors. If binding still fails, the runner attempts to delete the unbound
-pending transaction before failing the queue item. If both binding and cleanup
-fail, the transaction row can remain in the transaction database without a queue
-item reference; this is logged as `transaction_initial_cleanup_error` with the
-queue item and transaction identifiers.
+Initial transaction persistence first validates the current queue token inside
+the same SQLite transaction that writes the pending transaction. Binding that
+new transaction id remains a second, token-guarded queue update with bounded
+retry for transient SQLite `locked` or `busy` errors. If binding still fails,
+the runner attempts to delete the unbound pending transaction before failing the
+queue item. If both binding and cleanup fail, the transaction row can remain in
+the transaction database without a queue item reference; this is logged as
+`transaction_initial_cleanup_error` with the queue item and transaction
+identifiers.
 
 Queue claims are leases, not ownership forever. `SqliteQueue` uses
 `lease_timeout` to decide when an `IN_PROGRESS` item is abandoned and may be
@@ -170,6 +190,11 @@ executing when the lease is lost cannot be safely terminated by RPA Core and may
 finish external side effects before the next checkpoint or final transition
 observes the loss. Queue delivery is therefore at least once; skills should be
 idempotent when they perform external side effects.
+
+Worker transitions never double as operator overrides. `force_complete()` and
+`force_fail()` are separately named administrative methods, require a non-empty
+reason, invalidate any active token, and append a durable `QueueAdminEvent`.
+Use `list_admin_events()` to inspect those overrides.
 
 ## Runner Failure Policy
 
@@ -388,7 +413,8 @@ multiple connections for normal persistence and queue operation.
 
 ## SQLite Journal Policy
 
-Queue databases use SQLite's rollback journal rather than WAL. This is a
+Queue databases, and transaction databases attached for queue checkpoints, use
+SQLite's rollback journal rather than WAL. This is a
 correctness-first policy for the stdlib SQLite runtimes supported by the
 `v0.1.x` line: SQLite documents a rare multi-connection WAL-reset corruption
 race in affected releases. RPA Core does not claim that a Python package can
@@ -400,7 +426,8 @@ runtime evidence. See SQLite's official
 Rollback journal permits concurrent workers through SQLite's normal locking;
 RPA Core keeps claim, heartbeat, checkpoint, and transition transactions short
 and retains bounded lock retries at the runner boundaries. Do not manually
-switch an active queue database to WAL.
+switch an active queue or queue-run transaction database to WAL. Fenced
+checkpoints reject either file when its journal mode is not `DELETE`.
 
 After compatibility checks pass, the rollback-journal policy is applied before
 schema migration. Journal mode is an independent persistent safety setting, not
@@ -419,14 +446,14 @@ The current transaction persistence component is recorded as:
 
 ```text
 component = "transactions"
-version   = 5
+version   = 6
 ```
 
 The SQLite queue records its own component version:
 
 ```text
 component = "queue"
-version   = 2
+version   = 3
 ```
 
 This lets transaction and queue tables safely coexist in one SQLite file if a
@@ -441,7 +468,7 @@ transaction schema and never migrates.
 ## Migrations
 
 Transaction schema migrations are explicit and sequential. The current latest
-transaction schema is version 5.
+transaction schema is version 6.
 
 Version 1 stores:
 
@@ -473,8 +500,13 @@ Version 5 adds:
 
 - transaction artifacts
 
+Version 6 adds:
+
+- monotonic transaction persistence revision
+- active queue item id and claim token for queue-run checkpoints
+
 Private-development databases created before component schema versions are still
-readable. When opened, they are migrated to transaction schema version 5 by
+readable. When opened, they are migrated to transaction schema version 6 by
 adding missing columns and recording the component version.
 
 Migration defaults must not invent execution history. Current legacy defaults
@@ -488,15 +520,27 @@ are deliberately limited:
 - missing history defaults to no history entries
 - missing metadata defaults to an empty object
 - missing artifacts default to an empty list
+- missing revision defaults to zero
+- missing queue item id and claim token default to empty strings
 
 Future persisted models must add fixture-based migration tests from the previous
 latest schema to the new latest schema.
 
 Queue migrations are also sequential: version 1 creates the queue item model;
-version 2 adds durable transaction binding and inspection indexes. Reopening a
-future queue schema with older `v0.1.1` code is unsafe because that release can
-rewrite the marker. Restore both code and database from the same pre-upgrade
-backup when rolling back; never point an older runtime at the newer live file.
+version 2 adds durable transaction binding and inspection indexes; version 3
+adds opaque claim tokens and the administrative override audit. Migration to
+version 3 invalidates legacy `IN_PROGRESS` leases by returning them to `PENDING`
+without discarding their transaction binding, so they must be reacquired with a
+token.
+
+Treat the queue-v3/transaction-v6 upgrade as offline: stop every worker, back up
+both database files together, upgrade and open both with the new runtime, then
+restart workers so pending items are reacquired. Old workers reject the newer
+schema on their next framework database operation, but the offline boundary is
+what closes the interval between migrating separate files. For rollback, stop
+workers and restore both code and database files from the same pre-upgrade
+backup; never edit version markers or point an older runtime at the newer live
+files.
 
 Cleanup of an initial transaction whose queue binding failed is owned by the
 persistence module. It will delete only a pending transaction with no history.
@@ -526,10 +570,13 @@ execute_transaction(transaction, transaction_db_path="rpacore.db")
 Its built-in SQLite checkpoint retries match the same short-lived `locked` or
 `busy` policy used by the queue runner. Other SQLite errors remain loud.
 
-The queue runner supplies `save_transaction()` as this checkpoint when
+The queue runner supplies its claim-and-revision-fenced SQLite checkpoint when
 `transaction_db_path` is configured. This means a process that exits after a
 skill succeeds leaves that skill status, durable state, timestamps, and history
-saved before downstream skills begin.
+saved before downstream skills begin. Public `save_transaction()` remains an
+unconditional non-queue API. If it is deliberately used on a queue-bound
+transaction, it advances the revision so an older runner snapshot fails closed
+instead of overwriting that manual save.
 
 Checkpoint failures prevent queue completion. If the failure happens after a
 successful, skipped, or terminal business-failed skill outcome, the runner marks

@@ -12,8 +12,17 @@ All notable user-facing changes are recorded here.
   SQLite checkpoint persistence and explicit `resource_scope` support.
 - Added `ConfigField` and `validate_config()` for immutable batch configuration
   specifications with dotted nested keys and plain-dictionary results.
+- Added reason-bearing `SqliteQueue.force_complete()` and `force_fail()`
+  administrative overrides with durable `QueueAdminEvent` inspection.
 
 ### Breaking
+
+- Queue claims now carry an opaque `claim_token`. Claimed-worker
+  `bind_transaction()`, `renew_lease()`, `complete()`, and `fail()` calls must
+  provide the current worker label and token; unguarded transitions were
+  replaced by separately named administrative methods. Durable
+  `run_queue_loop(transaction_db_path=...)` now requires `SqliteQueue` so claim
+  and transaction writes can be fenced in one SQLite transaction.
 
 - Renamed maintainer release validation interfaces from evidence/go-no-go
   wording to validation results and approval wording.
@@ -65,6 +74,11 @@ All notable user-facing changes are recorded here.
   resolve relative to their configuration file. Whitespace-only values and the
   SQLite-only `:memory:` sentinel, including whitespace-padded forms, are
   rejected as screenshot directories and durable database paths.
+- Prevented stale or same-label workers from renewing, binding, transitioning,
+  or checkpointing a reclaimed queue item by combining per-claim tokens with
+  transaction revisions. Fenced checkpoint failures leave transaction headers
+  and child rows unchanged, while legacy active leases are invalidated for
+  token-bearing reacquisition during schema migration.
 
 ## v0.1.1 - 2026-07-06
 

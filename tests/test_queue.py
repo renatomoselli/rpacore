@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import threading
 import time
 import sqlite3
@@ -31,6 +32,13 @@ def make_queue(tmp_path, **kwargs) -> SqliteQueue:
 
 def make_item(reference: str = "ref", payload: dict | None = None) -> QueueItem:
     return QueueItem(reference=reference, payload=payload or {})
+
+
+def claim_from_spawned_process(db_path: str, worker_id: str, results) -> None:
+    """Claim once in a Windows-spawn-compatible child process."""
+    queue = SqliteQueue({"db_path": db_path})
+    item = queue.next_item(worker_id)
+    results.put(None if item is None else (item.id, item.claim_token))
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +205,7 @@ class TestSqliteQueueCRUD:
         q = make_queue(tmp_path)
         q.add(make_item())
         item = q.next_item()
-        q.complete(item.id)
+        q.complete(item.id, claimed_by=item.claimed_by, claim_token=item.claim_token)
         stored = q.get_item(item.id)
         assert stored.status == QueueStatus.SUCCESSFUL
 
@@ -205,7 +213,7 @@ class TestSqliteQueueCRUD:
         q = make_queue(tmp_path, max_retries=2)
         q.add(make_item())
         item = q.next_item()
-        q.fail(item.id)
+        q.fail(item.id, claimed_by=item.claimed_by, claim_token=item.claim_token)
         retried = q.next_item()
         assert retried is not None
         assert retried.retry_count == 1
@@ -215,9 +223,9 @@ class TestSqliteQueueCRUD:
         q = make_queue(tmp_path, max_retries=1)
         q.add(make_item())
         item = q.next_item()
-        q.fail(item.id)   # retry_count → 1, still <= max
+        q.fail(item.id, claimed_by=item.claimed_by, claim_token=item.claim_token)
         item2 = q.next_item()
-        q.fail(item2.id)  # retry_count → 2, > max → FAILED
+        q.fail(item2.id, claimed_by=item2.claimed_by, claim_token=item2.claim_token)
         stored = q.get_item(item.id)
         assert stored.status == QueueStatus.FAILED
 
@@ -225,7 +233,12 @@ class TestSqliteQueueCRUD:
         q = make_queue(tmp_path, max_retries=3)
         q.add(make_item())
         item = q.next_item()
-        q.fail(item.id, retry=False)
+        q.fail(
+            item.id,
+            retry=False,
+            claimed_by=item.claimed_by,
+            claim_token=item.claim_token,
+        )
         stored = q.get_item(item.id)
         assert stored is not None
         assert stored.status == QueueStatus.FAILED
@@ -233,7 +246,12 @@ class TestSqliteQueueCRUD:
 
     def test_fail_unknown_id_is_noop(self, tmp_path):
         q = make_queue(tmp_path)
-        q.fail("nonexistent-id")  # should not raise
+        with pytest.raises(QueueLeaseLostError):
+            q.fail(
+                "nonexistent-id",
+                claimed_by="worker",
+                claim_token="missing-token",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -278,9 +296,18 @@ class TestSqliteQueueIntrospection:
         q.add(failed)
 
         claimed_success = q.next_item("worker")
-        q.complete(claimed_success.id, claimed_by="worker")
+        q.complete(
+            claimed_success.id,
+            claimed_by="worker",
+            claim_token=claimed_success.claim_token,
+        )
         claimed_failed = q.next_item("worker")
-        q.fail(claimed_failed.id, retry=False, claimed_by="worker")
+        q.fail(
+            claimed_failed.id,
+            retry=False,
+            claimed_by="worker",
+            claim_token=claimed_failed.claim_token,
+        )
 
         assert [item.reference for item in q.list_items(statuses=[QueueStatus.PENDING])] == ["failed"]
         assert [item.reference for item in q.list_items(statuses=[QueueStatus.SUCCESSFUL])] == ["pending"]
@@ -365,7 +392,7 @@ class TestSqliteQueueIntrospection:
         q.add(first)
         claimed = q.next_item("worker")
         assert claimed is not None
-        q.complete(claimed.id, claimed_by="worker")
+        q.complete(claimed.id, claimed_by="worker", claim_token=claimed.claim_token)
 
         assert q.add_once(second) is True
 
@@ -380,7 +407,7 @@ class TestSqliteQueueIntrospection:
         q.add(make_item("invoice-1"))
         claimed = q.next_item("worker")
         assert claimed is not None
-        q.complete(claimed.id, claimed_by="worker")
+        q.complete(claimed.id, claimed_by="worker", claim_token=claimed.claim_token)
 
         inserted = q.add_once(
             make_item("invoice-1"),
@@ -395,7 +422,7 @@ class TestSqliteQueueIntrospection:
         q.add(make_item("invoice-1"))
         claimed = q.next_item("worker")
         assert claimed is not None
-        q.complete(claimed.id, claimed_by="worker")
+        q.complete(claimed.id, claimed_by="worker", claim_token=claimed.claim_token)
 
         inserted = q.add_once(make_item("invoice-1"), active_statuses=None)
 
@@ -431,7 +458,7 @@ class TestSqliteQueueIntrospection:
         finally:
             conn.close()
 
-        assert version == 2
+        assert version == 3
 
     def test_queue_uses_rollback_journal(self, tmp_path):
         queue = make_queue(tmp_path)
@@ -541,7 +568,12 @@ class TestSqliteQueueIntrospection:
         item = q.next_item("worker")
         assert item is not None
 
-        q.bind_transaction(item.id, "tx-001", claimed_by="worker")
+        q.bind_transaction(
+            item.id,
+            "tx-001",
+            claimed_by="worker",
+            claim_token=item.claim_token,
+        )
 
         stored = q.get_item(item.id)
         assert stored is not None
@@ -554,7 +586,12 @@ class TestSqliteQueueIntrospection:
         assert item is not None
 
         with pytest.raises(QueueLeaseLostError, match="no longer claimed"):
-            q.bind_transaction(item.id, "tx-001", claimed_by="other-worker")
+            q.bind_transaction(
+                item.id,
+                "tx-001",
+                claimed_by="other-worker",
+                claim_token=item.claim_token,
+            )
 
         stored = q.get_item(item.id)
         assert stored is not None
@@ -614,9 +651,55 @@ class TestSqliteQueueIntrospection:
 
         stored = q.get_item("old")
         assert "transaction_id" in columns
-        assert version == 2
+        assert version == 3
         assert stored is not None
         assert stored.transaction_id == ""
+
+    def test_v2_migration_invalidates_credentialless_active_lease(self, tmp_path):
+        db_path = str(tmp_path / "queue.db")
+        created_at = datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE rpacore_schema_versions (
+                    component TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL
+                );
+                CREATE TABLE queue_items (
+                    id TEXT PRIMARY KEY,
+                    reference TEXT NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    claimed_by TEXT NOT NULL DEFAULT '',
+                    claimed_at TEXT,
+                    transaction_id TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO rpacore_schema_versions VALUES ('queue', 2);
+                """
+            )
+            conn.execute(
+                "INSERT INTO queue_items VALUES (?, ?, '{}', 'in_progress', 0, ?, ?, ?, ?)",
+                ("legacy-active", "legacy", created_at, "old-worker", created_at, "tx-1"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        queue = SqliteQueue({"db_path": db_path})
+        migrated = queue.get_item("legacy-active")
+        assert migrated is not None
+        assert migrated.status is QueueStatus.PENDING
+        assert migrated.claimed_by == ""
+        assert migrated.claim_token == ""
+        assert migrated.transaction_id == "tx-1"
+
+        reacquired = queue.next_item("new-worker")
+        assert reacquired is not None
+        assert reacquired.claim_token
+        assert reacquired.transaction_id == "tx-1"
 
     def test_renew_lease_updates_claimed_at_for_claim_owner(self, tmp_path):
         q = make_queue(tmp_path)
@@ -636,7 +719,7 @@ class TestSqliteQueueIntrospection:
         finally:
             conn.close()
 
-        q.renew_lease(item.id, claimed_by="worker")
+        q.renew_lease(item.id, claimed_by="worker", claim_token=item.claim_token)
 
         stored = q.get_item(item.id)
         assert stored is not None
@@ -650,7 +733,11 @@ class TestSqliteQueueIntrospection:
         assert item is not None
 
         with pytest.raises(QueueLeaseLostError, match="no longer claimed"):
-            q.renew_lease(item.id, claimed_by="other-worker")
+            q.renew_lease(
+                item.id,
+                claimed_by="other-worker",
+                claim_token=item.claim_token,
+            )
 
     def test_add_recreates_schema_if_database_file_is_deleted_after_init(self, tmp_path):
         q = make_queue(tmp_path)
@@ -677,7 +764,7 @@ class TestSqliteQueueFIFO:
         for expected in ["first", "second", "third"]:
             item = q.next_item()
             assert item.reference == expected
-            q.complete(item.id)
+            q.complete(item.id, claimed_by=item.claimed_by, claim_token=item.claim_token)
 
 
 # ---------------------------------------------------------------------------
@@ -722,6 +809,29 @@ class TestSqliteQueueAtomicClaim:
         finally:
             lock_conn.rollback()
             lock_conn.close()
+
+    def test_spawned_processes_cannot_claim_the_same_item(self, tmp_path):
+        queue = make_queue(tmp_path)
+        queue.add(make_item("spawn-race"))
+        context = multiprocessing.get_context("spawn")
+        results = context.Queue()
+        workers = [
+            context.Process(
+                target=claim_from_spawned_process,
+                args=(queue.db_path, f"worker-{index}", results),
+            )
+            for index in range(2)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=10)
+            assert worker.exitcode == 0
+
+        claims = [results.get(timeout=2) for _ in workers]
+        claimed = [claim for claim in claims if claim is not None]
+        assert len(claimed) == 1
+        assert claimed[0][1]
 
 
 # ---------------------------------------------------------------------------
@@ -769,7 +879,11 @@ class TestSqliteQueueStaleReclaim:
         assert reclaimed is not None
 
         with pytest.raises(QueueLeaseLostError, match="no longer claimed"):
-            q.complete(item.id, claimed_by="worker-a")
+            q.complete(
+                item.id,
+                claimed_by="worker-a",
+                claim_token=item.claim_token,
+            )
 
         stored = q.get_item(item.id)
         assert stored is not None
@@ -795,13 +909,97 @@ class TestSqliteQueueStaleReclaim:
         assert reclaimed is not None
 
         with pytest.raises(QueueLeaseLostError, match="no longer claimed"):
-            q.fail(item.id, claimed_by="worker-a")
+            q.fail(
+                item.id,
+                claimed_by="worker-a",
+                claim_token=item.claim_token,
+            )
 
         stored = q.get_item(item.id)
         assert stored is not None
         assert stored.status is QueueStatus.IN_PROGRESS
         assert stored.retry_count == 0
         assert stored.claimed_by == "worker-b"
+
+    def test_same_worker_label_cannot_reuse_stale_claim_credential(self, tmp_path):
+        q = make_queue(tmp_path, lease_timeout=1)
+        q.add(make_item("same-label"))
+        stale = q.next_item("shared-worker")
+        assert stale is not None
+        assert stale.claim_token
+
+        conn = sqlite3.connect(q.db_path)
+        try:
+            conn.execute(
+                "UPDATE queue_items SET claimed_at = datetime('now', '-10 seconds') "
+                "WHERE id = ?",
+                (stale.id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        current = q.next_item("shared-worker")
+        assert current is not None
+        assert current.id == stale.id
+        assert current.claim_token
+        assert current.claim_token != stale.claim_token
+
+        stale_actions = (
+            lambda: q.renew_lease(
+                stale.id,
+                claimed_by=stale.claimed_by,
+                claim_token=stale.claim_token,
+            ),
+            lambda: q.bind_transaction(
+                stale.id,
+                "stale-transaction",
+                claimed_by=stale.claimed_by,
+                claim_token=stale.claim_token,
+            ),
+            lambda: q.complete(
+                stale.id,
+                claimed_by=stale.claimed_by,
+                claim_token=stale.claim_token,
+            ),
+            lambda: q.fail(
+                stale.id,
+                claimed_by=stale.claimed_by,
+                claim_token=stale.claim_token,
+            ),
+        )
+        for action in stale_actions:
+            with pytest.raises(QueueLeaseLostError, match="no longer claimed"):
+                action()
+
+        stored = q.get_item(current.id)
+        assert stored is not None
+        assert stored.status is QueueStatus.IN_PROGRESS
+        assert stored.claim_token == current.claim_token
+        assert stored.transaction_id == ""
+
+    def test_administrative_override_is_named_reasoned_and_audited(self, tmp_path):
+        q = make_queue(tmp_path)
+        item = make_item("operator")
+        q.add(item)
+        claimed = q.next_item("worker")
+        assert claimed is not None
+
+        q.force_complete(item.id, reason="operator verified external completion")
+
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.status is QueueStatus.SUCCESSFUL
+        assert stored.claim_token == ""
+        events = q.list_admin_events(item.id)
+        assert len(events) == 1
+        assert events[0].action == "force_complete"
+        assert events[0].reason == "operator verified external completion"
+        assert events[0].previous_status is QueueStatus.IN_PROGRESS
+        assert events[0].new_status is QueueStatus.SUCCESSFUL
+
+        with pytest.raises(ValueError, match="queue.admin.reason"):
+            q.force_fail(item.id, reason="")
 
 
 # ---------------------------------------------------------------------------

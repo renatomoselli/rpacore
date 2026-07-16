@@ -39,7 +39,7 @@ class EmptyQueue:
     def next_item(self, worker_id: str = "") -> None:
         return None
 
-    def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
+    def complete(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
         raise AssertionError("empty queue has no item to complete")
 
     def fail(
@@ -47,7 +47,8 @@ class EmptyQueue:
         item_id: str,
         *,
         retry: bool = True,
-        claimed_by: str | None = None,
+        claimed_by: str,
+        claim_token: str,
     ) -> None:
         raise AssertionError("empty queue has no item to fail")
 
@@ -57,10 +58,11 @@ class EmptyQueue:
         transaction_id: str,
         *,
         claimed_by: str,
+        claim_token: str,
     ) -> None:
         raise AssertionError("empty queue has no item to bind")
 
-    def renew_lease(self, item_id: str, *, claimed_by: str) -> None:
+    def renew_lease(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
         raise AssertionError("empty queue has no lease to renew")
 
 
@@ -81,10 +83,12 @@ class OneItemQueue:
                 "reference": "ref-001",
                 "payload": {},
                 "claimed_by": worker_id,
+                "claim_token": "test-token",
+                "transaction_id": "",
             },
         )()
 
-    def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
+    def complete(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
         raise AssertionError("test should not complete")
 
     def fail(
@@ -92,7 +96,8 @@ class OneItemQueue:
         item_id: str,
         *,
         retry: bool = True,
-        claimed_by: str | None = None,
+        claimed_by: str,
+        claim_token: str,
     ) -> None:
         raise AssertionError("suppressed exception should skip failure transition")
 
@@ -102,10 +107,11 @@ class OneItemQueue:
         transaction_id: str,
         *,
         claimed_by: str,
+        claim_token: str,
     ) -> None:
         pass
 
-    def renew_lease(self, item_id: str, *, claimed_by: str) -> None:
+    def renew_lease(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
         pass
 
 

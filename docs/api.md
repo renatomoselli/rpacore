@@ -40,6 +40,7 @@ one-off runs that should persist strict SQLite checkpoints. Use raw
 | `BusinessException` | Expected business-rule failure. | Terminal for that skill unless user data or code changes. Downstream skills continue unless `stop=True`. |
 | `SystemException` | Technical failure such as file, network, or service errors. | Retryable by `Engine(max_retries=...)`. |
 | `ExecutionValidationError` | Invalid transaction wiring or invalid durable state. | Not retryable; fix code or persisted state. |
+| `TransactionFenceError` | A durable queue checkpoint has a stale claim token or transaction revision. | Not retryable by that worker; stop and reacquire the queue item. |
 
 Unhandled exceptions from skill code are recorded as system failures.
 `MemoryError` is not masked by checkpoint errors.
@@ -48,7 +49,7 @@ Unhandled exceptions from skill code are recorded as system failures.
 
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
-| `save_transaction(transaction, db_path)` | Validate and save one transaction to SQLite. | Invalid wiring or durable data fails before the database is opened; valid input creates or migrates the database and writes transaction rows. |
+| `save_transaction(transaction, db_path)` | Validate and unconditionally save one non-queue transaction to SQLite. | Invalid wiring or durable data fails before the database is opened; valid input creates or migrates the database, writes transaction rows, and advances its persistence revision. Queue runners use a fenced internal checkpoint instead. |
 | `load_transaction(transaction_id, db_path, readonly=False)` | Load one transaction from SQLite. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite and preserves persisted status values; default mode can migrate older schemas. |
 | `list_transactions(db_path, readonly=False)` | List persisted transactions. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite; default mode can migrate older schemas. A selected transaction removed by concurrent cleanup before deferred load is omitted; other load failures propagate. |
 | `resume_transaction(transaction_id, skills, db_path=...)` | Load, validate, and prepare a persisted transaction for retry. | Mutates in-memory statuses only after validation, reattaches executable skills, preserves history-proven skips caused by a stopping business failure, and appends resume history when needed. |
@@ -112,8 +113,8 @@ are additive within v1; strict consumers must allow them.
 
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
-| `QueueItem`, `QueueStatus`, `QueueLeaseLostError`, `QueueProvider`, `SqliteQueue` | Queue item model, statuses, provider contract, and SQLite implementation. | `SqliteQueue` creates/migrates and mutates SQLite queue state. |
-| `QueueRunSummary`, `run_queue_loop` | Process claimed queue items through user factories and `Engine`. Fatal `MemoryError`, `KeyboardInterrupt`, and `SystemExit` signals propagate after deterministic cleanup. | Mutates queue and transaction SQLite databases; renews leases; checkpoints transactions when `transaction_db_path` is configured. Every post-claim exit stops and joins its lease heartbeat. |
+| `QueueItem`, `QueueStatus`, `QueueLeaseLostError`, `QueueAdminEvent`, `QueueProvider`, `SqliteQueue` | Queue item model, statuses, claim-loss error, audited operator overrides, provider contract, and SQLite implementation. | `SqliteQueue` creates/migrates and mutates SQLite queue state. Every claim receives an opaque `claim_token`; claimed-worker mutations require the current token. `force_complete()` and `force_fail()` require a reason and append an inspectable admin event. |
+| `QueueRunSummary`, `run_queue_loop` | Process claimed queue items through user factories and `Engine`. Fatal `MemoryError`, `KeyboardInterrupt`, and `SystemExit` signals propagate after deterministic cleanup. | Mutates queue and transaction SQLite databases; renews leases; checkpoints transactions when `transaction_db_path` is configured. Durable queue checkpoints require `SqliteQueue` and atomically validate its claim token plus transaction revision. Every post-claim exit stops and joins its lease heartbeat. |
 
 ## Manifest and Project Entrypoints
 

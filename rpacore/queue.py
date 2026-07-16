@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import socket
 import sqlite3
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -35,6 +36,19 @@ class QueueLeaseLostError(RuntimeError):
     """Raised when a worker no longer owns an in-progress queue item lease."""
 
 
+@dataclass(frozen=True)
+class QueueAdminEvent:
+    """An audited administrative queue-state override."""
+
+    sequence: int
+    item_id: str
+    action: str
+    reason: str
+    previous_status: QueueStatus
+    new_status: QueueStatus
+    created_at: datetime
+
+
 @dataclass
 class QueueItem:
     """A single work item in the queue."""
@@ -47,6 +61,7 @@ class QueueItem:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     claimed_by: str = ""
     claimed_at: datetime | None = None
+    claim_token: str = ""
     transaction_id: str = ""
 
 
@@ -56,10 +71,14 @@ class QueueProvider(Protocol):
 
     def add(self, item: QueueItem) -> None: ...
     def next_item(self, worker_id: str = "") -> QueueItem | None: ...
-    def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None: ...
-    def renew_lease(self, item_id: str, *, claimed_by: str) -> None: ...
-    def complete(self, item_id: str, *, claimed_by: str | None = None) -> None: ...
-    def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None: ...
+    def bind_transaction(
+        self, item_id: str, transaction_id: str, *, claimed_by: str, claim_token: str
+    ) -> None: ...
+    def renew_lease(self, item_id: str, *, claimed_by: str, claim_token: str) -> None: ...
+    def complete(self, item_id: str, *, claimed_by: str, claim_token: str) -> None: ...
+    def fail(
+        self, item_id: str, *, retry: bool = True, claimed_by: str, claim_token: str
+    ) -> None: ...
 
 
 _DEFAULT_DB_PATH = "queue.db"
@@ -136,6 +155,37 @@ def _migrate_queue_to_v2(conn: sqlite3.Connection) -> None:
     _record_queue_schema_version(conn, 2)
 
 
+def _migrate_queue_to_v3(conn: sqlite3.Connection) -> None:
+    """Add per-attempt claim credentials and audited operator overrides.
+
+    A pre-v3 in-progress row has no credential that can distinguish its current
+    worker from a later worker using the same label. Invalidate those leases so
+    they must be reacquired with a token before any further mutation.
+    """
+    _ensure_column(conn, "queue_items", "claim_token", "claim_token TEXT NOT NULL DEFAULT ''")
+    conn.execute(
+        "UPDATE queue_items SET status = 'pending', claimed_by = '', claimed_at = NULL "
+        "WHERE status = 'in_progress'"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS queue_admin_events (
+            sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id         TEXT NOT NULL,
+            action          TEXT NOT NULL,
+            reason          TEXT NOT NULL,
+            previous_status TEXT NOT NULL,
+            new_status      TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            FOREIGN KEY (item_id) REFERENCES queue_items(id)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_queue_admin_events_item_sequence "
+        "ON queue_admin_events (item_id, sequence)"
+    )
+    _record_queue_schema_version(conn, 3)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run sequential queue migrations after rejecting future schemas."""
     with conn:
@@ -152,6 +202,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 2:
             _migrate_queue_to_v2(conn)
             current_version = 2
+        if current_version < 3:
+            _migrate_queue_to_v3(conn)
+            current_version = 3
         if current_version != _QUEUE_SCHEMA_VERSION:
             raise RuntimeError(
                 f"Unsupported queue schema version {current_version}; "
@@ -180,6 +233,7 @@ def _row_to_item(row: sqlite3.Row, *, payload: dict[str, object] | None = None) 
         created_at=datetime.fromisoformat(row["created_at"]),
         claimed_by=row["claimed_by"],
         claimed_at=claimed_at,
+        claim_token=row["claim_token"],
         transaction_id=row["transaction_id"],
     )
 
@@ -219,8 +273,8 @@ def _insert_item(conn: sqlite3.Connection, item: QueueItem) -> None:
     validate_json_object(item.payload, path="queue item payload")
     conn.execute(
         "INSERT INTO queue_items "
-        "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at, transaction_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at, "
+        "claim_token, transaction_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             item.id,
             item.reference,
@@ -230,6 +284,7 @@ def _insert_item(conn: sqlite3.Connection, item: QueueItem) -> None:
             item.created_at.isoformat(),
             item.claimed_by,
             item.claimed_at.isoformat() if item.claimed_at else None,
+            item.claim_token,
             item.transaction_id,
         ),
     )
@@ -426,7 +481,8 @@ class SqliteQueue:
             conn.execute("BEGIN IMMEDIATE")
             transaction_started = True
             conn.execute(
-                "UPDATE queue_items SET status = 'pending', claimed_by = '', claimed_at = NULL "
+                "UPDATE queue_items SET status = 'pending', claimed_by = '', claimed_at = NULL, "
+                "claim_token = '' "
                 "WHERE status = 'in_progress' "
                 "AND claimed_at IS NOT NULL "
                 "AND (CAST(strftime('%s', ?) AS INTEGER) - CAST(strftime('%s', claimed_at) AS INTEGER)) > ?",
@@ -447,13 +503,15 @@ class SqliteQueue:
 
                 payload = _load_payload(row["payload"])
                 now = datetime.now(timezone.utc)
+                claim_token = uuid.uuid4().hex
 
                 conn.execute("BEGIN IMMEDIATE")
                 transaction_started = True
                 result = conn.execute(
-                    "UPDATE queue_items SET status = 'in_progress', claimed_by = ?, claimed_at = ? "
+                    "UPDATE queue_items SET status = 'in_progress', claimed_by = ?, claimed_at = ?, "
+                    "claim_token = ? "
                     "WHERE id = ? AND status = 'pending'",
-                    (worker_id, now.isoformat(), row["id"]),
+                    (worker_id, now.isoformat(), claim_token, row["id"]),
                 )
                 if result.rowcount != 1:
                     conn.execute("COMMIT")
@@ -473,7 +531,14 @@ class SqliteQueue:
         finally:
             conn.close()
 
-    def bind_transaction(self, item_id: str, transaction_id: str, *, claimed_by: str) -> None:
+    def bind_transaction(
+        self,
+        item_id: str,
+        transaction_id: str,
+        *,
+        claimed_by: str,
+        claim_token: str,
+    ) -> None:
         """Bind a persisted transaction id to the currently claimed queue item."""
         conn = _connect(self.db_path)
         try:
@@ -481,8 +546,9 @@ class SqliteQueue:
                 _ensure_schema(conn)
                 result = conn.execute(
                     "UPDATE queue_items SET transaction_id = ? "
-                    "WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
-                    (transaction_id, item_id, claimed_by),
+                    "WHERE id = ? AND status = 'in_progress' AND claimed_by = ? "
+                    "AND claim_token = ? AND claim_token != ''",
+                    (transaction_id, item_id, claimed_by, claim_token),
                 )
                 if result.rowcount != 1:
                     raise QueueLeaseLostError(
@@ -491,7 +557,7 @@ class SqliteQueue:
         finally:
             conn.close()
 
-    def renew_lease(self, item_id: str, *, claimed_by: str) -> None:
+    def renew_lease(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
         """Extend the currently claimed queue item lease for its owner."""
         now = datetime.now(timezone.utc)
         conn = _connect(self.db_path)
@@ -500,8 +566,9 @@ class SqliteQueue:
                 _ensure_schema(conn)
                 result = conn.execute(
                     "UPDATE queue_items SET claimed_at = ? "
-                    "WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
-                    (now.isoformat(), item_id, claimed_by),
+                    "WHERE id = ? AND status = 'in_progress' AND claimed_by = ? "
+                    "AND claim_token = ? AND claim_token != ''",
+                    (now.isoformat(), item_id, claimed_by, claim_token),
                 )
                 if result.rowcount != 1:
                     raise QueueLeaseLostError(
@@ -510,83 +577,147 @@ class SqliteQueue:
         finally:
             conn.close()
 
-    def complete(self, item_id: str, *, claimed_by: str | None = None) -> None:
-        """Mark an item as successfully processed."""
+    def complete(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
+        """Mark an item successful when the supplied claim is still current."""
         conn = _connect(self.db_path)
         try:
             with conn:
                 _ensure_schema(conn)
-                if claimed_by is None:
-                    conn.execute(
-                        "UPDATE queue_items SET status = 'successful', claimed_at = NULL "
-                        "WHERE id = ?",
-                        (item_id,),
+                result = conn.execute(
+                    "UPDATE queue_items SET status = 'successful', "
+                    "claimed_at = NULL, claim_token = '' "
+                    "WHERE id = ? AND status = 'in_progress' AND claimed_by = ? "
+                    "AND claim_token = ? AND claim_token != ''",
+                    (item_id, claimed_by, claim_token),
+                )
+                if result.rowcount != 1:
+                    raise QueueLeaseLostError(
+                        f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                     )
-                else:
-                    result = conn.execute(
-                        "UPDATE queue_items SET status = 'successful', claimed_at = NULL "
-                        "WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
-                        (item_id, claimed_by),
-                    )
-                    if result.rowcount != 1:
-                        raise QueueLeaseLostError(
-                            f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
-                        )
         finally:
             conn.close()
 
-    def fail(self, item_id: str, *, retry: bool = True, claimed_by: str | None = None) -> None:
+    def fail(
+        self,
+        item_id: str,
+        *,
+        retry: bool = True,
+        claimed_by: str,
+        claim_token: str,
+    ) -> None:
         """Increment retry_count and mark the item retriable or terminally failed."""
         conn = _connect(self.db_path)
         try:
             with conn:
                 _ensure_schema(conn)
-                if claimed_by is None:
-                    row = conn.execute(
-                        "SELECT retry_count FROM queue_items WHERE id = ?", (item_id,)
-                    ).fetchone()
-                else:
-                    row = conn.execute(
-                        "SELECT retry_count FROM queue_items "
-                        "WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
-                        (item_id, claimed_by),
-                    ).fetchone()
+                row = conn.execute(
+                    "SELECT retry_count FROM queue_items "
+                    "WHERE id = ? AND status = 'in_progress' AND claimed_by = ? "
+                    "AND claim_token = ? AND claim_token != ''",
+                    (item_id, claimed_by, claim_token),
+                ).fetchone()
                 if row is None:
-                    if claimed_by is not None:
-                        raise QueueLeaseLostError(
-                            f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
-                        )
-                    return
-                new_count = row["retry_count"] + 1
-                if retry and new_count <= self.max_retries:
-                    if claimed_by is None:
-                        result = conn.execute(
-                            "UPDATE queue_items SET status = 'pending', retry_count = ?, "
-                            "claimed_at = NULL WHERE id = ?",
-                            (new_count, item_id),
-                        )
-                    else:
-                        result = conn.execute(
-                            "UPDATE queue_items SET status = 'pending', retry_count = ?, "
-                            "claimed_at = NULL WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
-                            (new_count, item_id, claimed_by),
-                        )
-                else:
-                    if claimed_by is None:
-                        result = conn.execute(
-                            "UPDATE queue_items SET status = 'failed', retry_count = ?, "
-                            "claimed_at = NULL WHERE id = ?",
-                            (new_count, item_id),
-                        )
-                    else:
-                        result = conn.execute(
-                            "UPDATE queue_items SET status = 'failed', retry_count = ?, "
-                            "claimed_at = NULL WHERE id = ? AND status = 'in_progress' AND claimed_by = ?",
-                            (new_count, item_id, claimed_by),
-                        )
-                if claimed_by is not None and result.rowcount != 1:
                     raise QueueLeaseLostError(
                         f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                     )
+                new_count = row["retry_count"] + 1
+                new_status = "pending" if retry and new_count <= self.max_retries else "failed"
+                next_claimed_by = "" if new_status == "pending" else claimed_by
+                result = conn.execute(
+                    "UPDATE queue_items SET status = ?, retry_count = ?, claimed_by = ?, "
+                    "claimed_at = NULL, claim_token = '' "
+                    "WHERE id = ? AND status = 'in_progress' AND claimed_by = ? "
+                    "AND claim_token = ? AND claim_token != ''",
+                    (new_status, new_count, next_claimed_by, item_id, claimed_by, claim_token),
+                )
+                if result.rowcount != 1:
+                    raise QueueLeaseLostError(
+                        f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
+                    )
+        finally:
+            conn.close()
+
+    def force_complete(self, item_id: str, *, reason: str) -> None:
+        """Administratively mark an item successful and record the reason."""
+        self._force_transition(item_id, QueueStatus.SUCCESSFUL, reason=reason, retry=False)
+
+    def force_fail(self, item_id: str, *, reason: str, retry: bool = False) -> None:
+        """Administratively fail or requeue an item and record the reason."""
+        self._force_transition(item_id, QueueStatus.FAILED, reason=reason, retry=retry)
+
+    def _force_transition(
+        self,
+        item_id: str,
+        requested_status: QueueStatus,
+        *,
+        reason: str,
+        retry: bool,
+    ) -> None:
+        if not isinstance(reason, str) or not reason.strip():
+            raise value_error("queue.admin.reason", "non-empty str", reason)
+        now = datetime.now(timezone.utc)
+        conn = _connect(self.db_path)
+        try:
+            with conn:
+                _ensure_schema(conn)
+                row = conn.execute(
+                    "SELECT status, retry_count FROM queue_items WHERE id = ?", (item_id,)
+                ).fetchone()
+                if row is None:
+                    raise KeyError(f"Queue item not found: {item_id!r}")
+                retry_count = int(row["retry_count"])
+                new_status = requested_status
+                if requested_status == QueueStatus.FAILED:
+                    retry_count += 1
+                    if retry and retry_count <= self.max_retries:
+                        new_status = QueueStatus.PENDING
+                conn.execute(
+                    "UPDATE queue_items SET status = ?, retry_count = ?, claimed_by = '', "
+                    "claimed_at = NULL, claim_token = '' WHERE id = ?",
+                    (new_status, retry_count, item_id),
+                )
+                conn.execute(
+                    "INSERT INTO queue_admin_events "
+                    "(item_id, action, reason, previous_status, new_status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        item_id,
+                        "force_complete" if requested_status == QueueStatus.SUCCESSFUL else "force_fail",
+                        reason.strip(),
+                        row["status"],
+                        new_status,
+                        now.isoformat(),
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def list_admin_events(self, item_id: str | None = None) -> list[QueueAdminEvent]:
+        """Return administrative overrides in durable sequence order."""
+        conn = _connect(self.db_path)
+        try:
+            with conn:
+                _ensure_schema(conn)
+            if item_id is None:
+                rows = conn.execute(
+                    "SELECT * FROM queue_admin_events ORDER BY sequence"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM queue_admin_events WHERE item_id = ? ORDER BY sequence",
+                    (item_id,),
+                ).fetchall()
+            return [
+                QueueAdminEvent(
+                    sequence=row["sequence"],
+                    item_id=row["item_id"],
+                    action=row["action"],
+                    reason=row["reason"],
+                    previous_status=QueueStatus(row["previous_status"]),
+                    new_status=QueueStatus(row["new_status"]),
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in rows
+            ]
         finally:
             conn.close()
