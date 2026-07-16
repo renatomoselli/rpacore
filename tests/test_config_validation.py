@@ -243,6 +243,77 @@ class TestValidateConfig:
                 (ConfigField("max_retries", int, required=False, default="3"),),
             )
 
+    def test_missing_optional_without_default_omits_result_key(self) -> None:
+        values = validate_config(
+            {},
+            (ConfigField("label", str, required=False),),
+        )
+
+        assert values == {}
+
+    def test_explicit_none_default_is_returned_and_validated(self) -> None:
+        values = validate_config(
+            {},
+            (ConfigField("label", (str, type(None)), required=False, default=None),),
+        )
+
+        assert values == {"label": None}
+
+    def test_mutable_default_is_independent_from_source_and_each_result(self) -> None:
+        source_default = {"labels": ["new"]}
+        field = ConfigField("metadata", dict, required=False, default=source_default)
+        source_default["labels"].append("caller-mutation")
+        field.default["labels"].append("declaration-mutation")  # type: ignore[index]
+
+        first = validate_config({}, (field,))
+        first["metadata"]["labels"].append("result-mutation")
+        second = validate_config({}, (field,))
+
+        assert second == {"metadata": {"labels": ["new"]}}
+
+    def test_one_shot_choices_are_frozen_for_reuse(self) -> None:
+        choices = (value for value in ("quiet", "normal"))
+        field = ConfigField("mode", str, choices=choices)
+
+        assert field.choices == ("quiet", "normal")
+        assert validate_config({"mode": "quiet"}, (field,)) == {"mode": "quiet"}
+        assert validate_config({"mode": "normal"}, (field,)) == {"mode": "normal"}
+
+    @pytest.mark.parametrize("choices", ["quiet", 1, ()])
+    def test_invalid_choices_declaration_is_rejected(self, choices: object) -> None:
+        with pytest.raises((TypeError, ValueError), match="choices must"):
+            ConfigField("mode", str, choices=choices)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        "expected_type",
+        [(), (int, "str"), [int]],
+    )
+    def test_invalid_expected_type_declaration_is_rejected(self, expected_type: object) -> None:
+        with pytest.raises(TypeError, match="expected_type must be a type or non-empty tuple"):
+            ConfigField("timeout", expected_type)  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("name, value", [("required", "yes"), ("allow_empty", 1)])
+    def test_non_boolean_declaration_flags_are_rejected(self, name: str, value: object) -> None:
+        with pytest.raises(TypeError, match=f"{name} must be bool"):
+            ConfigField("timeout", int, **{name: value})  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("key", [1, "   ", "queue. "])
+    def test_invalid_field_key_type_or_whitespace_is_rejected(self, key: object) -> None:
+        with pytest.raises((TypeError, ValueError), match="non-empty dotted key"):
+            ConfigField(key, int)  # type: ignore[arg-type]
+
+    def test_invalid_declaration_bounds_and_defaults_fail_before_validation(self) -> None:
+        with pytest.raises(TypeError, match="min_value expected int"):
+            ConfigField("timeout", int, min_value="1")
+        with pytest.raises(ValueError, match="min_value must be <= max_value"):
+            ConfigField("timeout", int, min_value=10, max_value=1)
+        with pytest.raises(TypeError, match="timeout expected int"):
+            ConfigField("timeout", int, required=False, default="30")
+
+    def test_mutable_default_must_be_json_safe(self) -> None:
+        with pytest.raises(TypeError, match="default must be JSON-safe"):
+            ConfigField("values", set, required=False, default={"one"})
+
     def test_duplicate_fields_are_rejected(self) -> None:
         with pytest.raises(ValueError, match="Duplicate config field: timeout"):
             validate_config(

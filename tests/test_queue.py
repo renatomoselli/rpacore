@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import rpacore.queue as queue_module
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, SystemException
@@ -1054,6 +1055,60 @@ class TestSqliteQueueStaleReclaim:
 
         with pytest.raises(ValueError, match="queue.admin.reason"):
             q.force_fail(item.id, reason="")
+
+    def test_administrative_override_fences_claim_snapshot_before_transition(
+        self, tmp_path, monkeypatch
+    ):
+        q = make_queue(tmp_path, lease_timeout=1)
+        item = make_item("operator-race")
+        q.add(item)
+        claimed = q.next_item("first-worker")
+        assert claimed is not None
+
+        conn = sqlite3.connect(q.db_path)
+        try:
+            conn.execute(
+                "UPDATE queue_items SET claimed_at = datetime('now', '-10 seconds') WHERE id = ?",
+                (item.id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        original_connect = queue_module._connect
+        snapshot_read = threading.Event()
+        claimed_by_other_worker: list[QueueItem | None] = []
+        triggered = False
+
+        def traced_connect(db_path: str) -> sqlite3.Connection:
+            conn = original_connect(db_path)
+
+            def trace(statement: str) -> None:
+                nonlocal triggered
+                if (
+                    not triggered
+                    and statement.startswith("SELECT status, retry_count, claim_token FROM queue_items")
+                ):
+                    triggered = True
+                    snapshot_read.set()
+                    time.sleep(0.1)
+
+            conn.set_trace_callback(trace)
+            return conn
+
+        def claim_stale_item() -> None:
+            assert snapshot_read.wait(timeout=1)
+            claimed_by_other_worker.append(q.next_item("second-worker"))
+
+        monkeypatch.setattr(queue_module, "_connect", traced_connect)
+        worker = threading.Thread(target=claim_stale_item)
+        worker.start()
+        q.force_complete(item.id, reason="operator verified external completion")
+        worker.join(timeout=2)
+
+        assert not worker.is_alive()
+        assert triggered
+        assert claimed_by_other_worker == [None]
 
 
 class TestSqliteQueueAttemptsAndPoison:

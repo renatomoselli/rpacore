@@ -97,7 +97,7 @@ import platform
 import sqlite3
 
 import rpacore
-from rpacore import Engine, ProcessContext, Skill, Status, Transaction
+from rpacore import ConfigField, Engine, ProcessContext, Skill, Status, Transaction, validate_config
 
 repo_root = Path({str(repo_root.resolve())!r})
 checkout_package = repo_root / "rpacore"
@@ -116,6 +116,10 @@ Engine().run(ctx)
 assert tx.status is Status.SUCCESSFUL
 assert tx.skills[0].status is Status.SUCCESSFUL
 assert ctx.state == {{"ran": True}}
+assert validate_config(
+    {{}},
+    (ConfigField("retry_count", int, required=False, default=0, min_value=0),),
+) == {{"retry_count": 0}}
 print(rpacore.__version__)
 print(f"Python {{platform.python_version()}}; SQLite {{sqlite3.sqlite_version}}")
 """

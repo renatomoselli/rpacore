@@ -841,6 +841,11 @@ class SqliteQueue:
         try:
             with conn:
                 _ensure_schema(conn)
+                # Acquire the write lock before reading the claim token.  An
+                # override must transition and close the same claim it audits,
+                # rather than a claim acquired between a deferred read and its
+                # later update.
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     "SELECT status, retry_count, claim_token FROM queue_items WHERE id = ?", (item_id,)
                 ).fetchone()
@@ -912,7 +917,11 @@ class SqliteQueue:
             conn.close()
 
     def list_attempts(self, item_id: str | None = None) -> list[QueueAttempt]:
-        """Return claimed attempts and final outcomes in durable sequence order."""
+        """Return recorded post-v4 claim attempts in durable sequence order.
+
+        Rows that existed before queue schema v4 have no invented historical
+        attempt records; attempts begin when a v4 queue claim is created.
+        """
         conn = _connect(self.db_path)
         try:
             with conn:

@@ -22,6 +22,16 @@ def _load_script():
     return module
 
 
+def test_smoke_code_exercises_public_configuration_validation(tmp_path: Path) -> None:
+    module = _load_script()
+
+    smoke_code = module._smoke_code(tmp_path)
+
+    assert "ConfigField" in smoke_code
+    assert "validate_config" in smoke_code
+    assert '"retry_count"' in smoke_code
+
+
 class TestInstalledWheelValidationScript:
     def test_latest_wheel_picks_newest_rpacore_wheel(self, tmp_path: Path) -> None:
         module = _load_script()

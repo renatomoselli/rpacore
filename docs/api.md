@@ -82,9 +82,14 @@ values = validate_config(
 )
 ```
 
-The result is keyed by the same flat names, including dotted keys. Optional
-defaults are validated like configured values. The helper does not mutate
-`config`, resolve paths, access the filesystem, load secrets, interpolate
+The result is keyed by the same flat names, including dotted keys. Declarations
+are validated when constructed; choices are frozen for reuse, and JSON-safe
+defaults are independently copied for each missing-value result. Optional
+fields without a default omit their result key. `default=None` is explicit and
+must be included in the declared expected type. Defaults use Python's standard
+JSON encoder with non-finite floats disallowed; values such as `datetime`,
+`Decimal`, sets, bytes, and arbitrary objects are rejected. The helper does not
+mutate `config`, resolve paths, access the filesystem, load secrets, interpolate
 environment variables, or enforce cross-field rules.
 
 ## Credentials, Logging, Reports, and Notifications
@@ -113,7 +118,7 @@ are additive within v1; strict consumers must allow them.
 
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
-| `QueueItem`, `QueueStatus`, `QueueLeaseLostError`, `QueueAdminEvent`, `QueueAttempt`, `QueueAttemptOutcome`, `QueuePoisonEvent`, `QueueProvider`, `SqliteQueue` | Queue item model, statuses, claim-loss error, audited overrides, attempt/disposition records, provider contract, and SQLite implementation. | `SqliteQueue` creates/migrates and mutates SQLite queue state. Every claim receives an opaque `claim_token`; claimed-worker mutations require the current token. `list_attempts()` exposes one final outcome per claim, while `list_poison_events()` exposes malformed pending payloads quarantined before they can starve later work. |
+| `QueueItem`, `QueueStatus`, `QueueLeaseLostError`, `QueueAdminEvent`, `QueueAttempt`, `QueueAttemptOutcome`, `QueuePoisonEvent`, `QueueProvider`, `SqliteQueue` | Queue item model, statuses, claim-loss error, audited overrides, attempt/disposition records, provider contract, and SQLite implementation. | `SqliteQueue` creates/migrates and mutates SQLite queue state. Every claim receives an opaque `claim_token`; claimed-worker mutations require the current token. `list_attempts()` exposes one final outcome per post-v4 claim (without fabricating history for rows migrated from earlier schemas), while `list_poison_events()` exposes malformed pending payloads quarantined before they can starve later work. |
 | `QueueRunSummary`, `run_queue_loop` | Process claimed queue items through user factories and `Engine`. Fatal `MemoryError`, `KeyboardInterrupt`, and `SystemExit` signals propagate after deterministic cleanup. | Mutates queue and transaction SQLite databases; renews leases; checkpoints transactions when `transaction_db_path` is configured. Durable queue checkpoints require `SqliteQueue` and atomically validate its claim token plus transaction revision. Every post-claim exit stops and joins its lease heartbeat. |
 
 ## Manifest and Project Entrypoints

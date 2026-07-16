@@ -11,7 +11,8 @@ All notable user-facing changes are recorded here.
 - Added `execute_transaction()` as a one-off transaction runner with strict
   SQLite checkpoint persistence and explicit `resource_scope` support.
 - Added `ConfigField` and `validate_config()` for immutable batch configuration
-  specifications with dotted nested keys and plain-dictionary results.
+  specifications with dotted nested keys, frozen reusable choices, independent
+  JSON-safe defaults, and plain-dictionary results.
 - Added reason-bearing `SqliteQueue.force_complete()` and `force_fail()`
   administrative overrides with durable `QueueAdminEvent` inspection.
 - Added durable `QueueAttempt` outcomes and `QueuePoisonEvent` inspection.
@@ -19,8 +20,6 @@ All notable user-facing changes are recorded here.
 ### Changed
 
 - Expired leases now consume queue retry budget, and malformed pending payloads
-  are quarantined so later valid work can continue.
-  Expired leases now consume queue retry budget, and malformed pending payloads
   are quarantined so later valid work can continue.
 
 ### Breaking
@@ -56,6 +55,8 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- Fenced administrative queue overrides before their claim snapshot so an
+  override cannot transition a claim acquired concurrently by another worker.
 - Guaranteed that every queue-item exit stops and joins its lease heartbeat.
 - Prevented resource and lifecycle cleanup from suppressing or replacing
   `MemoryError`, `KeyboardInterrupt`, and `SystemExit`.
