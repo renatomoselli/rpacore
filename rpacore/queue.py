@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Iterable, Protocol, runtime_checkable
 
-from rpacore._json_state import validate_json_object
+from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore._sqlite import (
     SCHEMA_VERSION_TABLE,
     QUEUE_SCHEMA_VERSION,
@@ -32,6 +32,16 @@ class QueueStatus(StrEnum):
     FAILED = "failed"
 
 
+class QueueAttemptOutcome(StrEnum):
+    """Final disposition for one claimed queue attempt."""
+
+    SUCCESSFUL = "successful"
+    RETRY_SCHEDULED = "retry_scheduled"
+    FAILED = "failed"
+    LEASE_EXPIRED = "lease_expired"
+    ADMIN_OVERRIDE = "admin_override"
+
+
 class QueueLeaseLostError(RuntimeError):
     """Raised when a worker no longer owns an in-progress queue item lease."""
 
@@ -46,6 +56,29 @@ class QueueAdminEvent:
     reason: str
     previous_status: QueueStatus
     new_status: QueueStatus
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class QueueAttempt:
+    """One claimed queue attempt and its eventual durable outcome."""
+
+    sequence: int
+    item_id: str
+    claim_token: str
+    claimed_by: str
+    started_at: datetime
+    finished_at: datetime | None
+    outcome: QueueAttemptOutcome | None
+
+
+@dataclass(frozen=True)
+class QueuePoisonEvent:
+    """A malformed pending payload quarantined without claiming it."""
+
+    sequence: int
+    item_id: str
+    error_type: str
     created_at: datetime
 
 
@@ -186,6 +219,46 @@ def _migrate_queue_to_v3(conn: sqlite3.Connection) -> None:
     _record_queue_schema_version(conn, 3)
 
 
+def _migrate_queue_to_v4(conn: sqlite3.Connection) -> None:
+    """Add append-only claim attempts and corrupt-payload dispositions.
+
+    Existing rows predate attempt tracking. Their history remains intact in
+    ``queue_items``; only claims created after this migration receive attempt
+    rows. The upgrade is offline under the same queue migration policy as v3.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS queue_attempts (
+            sequence    INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id     TEXT NOT NULL,
+            claim_token TEXT NOT NULL,
+            claimed_by  TEXT NOT NULL,
+            started_at  TEXT NOT NULL,
+            finished_at TEXT,
+            outcome     TEXT NOT NULL DEFAULT '',
+            UNIQUE (item_id, claim_token),
+            FOREIGN KEY (item_id) REFERENCES queue_items(id)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_queue_attempts_item_sequence "
+        "ON queue_attempts (item_id, sequence)"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS queue_poison_events (
+            sequence   INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id    TEXT NOT NULL,
+            error_type TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (item_id) REFERENCES queue_items(id)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_queue_poison_events_item_sequence "
+        "ON queue_poison_events (item_id, sequence)"
+    )
+    _record_queue_schema_version(conn, 4)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run sequential queue migrations after rejecting future schemas."""
     with conn:
@@ -205,6 +278,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 3:
             _migrate_queue_to_v3(conn)
             current_version = 3
+        if current_version < 4:
+            _migrate_queue_to_v4(conn)
+            current_version = 4
         if current_version != _QUEUE_SCHEMA_VERSION:
             raise RuntimeError(
                 f"Unsupported queue schema version {current_version}; "
@@ -287,6 +363,50 @@ def _insert_item(conn: sqlite3.Connection, item: QueueItem) -> None:
             item.claim_token,
             item.transaction_id,
         ),
+    )
+
+
+def _open_attempt(
+    conn: sqlite3.Connection,
+    *,
+    item_id: str,
+    claim_token: str,
+    claimed_by: str,
+    started_at: datetime,
+) -> None:
+    conn.execute(
+        "INSERT INTO queue_attempts "
+        "(item_id, claim_token, claimed_by, started_at) VALUES (?, ?, ?, ?)",
+        (item_id, claim_token, claimed_by, started_at.isoformat()),
+    )
+
+
+def _close_attempt(
+    conn: sqlite3.Connection,
+    *,
+    item_id: str,
+    claim_token: str,
+    outcome: QueueAttemptOutcome,
+    finished_at: datetime,
+) -> None:
+    """Record one final outcome when the claim was created under schema v4."""
+    conn.execute(
+        "UPDATE queue_attempts SET outcome = ?, finished_at = ? "
+        "WHERE item_id = ? AND claim_token = ? AND outcome = ''",
+        (outcome, finished_at.isoformat(), item_id, claim_token),
+    )
+
+
+def _record_poison_event(
+    conn: sqlite3.Connection,
+    *,
+    item_id: str,
+    error_type: str,
+    created_at: datetime,
+) -> None:
+    conn.execute(
+        "INSERT INTO queue_poison_events (item_id, error_type, created_at) VALUES (?, ?, ?)",
+        (item_id, error_type, created_at.isoformat()),
     )
 
 
@@ -480,14 +600,30 @@ class SqliteQueue:
             # Reclaim stale items in a short write transaction before selecting.
             conn.execute("BEGIN IMMEDIATE")
             transaction_started = True
-            conn.execute(
-                "UPDATE queue_items SET status = 'pending', claimed_by = '', claimed_at = NULL, "
-                "claim_token = '' "
-                "WHERE status = 'in_progress' "
-                "AND claimed_at IS NOT NULL "
+            stale_rows = conn.execute(
+                "SELECT id, retry_count, claimed_by, claim_token FROM queue_items "
+                "WHERE status = 'in_progress' AND claimed_at IS NOT NULL "
                 "AND (CAST(strftime('%s', ?) AS INTEGER) - CAST(strftime('%s', claimed_at) AS INTEGER)) > ?",
                 (now.isoformat(), self.lease_timeout),
-            )
+            ).fetchall()
+            for stale in stale_rows:
+                retry_count = int(stale["retry_count"]) + 1
+                new_status = "pending" if retry_count <= self.max_retries else "failed"
+                claimed_by = "" if new_status == "pending" else stale["claimed_by"]
+                result = conn.execute(
+                    "UPDATE queue_items SET status = ?, retry_count = ?, claimed_by = ?, "
+                    "claimed_at = NULL, claim_token = '' "
+                    "WHERE id = ? AND status = 'in_progress' AND claim_token = ?",
+                    (new_status, retry_count, claimed_by, stale["id"], stale["claim_token"]),
+                )
+                if result.rowcount == 1 and stale["claim_token"]:
+                    _close_attempt(
+                        conn,
+                        item_id=stale["id"],
+                        claim_token=stale["claim_token"],
+                        outcome=QueueAttemptOutcome.LEASE_EXPIRED,
+                        finished_at=now,
+                    )
             conn.execute("COMMIT")
             transaction_started = False
 
@@ -501,7 +637,27 @@ class SqliteQueue:
                 if row is None:
                     return None
 
-                payload = _load_payload(row["payload"])
+                try:
+                    payload = _load_payload(row["payload"])
+                except (json.JSONDecodeError, JsonStateError) as exc:
+                    conn.execute("BEGIN IMMEDIATE")
+                    transaction_started = True
+                    result = conn.execute(
+                        "UPDATE queue_items SET status = 'failed', claimed_by = '', "
+                        "claimed_at = NULL, claim_token = '' "
+                        "WHERE id = ? AND status = 'pending'",
+                        (row["id"],),
+                    )
+                    if result.rowcount == 1:
+                        _record_poison_event(
+                            conn,
+                            item_id=row["id"],
+                            error_type=type(exc).__name__,
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    continue
                 now = datetime.now(timezone.utc)
                 claim_token = uuid.uuid4().hex
 
@@ -517,6 +673,13 @@ class SqliteQueue:
                     conn.execute("COMMIT")
                     transaction_started = False
                     continue
+                _open_attempt(
+                    conn,
+                    item_id=row["id"],
+                    claim_token=claim_token,
+                    claimed_by=worker_id,
+                    started_at=now,
+                )
                 conn.execute("COMMIT")
                 transaction_started = False
 
@@ -594,6 +757,13 @@ class SqliteQueue:
                     raise QueueLeaseLostError(
                         f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                     )
+                _close_attempt(
+                    conn,
+                    item_id=item_id,
+                    claim_token=claim_token,
+                    outcome=QueueAttemptOutcome.SUCCESSFUL,
+                    finished_at=datetime.now(timezone.utc),
+                )
         finally:
             conn.close()
 
@@ -634,6 +804,17 @@ class SqliteQueue:
                     raise QueueLeaseLostError(
                         f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                     )
+                _close_attempt(
+                    conn,
+                    item_id=item_id,
+                    claim_token=claim_token,
+                    outcome=(
+                        QueueAttemptOutcome.RETRY_SCHEDULED
+                        if new_status == "pending"
+                        else QueueAttemptOutcome.FAILED
+                    ),
+                    finished_at=datetime.now(timezone.utc),
+                )
         finally:
             conn.close()
 
@@ -661,7 +842,7 @@ class SqliteQueue:
             with conn:
                 _ensure_schema(conn)
                 row = conn.execute(
-                    "SELECT status, retry_count FROM queue_items WHERE id = ?", (item_id,)
+                    "SELECT status, retry_count, claim_token FROM queue_items WHERE id = ?", (item_id,)
                 ).fetchone()
                 if row is None:
                     raise KeyError(f"Queue item not found: {item_id!r}")
@@ -676,6 +857,14 @@ class SqliteQueue:
                     "claimed_at = NULL, claim_token = '' WHERE id = ?",
                     (new_status, retry_count, item_id),
                 )
+                if row["claim_token"]:
+                    _close_attempt(
+                        conn,
+                        item_id=item_id,
+                        claim_token=row["claim_token"],
+                        outcome=QueueAttemptOutcome.ADMIN_OVERRIDE,
+                        finished_at=now,
+                    )
                 conn.execute(
                     "INSERT INTO queue_admin_events "
                     "(item_id, action, reason, previous_status, new_status, created_at) "
@@ -715,6 +904,63 @@ class SqliteQueue:
                     reason=row["reason"],
                     previous_status=QueueStatus(row["previous_status"]),
                     new_status=QueueStatus(row["new_status"]),
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def list_attempts(self, item_id: str | None = None) -> list[QueueAttempt]:
+        """Return claimed attempts and final outcomes in durable sequence order."""
+        conn = _connect(self.db_path)
+        try:
+            with conn:
+                _ensure_schema(conn)
+            if item_id is None:
+                rows = conn.execute("SELECT * FROM queue_attempts ORDER BY sequence").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM queue_attempts WHERE item_id = ? ORDER BY sequence",
+                    (item_id,),
+                ).fetchall()
+            return [
+                QueueAttempt(
+                    sequence=row["sequence"],
+                    item_id=row["item_id"],
+                    claim_token=row["claim_token"],
+                    claimed_by=row["claimed_by"],
+                    started_at=datetime.fromisoformat(row["started_at"]),
+                    finished_at=(
+                        datetime.fromisoformat(row["finished_at"])
+                        if row["finished_at"]
+                        else None
+                    ),
+                    outcome=(QueueAttemptOutcome(row["outcome"]) if row["outcome"] else None),
+                )
+                for row in rows
+            ]
+        finally:
+            conn.close()
+
+    def list_poison_events(self, item_id: str | None = None) -> list[QueuePoisonEvent]:
+        """Return malformed-payload quarantines in durable sequence order."""
+        conn = _connect(self.db_path)
+        try:
+            with conn:
+                _ensure_schema(conn)
+            if item_id is None:
+                rows = conn.execute("SELECT * FROM queue_poison_events ORDER BY sequence").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM queue_poison_events WHERE item_id = ? ORDER BY sequence",
+                    (item_id,),
+                ).fetchall()
+            return [
+                QueuePoisonEvent(
+                    sequence=row["sequence"],
+                    item_id=row["item_id"],
+                    error_type=row["error_type"],
                     created_at=datetime.fromisoformat(row["created_at"]),
                 )
                 for row in rows

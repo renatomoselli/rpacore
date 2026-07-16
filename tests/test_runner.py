@@ -1199,7 +1199,7 @@ class TestRunnerManagedTransactionPersistence:
         queue_db = str(tmp_path / "queue.db")
         transaction_db = str(tmp_path / "transactions.db")
         queue = SqliteQueue(
-            {"db_path": queue_db, "lease_timeout": 1, "max_retries": 0}
+            {"db_path": queue_db, "lease_timeout": 1, "max_retries": 1}
         )
         item = QueueItem(reference="same-label-runner", payload={})
         queue.add(item)

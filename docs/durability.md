@@ -141,6 +141,16 @@ not public `Transaction` attributes. `load_transaction()` returns the domain
 transaction snapshot; the runner owns the private fencing values needed to
 persist its next checkpoint safely.
 
+Every new claim also opens one durable `QueueAttempt`. Completion, explicit
+retry, terminal failure, lease expiry, and an administrative override close that
+attempt with a distinct outcome. Lease expiry consumes the same queue retry
+budget as a retriable failure, so repeated worker crashes eventually reach a
+terminal queue state. A malformed pending payload is not claimed: the queue
+leaves its raw stored value in place, marks the item failed, appends a
+`QueuePoisonEvent` containing only the parser error type, and continues to the
+next valid item. Use `list_attempts()` and `list_poison_events()` for focused
+operator inspection.
+
 On a later queue retry, a bound item resumes the same persisted transaction with
 fresh executable skill instances from `build_transaction(item)`. Persisted state
 is authoritative on retry; queue payload is not applied a second time. If the
@@ -528,12 +538,14 @@ latest schema to the new latest schema.
 
 Queue migrations are also sequential: version 1 creates the queue item model;
 version 2 adds durable transaction binding and inspection indexes; version 3
-adds opaque claim tokens and the administrative override audit. Migration to
-version 3 invalidates legacy `IN_PROGRESS` leases by returning them to `PENDING`
-without discarding their transaction binding, so they must be reacquired with a
-token.
+adds opaque claim tokens and the administrative override audit; version 4 adds
+append-only claim attempts and poison dispositions. Migration to version 3
+invalidates legacy `IN_PROGRESS` leases by returning them to `PENDING` without
+discarding their transaction binding, so they must be reacquired with a token.
+Version 4 begins attempt history for future claims; it does not invent attempt
+records for older rows.
 
-Treat the queue-v3/transaction-v6 upgrade as offline: stop every worker, back up
+Treat the queue-v4/transaction-v6 upgrade as offline: stop every worker, back up
 both database files together, upgrade and open both with the new runtime, then
 restart workers so pending items are reacquired. Old workers reject the newer
 schema on their next framework database operation, but the offline boundary is

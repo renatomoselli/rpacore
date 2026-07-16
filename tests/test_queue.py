@@ -15,7 +15,14 @@ import pytest
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, SystemException
-from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider, QueueStatus, SqliteQueue
+from rpacore.queue import (
+    QueueAttemptOutcome,
+    QueueItem,
+    QueueLeaseLostError,
+    QueueProvider,
+    QueueStatus,
+    SqliteQueue,
+)
 from rpacore.runner import run_queue_loop
 from rpacore.skill import Skill
 from rpacore.transaction import Transaction
@@ -156,7 +163,7 @@ class TestSqliteQueueCRUD:
 
         assert "queue item payload expected JSON object" in str(exc_info.value)
 
-    def test_next_item_rejects_pre_existing_non_object_payload(self, tmp_path):
+    def test_next_item_quarantines_pre_existing_non_object_payload(self, tmp_path):
         q = make_queue(tmp_path)
         conn = sqlite3.connect(q.db_path)
         try:
@@ -171,10 +178,10 @@ class TestSqliteQueueCRUD:
         finally:
             conn.close()
 
-        with pytest.raises(TypeError) as exc_info:
-            q.next_item("worker")
-
-        assert "queue item payload expected JSON object" in str(exc_info.value)
+        assert q.next_item("worker") is None
+        events = q.list_poison_events("bad-payload")
+        assert len(events) == 1
+        assert events[0].error_type == "JsonStateError"
         conn = sqlite3.connect(q.db_path)
         try:
             status = conn.execute(
@@ -182,7 +189,7 @@ class TestSqliteQueueCRUD:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert status == "pending"
+        assert status == "failed"
 
     def test_next_item_empty_returns_none(self, tmp_path):
         q = make_queue(tmp_path)
@@ -458,7 +465,7 @@ class TestSqliteQueueIntrospection:
         finally:
             conn.close()
 
-        assert version == 3
+        assert version == 4
 
     def test_queue_uses_rollback_journal(self, tmp_path):
         queue = make_queue(tmp_path)
@@ -651,7 +658,7 @@ class TestSqliteQueueIntrospection:
 
         stored = q.get_item("old")
         assert "transaction_id" in columns
-        assert version == 3
+        assert version == 4
         assert stored is not None
         assert stored.transaction_id == ""
 
@@ -695,11 +702,13 @@ class TestSqliteQueueIntrospection:
         assert migrated.claimed_by == ""
         assert migrated.claim_token == ""
         assert migrated.transaction_id == "tx-1"
+        assert queue.list_attempts("legacy-active") == []
 
         reacquired = queue.next_item("new-worker")
         assert reacquired is not None
         assert reacquired.claim_token
         assert reacquired.transaction_id == "tx-1"
+        assert len(queue.list_attempts("legacy-active")) == 1
 
     def test_renew_lease_updates_claimed_at_for_claim_owner(self, tmp_path):
         q = make_queue(tmp_path)
@@ -860,6 +869,48 @@ class TestSqliteQueueStaleReclaim:
         assert reclaimed.id == item.id
         assert reclaimed.claimed_by == "worker-b"
 
+    def test_expired_claims_consume_retry_budget_and_close_attempts(self, tmp_path):
+        q = make_queue(tmp_path, lease_timeout=1, max_retries=1)
+        item = make_item("stale-budget")
+        q.add(item)
+
+        first = q.next_item("worker-a")
+        assert first is not None
+        conn = sqlite3.connect(q.db_path)
+        try:
+            conn.execute(
+                "UPDATE queue_items SET claimed_at = datetime('now', '-10 seconds') WHERE id = ?",
+                (item.id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        second = q.next_item("worker-b")
+        assert second is not None
+        assert second.retry_count == 1
+
+        conn = sqlite3.connect(q.db_path)
+        try:
+            conn.execute(
+                "UPDATE queue_items SET claimed_at = datetime('now', '-10 seconds') WHERE id = ?",
+                (item.id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert q.next_item("worker-c") is None
+        stored = q.get_item(item.id)
+        assert stored is not None
+        assert stored.status is QueueStatus.FAILED
+        assert stored.retry_count == 2
+        attempts = q.list_attempts(item.id)
+        assert [attempt.outcome for attempt in attempts] == [
+            QueueAttemptOutcome.LEASE_EXPIRED,
+            QueueAttemptOutcome.LEASE_EXPIRED,
+        ]
+
     def test_complete_rejects_stale_original_claim(self, tmp_path):
         q = make_queue(tmp_path, lease_timeout=1)
         q.add(make_item("stale-complete"))
@@ -918,7 +969,7 @@ class TestSqliteQueueStaleReclaim:
         stored = q.get_item(item.id)
         assert stored is not None
         assert stored.status is QueueStatus.IN_PROGRESS
-        assert stored.retry_count == 0
+        assert stored.retry_count == 1
         assert stored.claimed_by == "worker-b"
 
     def test_same_worker_label_cannot_reuse_stale_claim_credential(self, tmp_path):
@@ -997,9 +1048,177 @@ class TestSqliteQueueStaleReclaim:
         assert events[0].reason == "operator verified external completion"
         assert events[0].previous_status is QueueStatus.IN_PROGRESS
         assert events[0].new_status is QueueStatus.SUCCESSFUL
+        attempts = q.list_attempts(item.id)
+        assert len(attempts) == 1
+        assert attempts[0].outcome is QueueAttemptOutcome.ADMIN_OVERRIDE
 
         with pytest.raises(ValueError, match="queue.admin.reason"):
             q.force_fail(item.id, reason="")
+
+
+class TestSqliteQueueAttemptsAndPoison:
+    def test_success_and_retry_attempts_have_distinct_outcomes(self, tmp_path):
+        q = make_queue(tmp_path, max_retries=1)
+        item = make_item("attempts")
+        q.add(item)
+
+        first = q.next_item("worker")
+        assert first is not None
+        q.fail(
+            first.id,
+            claimed_by=first.claimed_by,
+            claim_token=first.claim_token,
+        )
+        second = q.next_item("worker")
+        assert second is not None
+        q.complete(
+            second.id,
+            claimed_by=second.claimed_by,
+            claim_token=second.claim_token,
+        )
+
+        attempts = q.list_attempts(item.id)
+        assert [attempt.outcome for attempt in attempts] == [
+            QueueAttemptOutcome.RETRY_SCHEDULED,
+            QueueAttemptOutcome.SUCCESSFUL,
+        ]
+        assert all(attempt.finished_at is not None for attempt in attempts)
+
+    def test_terminal_failure_closes_attempt(self, tmp_path):
+        q = make_queue(tmp_path)
+        item = make_item("terminal-attempt")
+        q.add(item)
+
+        claimed = q.next_item("worker")
+        assert claimed is not None
+        q.fail(
+            claimed.id,
+            retry=False,
+            claimed_by=claimed.claimed_by,
+            claim_token=claimed.claim_token,
+        )
+
+        attempts = q.list_attempts(item.id)
+        assert len(attempts) == 1
+        assert attempts[0].outcome is QueueAttemptOutcome.FAILED
+        assert attempts[0].finished_at is not None
+
+    def test_list_attempts_without_item_filter_returns_all_attempts_in_sequence(self, tmp_path):
+        q = make_queue(tmp_path)
+        first_item = make_item("first-attempt")
+        second_item = make_item("second-attempt")
+        q.add(first_item)
+        q.add(second_item)
+
+        first = q.next_item("worker")
+        assert first is not None
+        q.complete(first.id, claimed_by=first.claimed_by, claim_token=first.claim_token)
+        second = q.next_item("worker")
+        assert second is not None
+        q.fail(
+            second.id,
+            retry=False,
+            claimed_by=second.claimed_by,
+            claim_token=second.claim_token,
+        )
+
+        attempts = q.list_attempts()
+        assert [attempt.item_id for attempt in attempts] == [first.id, second.id]
+
+    def test_list_poison_events_without_item_filter_returns_all_events_in_sequence(self, tmp_path):
+        q = make_queue(tmp_path)
+        conn = sqlite3.connect(q.db_path)
+        try:
+            created_at = datetime(2025, 1, 1, tzinfo=timezone.utc).isoformat()
+            conn.executemany(
+                "INSERT INTO queue_items "
+                "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at, "
+                "claim_token, transaction_id) VALUES (?, ?, ?, 'pending', 0, ?, '', NULL, '', '')",
+                [
+                    ("corrupt-first", "corrupt-first", "{not-json", created_at),
+                    ("corrupt-second", "corrupt-second", "[]", created_at),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        assert q.next_item("worker") is None
+
+        events = q.list_poison_events()
+        assert [event.item_id for event in events] == ["corrupt-first", "corrupt-second"]
+        assert [event.error_type for event in events] == ["JSONDecodeError", "JsonStateError"]
+
+    def test_poison_quarantine_rolls_back_when_event_recording_fails(self, tmp_path):
+        q = make_queue(tmp_path)
+        corrupt_id = "poison-rollback"
+        created_at = datetime(2025, 1, 1, tzinfo=timezone.utc).isoformat()
+        conn = sqlite3.connect(q.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO queue_items "
+                "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at, "
+                "claim_token, transaction_id) VALUES (?, ?, ?, 'pending', 0, ?, '', NULL, '', '')",
+                (corrupt_id, "corrupt", "{not-json", created_at),
+            )
+            conn.execute(
+                "CREATE TRIGGER reject_poison_event BEFORE INSERT ON queue_poison_events "
+                "BEGIN SELECT RAISE(ABORT, 'poison event unavailable'); END"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with pytest.raises(sqlite3.IntegrityError, match="poison event unavailable"):
+            q.next_item("worker")
+
+        conn = sqlite3.connect(q.db_path)
+        try:
+            status = conn.execute(
+                "SELECT status FROM queue_items WHERE id = ?", (corrupt_id,)
+            ).fetchone()[0]
+            conn.execute("DROP TRIGGER reject_poison_event")
+            conn.commit()
+        finally:
+            conn.close()
+        assert status == "pending"
+
+        assert q.next_item("worker") is None
+        assert len(q.list_poison_events(corrupt_id)) == 1
+
+    def test_malformed_oldest_payload_is_quarantined_before_valid_work_is_claimed(self, tmp_path):
+        q = make_queue(tmp_path)
+        corrupt_id = "corrupt-oldest"
+        created_at = datetime(2025, 1, 1, tzinfo=timezone.utc).isoformat()
+        conn = sqlite3.connect(q.db_path)
+        try:
+            conn.execute(
+                "INSERT INTO queue_items "
+                "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at, "
+                "claim_token, transaction_id) VALUES (?, ?, ?, 'pending', 0, ?, '', NULL, '', '')",
+                (corrupt_id, "corrupt", "{not-json", created_at),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        valid = make_item("valid")
+        q.add(valid)
+
+        claimed = q.next_item("worker")
+
+        assert claimed is not None
+        assert claimed.id == valid.id
+        events = q.list_poison_events(corrupt_id)
+        assert len(events) == 1
+        assert events[0].error_type == "JSONDecodeError"
+        conn = sqlite3.connect(q.db_path)
+        try:
+            row = conn.execute(
+                "SELECT payload, status FROM queue_items WHERE id = ?", (corrupt_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row == ("{not-json", "failed")
 
 
 # ---------------------------------------------------------------------------

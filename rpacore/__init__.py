@@ -29,7 +29,17 @@ from rpacore.manifest import (
 from rpacore.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifiers, dispatch
 from rpacore.paths import atomic_output_path, resolve_config_path, resolve_config_paths
 from rpacore.persistence import TransactionFenceError, list_transactions, load_transaction, save_transaction
-from rpacore.queue import QueueAdminEvent, QueueItem, QueueLeaseLostError, QueueProvider, QueueStatus, SqliteQueue
+from rpacore.queue import (
+    QueueAdminEvent,
+    QueueAttempt,
+    QueueAttemptOutcome,
+    QueueItem,
+    QueueLeaseLostError,
+    QueuePoisonEvent,
+    QueueProvider,
+    QueueStatus,
+    SqliteQueue,
+)
 from rpacore.recovery import resume_transaction
 from rpacore.report import ArtifactReport, SkillReport, TransactionReport, generate_report, render_html, render_text
 from rpacore.runner import QueueRunSummary, run_queue_loop
@@ -56,8 +66,11 @@ __all__ = [
     "ProcessContext",
     "ProjectManifest",
     "QueueAdminEvent",
+    "QueueAttempt",
+    "QueueAttemptOutcome",
     "QueueItem",
     "QueueLeaseLostError",
+    "QueuePoisonEvent",
     "QueueProvider",
     "QueueRunSummary",
     "QueueStatus",

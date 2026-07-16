@@ -14,6 +14,14 @@ All notable user-facing changes are recorded here.
   specifications with dotted nested keys and plain-dictionary results.
 - Added reason-bearing `SqliteQueue.force_complete()` and `force_fail()`
   administrative overrides with durable `QueueAdminEvent` inspection.
+- Added durable `QueueAttempt` outcomes and `QueuePoisonEvent` inspection.
+
+### Changed
+
+- Expired leases now consume queue retry budget, and malformed pending payloads
+  are quarantined so later valid work can continue.
+  Expired leases now consume queue retry budget, and malformed pending payloads
+  are quarantined so later valid work can continue.
 
 ### Breaking
 
@@ -23,6 +31,10 @@ All notable user-facing changes are recorded here.
   replaced by separately named administrative methods. Durable
   `run_queue_loop(transaction_db_path=...)` now requires `SqliteQueue` so claim
   and transaction writes can be fenced in one SQLite transaction.
+
+- Queue schema version 4 records attempts and poison dispositions. Upgrade queue
+  databases offline with the same stop, backup, migrate, and restart procedure
+  required for the queue/transaction fencing upgrade.
 
 - Renamed maintainer release validation interfaces from evidence/go-no-go
   wording to validation results and approval wording.
@@ -36,8 +48,6 @@ All notable user-facing changes are recorded here.
   | `evidence` manifest key | `validation_results` manifest key |
   | `go` / `no-go` decision values | `approved` / `rejected` decision values |
   | default `evidence/` output directory | default `validation-results/` output directory |
-
-### Changed
 
 - Updated public docs to describe the maintained `0.1.x` release line where the
   wording applies to current documentation and API coverage.
