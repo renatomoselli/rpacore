@@ -1,5 +1,6 @@
 """Tests for rpacore.persistence."""
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,41 @@ def db_path(tmp_path):
 
 def make_transaction(**kwargs) -> Transaction:
     return Transaction(reference="REF-001", **kwargs)
+
+
+def seed_transaction_query_rows(db_path: str, count: int) -> datetime:
+    """Create lightweight rows for deterministic transaction-query tests."""
+    save_transaction(make_transaction(), db_path)
+    base = datetime(2026, 7, 17, 0, 0, tzinfo=timezone.utc)
+    rows = [
+        (
+            f"scale-{index:04d}",
+            "scale-reference",
+            "successful",
+            (base + timedelta(seconds=index)).isoformat(),
+        )
+        for index in range(count)
+    ]
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executemany(
+            "INSERT INTO transactions "
+            "(id, reference, status, retry_count, created_at, created_at_utc, state) "
+            "VALUES (?, ?, ?, 0, ?, ?, '{}')",
+            [
+                (transaction_id, reference, status, timestamp, timestamp)
+                for transaction_id, reference, status, timestamp in rows
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO transaction_metadata (transaction_id, key, value_json) "
+            "VALUES (?, 'run_id', ?)",
+            [(transaction_id, json.dumps("scale")) for transaction_id, *_ in rows],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return base
 
 
 def lock_database(db_path: str) -> sqlite3.Connection:
@@ -1627,19 +1663,19 @@ class TestTransactionQuery:
             id="older",
             reference="invoice",
             created_at=datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc),
-            metadata={"run_id": "run-1"},
+            metadata={"kind": "invoice", "run_id": "run-1"},
         )
         newer = Transaction(
             id="newer",
             reference="invoice",
             created_at=datetime(2026, 7, 16, 11, 0, tzinfo=timezone.utc),
-            metadata={"run_id": "run-2"},
+            metadata={"kind": "invoice", "run_id": "run-2"},
         )
         other = Transaction(
             id="other",
             reference="other",
             created_at=datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc),
-            metadata={"run_id": "run-1"},
+            metadata={"kind": "other", "run_id": "run-1"},
         )
         for transaction in (older, newer, other):
             save_transaction(transaction, db_path)
@@ -1656,6 +1692,13 @@ class TestTransactionQuery:
             summary.id
             for summary in query_transactions(
                 db_path,
+                metadata_filter={"kind": "invoice", "run_id": "run-1"},
+            ).transactions
+        ] == [older.id]
+        assert [
+            summary.id
+            for summary in query_transactions(
+                db_path,
                 since=datetime(2026, 7, 16, 9, 30, tzinfo=timezone.utc),
                 until=datetime(2026, 7, 16, 10, 30, tzinfo=timezone.utc),
             ).transactions
@@ -1664,6 +1707,90 @@ class TestTransactionQuery:
         assert empty.transactions == ()
         assert empty.has_more is False
         assert empty.next_cursor is None
+
+    @pytest.mark.parametrize("count", [10, 100, 1_000])
+    def test_query_pages_are_complete_at_supported_scale(self, db_path, count: int) -> None:
+        seed_transaction_query_rows(db_path, count)
+
+        transaction_ids: list[str] = []
+        cursor = None
+        while True:
+            page = query_transactions(
+                db_path,
+                metadata_filter={"run_id": "scale"},
+                cursor=cursor,
+                limit=37,
+            )
+            transaction_ids.extend(summary.id for summary in page.transactions)
+            if not page.has_more:
+                assert page.next_cursor is None
+                break
+            assert page.next_cursor is not None
+            cursor = page.next_cursor
+
+        assert transaction_ids == [f"scale-{index:04d}" for index in reversed(range(count))]
+
+    def test_query_cursor_excludes_newer_inserts_and_can_include_later_inserts(self, db_path) -> None:
+        initial = [
+            Transaction(
+                id=f"initial-{hour}",
+                reference="cursor",
+                created_at=datetime(2026, 7, 17, hour, 0, tzinfo=timezone.utc),
+            )
+            for hour in (8, 9, 10)
+        ]
+        for transaction in initial:
+            save_transaction(transaction, db_path)
+
+        first_page = query_transactions(db_path, limit=1)
+        save_transaction(
+            Transaction(
+                id="newer",
+                reference="cursor",
+                created_at=datetime(2026, 7, 17, 11, 0, tzinfo=timezone.utc),
+            ),
+            db_path,
+        )
+        save_transaction(
+            Transaction(
+                id="later",
+                reference="cursor",
+                created_at=datetime(2026, 7, 17, 7, 0, tzinfo=timezone.utc),
+            ),
+            db_path,
+        )
+
+        later_page = query_transactions(db_path, cursor=first_page.next_cursor, limit=10)
+
+        assert [summary.id for summary in first_page.transactions] == ["initial-10"]
+        assert [summary.id for summary in later_page.transactions] == [
+            "initial-9",
+            "initial-8",
+            "later",
+        ]
+
+    def test_query_plan_uses_status_time_and_metadata_indexes(self, db_path) -> None:
+        base = seed_transaction_query_rows(db_path, 1_000)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            details = [
+                row[3]
+                for row in conn.execute(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT id, reference, status, retry_count, created_at_utc FROM transactions "
+                    "JOIN transaction_metadata tm_0 ON tm_0.transaction_id = transactions.id "
+                    "AND tm_0.key = ? AND tm_0.value_json = ? "
+                    "WHERE status IN (?) AND created_at_utc != '' AND created_at_utc >= ? "
+                    "ORDER BY created_at_utc DESC, id ASC LIMIT ?",
+                    ("run_id", json.dumps("scale"), "successful", base.isoformat(), 101),
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+
+        assert any("idx_transactions_status_created_at_utc_id" in detail for detail in details)
+        assert any("idx_transaction_metadata_key_value_transaction" in detail for detail in details)
 
     def test_query_does_not_assign_a_utc_instant_to_naive_legacy_timestamps(self, db_path) -> None:
         transaction = Transaction(

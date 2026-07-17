@@ -1206,10 +1206,16 @@ def query_transactions(
         else:
             _ensure_schema(conn)
 
-        query = (
-            "SELECT id, reference, status, retry_count, created_at_utc FROM transactions WHERE 1=1"
-        )
+        query = "SELECT id, reference, status, retry_count, created_at_utc FROM transactions"
         params: list[object] = []
+        for index, (key, value_json) in enumerate(sorted(metadata_json.items())):
+            alias = f"tm_{index}"
+            query += (
+                f" JOIN transaction_metadata {alias} ON {alias}.transaction_id = transactions.id "
+                f"AND {alias}.key = ? AND {alias}.value_json = ?"
+            )
+            params.extend([key, value_json])
+        query += " WHERE 1=1"
         if normalized_statuses:
             placeholders = ", ".join("?" for _ in normalized_statuses)
             query += f" AND status IN ({placeholders})"
@@ -1225,14 +1231,6 @@ def query_transactions(
         if reference is not None:
             query += " AND reference = ?"
             params.append(reference)
-        for key, value_json in sorted(metadata_json.items()):
-            query += (
-                " AND EXISTS ("
-                "SELECT 1 FROM transaction_metadata tm "
-                "WHERE tm.transaction_id = transactions.id "
-                "AND tm.key = ? AND tm.value_json = ?)"
-            )
-            params.extend([key, value_json])
         if cursor_position is not None:
             cursor_created_at, cursor_id = cursor_position
             query += (
