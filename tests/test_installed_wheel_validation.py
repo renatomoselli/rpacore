@@ -22,7 +22,7 @@ def _load_script():
     return module
 
 
-def test_smoke_code_exercises_public_configuration_validation(tmp_path: Path) -> None:
+def test_smoke_code_exercises_public_configuration_and_query_apis(tmp_path: Path) -> None:
     module = _load_script()
 
     smoke_code = module._smoke_code(tmp_path)
@@ -30,6 +30,8 @@ def test_smoke_code_exercises_public_configuration_validation(tmp_path: Path) ->
     assert "ConfigField" in smoke_code
     assert "validate_config" in smoke_code
     assert '"retry_count"' in smoke_code
+    assert "query_transactions" in smoke_code
+    assert '"query-smoke"' in smoke_code
 
 
 class TestInstalledWheelValidationScript:

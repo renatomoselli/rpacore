@@ -1,7 +1,7 @@
 """Tests for rpacore.persistence."""
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -11,11 +11,13 @@ from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.persistence import (
     TransactionFenceError,
+    TransactionPage,
     _delete_unbound_pending_transaction,
     _save_queue_transaction_fenced,
     iter_transactions,
     list_transactions,
     load_transaction,
+    query_transactions,
     save_transaction,
 )
 from rpacore.skill import Skill
@@ -1457,6 +1459,388 @@ class TestResumeScenario:
         assert loaded.status is Status.SUCCESSFUL
 
 
+class TestTransactionQuery:
+    def test_save_derives_utc_query_key_from_an_aware_timestamp(self, db_path) -> None:
+        transaction = Transaction(
+            id="offset-save",
+            reference="offset-save",
+            created_at=datetime(
+                2026,
+                7,
+                16,
+                6,
+                0,
+                tzinfo=timezone(timedelta(hours=-3)),
+            ),
+        )
+
+        save_transaction(transaction, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            stored = conn.execute(
+                "SELECT created_at, created_at_utc FROM transactions WHERE id = ?",
+                (transaction.id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert stored == ("2026-07-16T09:00:00+00:00", "2026-07-16T09:00:00+00:00")
+        page = query_transactions(db_path)
+        assert page.transactions[0].created_at == datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc)
+
+    def test_page_is_complete_and_cursor_is_bound_to_its_filters(self, db_path) -> None:
+        transactions = [
+            Transaction(
+                id="tx-1",
+                reference="invoice",
+                status=Status.SUCCESSFUL,
+                created_at=datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc),
+                metadata={"run_id": "run-1"},
+            ),
+            Transaction(
+                id="tx-2",
+                reference="invoice",
+                status=Status.SUCCESSFUL,
+                created_at=datetime(2026, 7, 16, 11, 0, tzinfo=timezone.utc),
+                metadata={"run_id": "run-1"},
+            ),
+            Transaction(
+                id="tx-3",
+                reference="other",
+                status=Status.FAILED,
+                created_at=datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc),
+                metadata={"run_id": "run-1"},
+            ),
+            Transaction(
+                id="tx-4",
+                reference="invoice",
+                status=Status.SUCCESSFUL,
+                created_at=datetime(2026, 7, 16, 13, 0, tzinfo=timezone.utc),
+                metadata={"run_id": "run-2"},
+            ),
+        ]
+        for transaction in transactions:
+            save_transaction(transaction, db_path)
+
+        first_page = query_transactions(
+            db_path,
+            statuses=[Status.SUCCESSFUL],
+            reference="invoice",
+            metadata_filter={"run_id": "run-1"},
+            limit=1,
+        )
+
+        assert isinstance(first_page, TransactionPage)
+        assert first_page.format_version == 1
+        assert first_page.has_more is True
+        assert [summary.id for summary in first_page.transactions] == ["tx-2"]
+        assert first_page.next_cursor is not None
+
+        second_page = query_transactions(
+            db_path,
+            statuses=[Status.SUCCESSFUL],
+            reference="invoice",
+            metadata_filter={"run_id": "run-1"},
+            cursor=first_page.next_cursor,
+            limit=1,
+        )
+
+        assert second_page.has_more is False
+        assert second_page.next_cursor is None
+        assert [summary.id for summary in second_page.transactions] == ["tx-1"]
+        with pytest.raises(ValueError, match="does not match"):
+            query_transactions(
+                db_path,
+                statuses=[Status.SUCCESSFUL],
+                reference="other",
+                metadata_filter={"run_id": "run-1"},
+                cursor=first_page.next_cursor,
+            )
+
+    def test_query_normalizes_new_and_legacy_offset_timestamps(self, db_path) -> None:
+        offset = timezone.utc
+        transaction = Transaction(
+            id="offset",
+            reference="offset",
+            created_at=datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(transaction, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE transactions SET created_at = ?, created_at_utc = ? WHERE id = ?",
+                ("2026-07-16T06:00:00-03:00", "", transaction.id),
+            )
+            conn.execute(
+                "UPDATE rpacore_schema_versions SET version = 6 WHERE component = 'transactions'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        page = query_transactions(
+            db_path,
+            since=datetime(2026, 7, 16, 9, 0, tzinfo=offset),
+            readonly=False,
+        )
+
+        assert [summary.id for summary in page.transactions] == [transaction.id]
+        assert page.transactions[0].created_at == datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc)
+        conn = sqlite3.connect(db_path)
+        try:
+            stored = conn.execute(
+                "SELECT created_at_utc FROM transactions WHERE id = ?", (transaction.id,)
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert stored == "2026-07-16T09:00:00+00:00"
+
+    def test_query_is_readonly_by_default_and_rejects_ambiguous_boundaries(self, db_path) -> None:
+        transaction = make_transaction()
+        save_transaction(transaction, db_path)
+        before = Path(db_path).read_bytes()
+
+        page = query_transactions(db_path)
+
+        assert [summary.id for summary in page.transactions] == [transaction.id]
+        assert Path(db_path).read_bytes() == before
+        with pytest.raises(ValueError, match="timezone-aware"):
+            query_transactions(db_path, since=datetime(2026, 7, 16, 9, 0))
+        with pytest.raises(ValueError, match="valid transaction query cursor"):
+            query_transactions(db_path, cursor="not-a-cursor")
+
+    def test_query_rejects_invalid_limits_and_time_windows(self, db_path) -> None:
+        for limit in (0, 1_001):
+            with pytest.raises(ValueError, match="1 through 1000"):
+                query_transactions(db_path, limit=limit)
+        with pytest.raises(TypeError, match="1 through 1000"):
+            query_transactions(db_path, limit=True)
+        with pytest.raises(ValueError, match="earlier than or equal"):
+            query_transactions(
+                db_path,
+                since=datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc),
+                until=datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc),
+            )
+
+    def test_query_supports_independent_reference_metadata_and_until_filters(self, db_path) -> None:
+        older = Transaction(
+            id="older",
+            reference="invoice",
+            created_at=datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc),
+            metadata={"run_id": "run-1"},
+        )
+        newer = Transaction(
+            id="newer",
+            reference="invoice",
+            created_at=datetime(2026, 7, 16, 11, 0, tzinfo=timezone.utc),
+            metadata={"run_id": "run-2"},
+        )
+        other = Transaction(
+            id="other",
+            reference="other",
+            created_at=datetime(2026, 7, 16, 10, 0, tzinfo=timezone.utc),
+            metadata={"run_id": "run-1"},
+        )
+        for transaction in (older, newer, other):
+            save_transaction(transaction, db_path)
+
+        assert [summary.id for summary in query_transactions(db_path, reference="invoice").transactions] == [
+            newer.id,
+            older.id,
+        ]
+        assert [
+            summary.id
+            for summary in query_transactions(db_path, metadata_filter={"run_id": "run-1"}).transactions
+        ] == [other.id, older.id]
+        assert [
+            summary.id
+            for summary in query_transactions(
+                db_path,
+                since=datetime(2026, 7, 16, 9, 30, tzinfo=timezone.utc),
+                until=datetime(2026, 7, 16, 10, 30, tzinfo=timezone.utc),
+            ).transactions
+        ] == [other.id]
+        empty = query_transactions(db_path, reference="missing")
+        assert empty.transactions == ()
+        assert empty.has_more is False
+        assert empty.next_cursor is None
+
+    def test_query_does_not_assign_a_utc_instant_to_naive_legacy_timestamps(self, db_path) -> None:
+        transaction = Transaction(
+            id="naive-legacy",
+            reference="naive-legacy",
+            created_at=datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc),
+        )
+        save_transaction(transaction, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE transactions SET created_at = ?, created_at_utc = ? WHERE id = ?",
+                ("2026-07-16T09:00:00", "", transaction.id),
+            )
+            conn.execute(
+                "UPDATE rpacore_schema_versions SET version = 6 WHERE component = 'transactions'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        all_rows = query_transactions(db_path, readonly=False)
+        windowed_rows = query_transactions(
+            db_path,
+            since=datetime(2026, 7, 16, 8, 0, tzinfo=timezone.utc),
+        )
+
+        assert [(summary.id, summary.created_at) for summary in all_rows.transactions] == [
+            (transaction.id, None)
+        ]
+        assert windowed_rows.transactions == ()
+
+    def test_loaded_legacy_naive_timestamps_can_be_checkpointed_without_utc_coercion(
+        self, db_path
+    ) -> None:
+        transaction = Transaction(
+            id="legacy-resume",
+            reference="legacy-resume",
+            created_at=datetime(2026, 7, 16, 9, 0, tzinfo=timezone.utc),
+            started_at=datetime(2026, 7, 16, 9, 1, tzinfo=timezone.utc),
+        )
+        save_transaction(transaction, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE transactions SET created_at = ?, started_at = ?, created_at_utc = ? WHERE id = ?",
+                ("2026-07-16T09:00:00", "2026-07-16T09:01:00", "", transaction.id),
+            )
+            conn.execute(
+                "UPDATE rpacore_schema_versions SET version = 6 WHERE component = 'transactions'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        loaded = load_transaction(transaction.id, db_path)
+        save_transaction(loaded, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            stored = conn.execute(
+                "SELECT created_at, started_at, created_at_utc FROM transactions WHERE id = ?",
+                (transaction.id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert stored == ("2026-07-16T09:00:00", "2026-07-16T09:01:00", "")
+
+    def test_query_migration_adds_measured_indexes(self, db_path) -> None:
+        save_transaction(make_transaction(), db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            indexes = {
+                row[1]
+                for row in conn.execute("SELECT * FROM sqlite_master WHERE type = 'index'").fetchall()
+            }
+        finally:
+            conn.close()
+
+        assert {
+            "idx_transactions_created_at_utc_id",
+            "idx_transactions_status_created_at_utc_id",
+            "idx_transaction_metadata_key_value_transaction",
+        } <= indexes
+
+    def test_query_migration_backfills_more_than_one_batch_with_irregular_text_ids(
+        self, db_path
+    ) -> None:
+        save_transaction(make_transaction(), db_path)
+        transaction_ids = ["!first", "2", "10", "a", "a-100", "a-2", "~last"]
+        transaction_ids.extend(f"batch-{index}" for index in range(501))
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executemany(
+                "INSERT INTO transactions (id, reference, status, retry_count, created_at, created_at_utc) "
+                "VALUES (?, ?, 'successful', 0, ?, '')",
+                [
+                    (
+                        transaction_id,
+                        "batch",
+                        "2026-07-16T09:00:00+00:00",
+                    )
+                    for transaction_id in transaction_ids
+                ],
+            )
+            conn.execute(
+                "UPDATE rpacore_schema_versions SET version = 6 WHERE component = 'transactions'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        query_transactions(db_path, readonly=False)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            unresolved = conn.execute(
+                "SELECT count(*) FROM transactions WHERE created_at_utc = ''"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert unresolved == 0
+
+    def test_query_migration_rolls_back_ddl_and_schema_marker_on_failure(
+        self, db_path, monkeypatch
+    ) -> None:
+        save_transaction(make_transaction(), db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("DROP INDEX idx_transactions_created_at_utc_id")
+            conn.execute("DROP INDEX idx_transactions_status_created_at_utc_id")
+            conn.execute("DROP INDEX idx_transaction_metadata_key_value_transaction")
+            conn.execute("ALTER TABLE transactions DROP COLUMN created_at_utc")
+            conn.execute(
+                "UPDATE rpacore_schema_versions SET version = 6 WHERE component = 'transactions'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        migrate_to_v7 = persistence_module._migrate_transactions_to_v7
+
+        def fail_after_v7_migration(conn: sqlite3.Connection) -> None:
+            migrate_to_v7(conn)
+            raise RuntimeError("forced migration failure")
+
+        monkeypatch.setattr(
+            persistence_module,
+            "_migrate_transactions_to_v7",
+            fail_after_v7_migration,
+        )
+
+        with pytest.raises(RuntimeError, match="forced migration failure"):
+            query_transactions(db_path, readonly=False)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(transactions)")}
+            indexes = {
+                row[1]
+                for row in conn.execute("SELECT * FROM sqlite_master WHERE type = 'index'")
+            }
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions WHERE component = 'transactions'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert "created_at_utc" not in columns
+        assert {
+            "idx_transactions_created_at_utc_id",
+            "idx_transactions_status_created_at_utc_id",
+            "idx_transaction_metadata_key_value_transaction",
+        }.isdisjoint(indexes)
+        assert version == 6
+
+
 class TestSchemaMigration:
     def test_legacy_schema_loads_existing_transaction_skill_and_exception(self, db_path) -> None:
         transaction_id = create_legacy_db(db_path)
@@ -1638,7 +2022,7 @@ class TestSchemaMigration:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert version == 6
+        assert version == 7
 
     def test_transaction_and_queue_schema_versions_can_share_database(self, db_path) -> None:
         from rpacore.queue import QueueItem, SqliteQueue
@@ -1655,7 +2039,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 4), ("transactions", 6)]
+        assert rows == [("queue", 4), ("transactions", 7)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)
@@ -1666,13 +2050,13 @@ class TestSchemaMigration:
             )
             conn.execute(
                 "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
-                ("transactions", 7),
+                ("transactions", 8),
             )
             conn.commit()
         finally:
             conn.close()
 
-        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 7"):
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 8"):
             list_transactions(db_path)
 
     @pytest.mark.parametrize("readonly", [False, True])

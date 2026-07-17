@@ -97,7 +97,17 @@ import platform
 import sqlite3
 
 import rpacore
-from rpacore import ConfigField, Engine, ProcessContext, Skill, Status, Transaction, validate_config
+from rpacore import (
+    ConfigField,
+    Engine,
+    ProcessContext,
+    Skill,
+    Status,
+    Transaction,
+    query_transactions,
+    save_transaction,
+    validate_config,
+)
 
 repo_root = Path({str(repo_root.resolve())!r})
 checkout_package = repo_root / "rpacore"
@@ -120,6 +130,10 @@ assert validate_config(
     {{}},
     (ConfigField("retry_count", int, required=False, default=0, min_value=0),),
 ) == {{"retry_count": 0}}
+save_transaction(Transaction(id="query-smoke", reference="query-smoke"), "query-smoke.db")
+query_page = query_transactions("query-smoke.db")
+assert [summary.id for summary in query_page.transactions] == ["query-smoke"]
+assert query_page.format_version == 1
 print(rpacore.__version__)
 print(f"Python {{platform.python_version()}}; SQLite {{sqlite3.sqlite_version}}")
 """

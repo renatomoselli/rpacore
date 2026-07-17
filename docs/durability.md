@@ -45,8 +45,10 @@ include the offending `transaction.metadata[...]` path.
 SQLite stores top-level metadata entries in a dedicated table as canonical JSON
 values. `list_transactions(..., metadata_filter={...})` supports deterministic
 exact-match filters on those top-level entries, including list and object values.
-The filter is intentionally limited: it does not provide nested path queries,
-partial matches, or SQLite JSON-extension behavior.
+`query_transactions(..., metadata_filter={...})` provides the same exact-match
+boundary as a versioned, read-only summary page. The filter is intentionally
+limited: it does not provide nested path queries, partial matches, or SQLite
+JSON-extension behavior.
 
 `Transaction.artifacts` records generated or captured file paths as durable audit
 records. Skills register artifacts with
@@ -478,7 +480,7 @@ transaction schema and never migrates.
 ## Migrations
 
 Transaction schema migrations are explicit and sequential. The current latest
-transaction schema is version 6.
+transaction schema is version 7.
 
 Version 1 stores:
 
@@ -515,8 +517,22 @@ Version 6 adds:
 - monotonic transaction persistence revision
 - active queue item id and claim token for queue-run checkpoints
 
+Version 7 adds `created_at_utc` for deterministic transaction query ordering,
+plus indexes for the summary-page ordering and exact metadata filter shape.
+New transaction timestamps are stored in UTC. A timezone-aware legacy timestamp
+is normalized during migration; a missing or timezone-naive legacy value remains
+loadable but has no invented UTC instant and sorts after timestamped query rows.
+An unchanged timezone-naive timestamp loaded from such a legacy row can still be
+checkpointed or resumed without coercion; genuinely new naive timestamps are
+rejected because their UTC instant is ambiguous.
+Transaction summaries expose the UTC query key, while `load_transaction()`
+preserves the original persisted timestamp representation; aware values still
+represent the same instant. The migration sequence runs in an explicit SQLite
+write transaction, so a failed migration rolls back its schema changes and
+component version marker together.
+
 Private-development databases created before component schema versions are still
-readable. When opened, they are migrated to transaction schema version 6 by
+readable. When opened, they are migrated to transaction schema version 7 by
 adding missing columns and recording the component version.
 
 Migration defaults must not invent execution history. Current legacy defaults
@@ -545,7 +561,7 @@ discarding their transaction binding, so they must be reacquired with a token.
 Version 4 begins attempt history for future claims; it does not invent attempt
 records for older rows.
 
-Treat the queue-v4/transaction-v6 upgrade as offline: stop every worker, back up
+Treat the queue-v4/transaction-v7 upgrade as offline: stop every worker, back up
 both database files together, upgrade and open both with the new runtime, then
 restart workers so pending items are reacquired. Old workers reject the newer
 schema on their next framework database operation, but the offline boundary is

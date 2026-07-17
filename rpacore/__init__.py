@@ -28,7 +28,15 @@ from rpacore.manifest import (
 )
 from rpacore.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifiers, dispatch
 from rpacore.paths import atomic_output_path, resolve_config_path, resolve_config_paths
-from rpacore.persistence import TransactionFenceError, list_transactions, load_transaction, save_transaction
+from rpacore.persistence import (
+    TransactionFenceError,
+    TransactionPage,
+    TransactionSummary,
+    list_transactions,
+    load_transaction,
+    query_transactions,
+    save_transaction,
+)
 from rpacore.queue import (
     QueueAdminEvent,
     QueueAttempt,
@@ -82,7 +90,9 @@ __all__ = [
     "TRANSACTION_FORMAT_VERSION",
     "Transaction",
     "TransactionFenceError",
+    "TransactionPage",
     "TransactionReport",
+    "TransactionSummary",
     "WebhookNotifier",
     "atomic_output_path",
     "build_credential_provider",
@@ -98,6 +108,7 @@ __all__ = [
     "load_project_manifest",
     "load_transaction",
     "optional_config",
+    "query_transactions",
     "render_html",
     "render_text",
     "require_config",

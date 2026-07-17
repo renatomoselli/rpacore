@@ -6,6 +6,9 @@ All notable user-facing changes are recorded here.
 
 ### Added
 
+- Added a read-only, cursor-paginated `query_transactions()` API with compact
+  transaction summaries, deterministic UTC ordering, exact filters, and
+  query-specific SQLite indexes.
 - Added `atomic_output_path()` for content-agnostic file publication that
   replaces destinations only after writer success.
 - Added `execute_transaction()` as a one-off transaction runner with strict
@@ -55,6 +58,8 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- Preserved resumability for existing transactions with timezone-naive legacy
+  timestamps without inventing a UTC instant for query filtering or ordering.
 - Fenced administrative queue overrides before their claim snapshot so an
   override cannot transition a claim acquired concurrently by another worker.
 - Guaranteed that every queue-item exit stops and joins its lease heartbeat.

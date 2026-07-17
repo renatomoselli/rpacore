@@ -1,9 +1,13 @@
 """Persistence — SQLite-backed save/load for transactions and skills."""
 
+import base64
+import binascii
+import hashlib
 import json
 import sqlite3
-from collections.abc import Iterator
-from datetime import datetime
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rpacore._json_state import JsonStateError, validate_json_object
@@ -27,6 +31,30 @@ from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transactio
 _SCHEMA_TABLE = SCHEMA_VERSION_TABLE
 _TRANSACTION_SCHEMA_COMPONENT = "transactions"
 _TRANSACTION_SCHEMA_VERSION = TRANSACTION_SCHEMA_VERSION
+_QUERY_PAGE_FORMAT_VERSION = 1
+_QUERY_MAX_LIMIT = 1_000
+_MIGRATION_BATCH_SIZE = 500
+
+
+@dataclass(frozen=True)
+class TransactionSummary:
+    """Small immutable transaction record returned by read-only queries."""
+
+    id: str
+    reference: str
+    status: Status
+    retry_count: int
+    created_at: datetime | None
+
+
+@dataclass(frozen=True)
+class TransactionPage:
+    """One versioned page of transaction summaries."""
+
+    transactions: tuple[TransactionSummary, ...]
+    has_more: bool
+    next_cursor: str | None
+    format_version: int = _QUERY_PAGE_FORMAT_VERSION
 
 
 class TransactionFenceError(RuntimeError):
@@ -209,9 +237,69 @@ def _migrate_transactions_to_v6(conn: sqlite3.Connection) -> None:
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 6)
 
 
+def _migrate_transactions_to_v7(conn: sqlite3.Connection) -> None:
+    """Add UTC query keys and indexes for deterministic transaction inspection."""
+    _ensure_column(
+        conn,
+        "transactions",
+        "created_at_utc",
+        "created_at_utc TEXT NOT NULL DEFAULT ''",
+    )
+    last_id: str | None = None
+    while True:
+        if last_id is None:
+            rows = conn.execute(
+                "SELECT id, created_at, created_at_utc FROM transactions ORDER BY id LIMIT ?",
+                (_MIGRATION_BATCH_SIZE,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, created_at, created_at_utc FROM transactions "
+                "WHERE id > ? ORDER BY id LIMIT ?",
+                (last_id, _MIGRATION_BATCH_SIZE),
+            ).fetchall()
+        if not rows:
+            break
+        updates = [
+            (
+                _legacy_utc_timestamp(
+                    row["created_at"],
+                    path="transactions.created_at",
+                    transaction_id=row["id"],
+                ),
+                row["id"],
+            )
+            for row in rows
+            if not row["created_at_utc"]
+        ]
+        if updates:
+            conn.executemany(
+                "UPDATE transactions SET created_at_utc = ? WHERE id = ?",
+                updates,
+            )
+        last_id = str(rows[-1]["id"])
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_created_at_utc_id "
+        "ON transactions (created_at_utc DESC, id ASC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_status_created_at_utc_id "
+        "ON transactions (status, created_at_utc DESC, id ASC)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transaction_metadata_key_value_transaction "
+        "ON transaction_metadata (key, value_json, transaction_id)"
+    )
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 7)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Run explicit transaction schema migrations through the latest version."""
-    with conn:
+    """Run explicit transaction schema migrations through one write transaction."""
+    # sqlite3's connection context manager does not begin a transaction for
+    # DDL. Start one explicitly so a failed migration cannot leave its columns
+    # or indexes ahead of the component schema marker.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
         ensure_database_compatibility(conn)
         ensure_supported_schema(
             conn,
@@ -244,11 +332,19 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 6:
             _migrate_transactions_to_v6(conn)
             current_version = 6
+        if current_version < 7:
+            _migrate_transactions_to_v7(conn)
+            current_version = 7
         if current_version != _TRANSACTION_SCHEMA_VERSION:
             raise RuntimeError(
                 "Unsupported transaction schema version "
                 f"{current_version}; expected {_TRANSACTION_SCHEMA_VERSION}"
             )
+    except Exception:
+        conn.rollback()
+        raise
+    else:
+        conn.commit()
 
 
 def _skill_id(transaction_id: str, skill: Skill) -> str:
@@ -369,8 +465,58 @@ def _load_artifacts(transaction_id: str, rows: list[sqlite3.Row]) -> list[Artifa
     return artifacts
 
 
-def _timestamp_to_storage(value: datetime | None) -> str:
-    return "" if value is None else value.isoformat()
+def _is_aware_timestamp(value: datetime) -> bool:
+    return value.tzinfo is not None and value.utcoffset() is not None
+
+
+def _timestamp_to_storage(value: datetime | None, *, legacy_value: str | None = None) -> str:
+    """Return a UTC timestamp, preserving an unchanged legacy-naive value."""
+    if value is None:
+        return ""
+    if not _is_aware_timestamp(value):
+        if legacy_value:
+            try:
+                legacy_timestamp = datetime.fromisoformat(legacy_value)
+            except ValueError:
+                legacy_timestamp = None
+            if legacy_timestamp is not None and not _is_aware_timestamp(legacy_timestamp):
+                if value == legacy_timestamp:
+                    return legacy_value
+        raise ValueError("transaction timestamps must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _legacy_utc_timestamp(
+    value: str | None,
+    *,
+    path: str,
+    transaction_id: str,
+) -> str:
+    """Normalize a legacy timestamp for query ordering without inventing UTC."""
+    if not value:
+        return ""
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise SystemException(
+            f"Persisted transaction timestamp is invalid for transaction {transaction_id!r} "
+            f"at {path}: {value!r}",
+            action="repair transaction timestamps in the persistence database",
+        ) from exc
+    if not _is_aware_timestamp(timestamp):
+        return ""
+    return timestamp.astimezone(timezone.utc).isoformat()
+
+
+def _query_timestamp(value: datetime | None, *, field: str) -> str | None:
+    """Normalize one public UTC query boundary or reject an ambiguous value."""
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise TypeError(f"{field} must be datetime or None")
+    if not _is_aware_timestamp(value):
+        raise ValueError(f"{field} must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat()
 
 
 def _timestamp_from_storage(value: str | None, *, path: str, transaction_id: str) -> datetime | None:
@@ -444,20 +590,42 @@ def _write_transaction_rows(
     claim_token: str = "",
 ) -> int:
     """Write one full transaction snapshot and return its new revision."""
-    created_at = _timestamp_to_storage(transaction.created_at)
-    started_at = _timestamp_to_storage(transaction.started_at)
-    finished_at = _timestamp_to_storage(transaction.finished_at)
+    legacy_values: sqlite3.Row | None = None
+    timestamps = (transaction.created_at, transaction.started_at, transaction.finished_at)
+    if any(value is not None and not _is_aware_timestamp(value) for value in timestamps):
+        legacy_values = conn.execute(
+            "SELECT created_at, started_at, finished_at FROM transactions WHERE id = ?",
+            (transaction.id,),
+        ).fetchone()
+    created_at = _timestamp_to_storage(
+        transaction.created_at,
+        legacy_value=None if legacy_values is None else legacy_values["created_at"],
+    )
+    created_at_utc = _legacy_utc_timestamp(
+        created_at,
+        path="transactions.created_at",
+        transaction_id=transaction.id,
+    )
+    started_at = _timestamp_to_storage(
+        transaction.started_at,
+        legacy_value=None if legacy_values is None else legacy_values["started_at"],
+    )
+    finished_at = _timestamp_to_storage(
+        transaction.finished_at,
+        legacy_value=None if legacy_values is None else legacy_values["finished_at"],
+    )
 
     conn.execute(
         "INSERT OR IGNORE INTO transactions "
-        "(id, reference, status, retry_count, created_at, started_at, finished_at, state) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, reference, status, retry_count, created_at, created_at_utc, started_at, finished_at, state) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             transaction.id,
             transaction.reference,
             transaction.status,
             transaction.retry_count,
             created_at,
+            created_at_utc,
             started_at or None,
             finished_at or None,
             state_json,
@@ -468,6 +636,7 @@ def _write_transaction_rows(
         transaction.status,
         transaction.retry_count,
         created_at,
+        created_at_utc,
         started_at or None,
         finished_at or None,
         state_json,
@@ -476,6 +645,7 @@ def _write_transaction_rows(
         result = conn.execute(
             "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
             "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END, "
+            "created_at_utc = CASE WHEN created_at_utc = '' THEN ? ELSE created_at_utc END, "
             "started_at = ?, finished_at = ?, state = ?, revision = revision + 1 "
             "WHERE id = ?",
             (*params, transaction.id),
@@ -484,6 +654,7 @@ def _write_transaction_rows(
         result = conn.execute(
             "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
             "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END, "
+            "created_at_utc = CASE WHEN created_at_utc = '' THEN ? ELSE created_at_utc END, "
             "started_at = ?, finished_at = ?, state = ?, revision = revision + 1, "
             "queue_item_id = ?, claim_token = ? "
             "WHERE id = ? AND revision = ?",
@@ -900,6 +1071,209 @@ def load_transaction(
         )
     finally:
         conn.close()
+
+
+def _query_statuses(statuses: Iterable[Status] | None) -> tuple[str, ...]:
+    if statuses is None:
+        return ()
+    if isinstance(statuses, (str, Status)):
+        raise TypeError("statuses must be an iterable of Status values")
+    values: set[str] = set()
+    for status in statuses:
+        if not isinstance(status, Status):
+            raise TypeError("statuses must contain only Status values")
+        values.add(str(status))
+    if not values:
+        raise ValueError("statuses must not be empty; pass None for every status")
+    return tuple(sorted(values))
+
+
+def _query_filter_fingerprint(
+    *,
+    statuses: tuple[str, ...],
+    since: str | None,
+    until: str | None,
+    reference: str | None,
+    metadata: dict[str, str],
+) -> str:
+    serialized = json.dumps(
+        {
+            "metadata": metadata,
+            "reference": reference,
+            "since": since,
+            "statuses": statuses,
+            "until": until,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _encode_query_cursor(*, created_at_utc: str, transaction_id: str, filters: str) -> str:
+    payload = json.dumps(
+        {
+            "created_at_utc": created_at_utc,
+            "filters": filters,
+            "id": transaction_id,
+            "version": _QUERY_PAGE_FORMAT_VERSION,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_query_cursor(cursor: str, *, filters: str) -> tuple[str, str]:
+    if not isinstance(cursor, str) or not cursor:
+        raise ValueError("cursor must be a non-empty query cursor")
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (binascii.Error, UnicodeEncodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("cursor is not a valid transaction query cursor") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("cursor is not a valid transaction query cursor")
+    if payload.get("version") != _QUERY_PAGE_FORMAT_VERSION:
+        raise ValueError("cursor has an unsupported transaction query version")
+    if payload.get("filters") != filters:
+        raise ValueError("cursor does not match the transaction query filters")
+    created_at_utc = payload.get("created_at_utc")
+    transaction_id = payload.get("id")
+    if not isinstance(created_at_utc, str) or not isinstance(transaction_id, str):
+        raise ValueError("cursor is not a valid transaction query cursor")
+    return created_at_utc, transaction_id
+
+
+def query_transactions(
+    db_path: str = "rpacore.db",
+    *,
+    statuses: Iterable[Status] | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    reference: str | None = None,
+    metadata_filter: dict[str, object] | None = None,
+    cursor: str | None = None,
+    limit: int = 100,
+    readonly: bool = True,
+) -> TransactionPage:
+    """Return one deterministic, read-only page of lightweight transactions.
+
+    Results sort by normalized UTC creation time descending, then transaction id
+    ascending. A cursor fixes its filter set and continues after the last item
+    in that ordering. The query snapshots one page only: inserts before the
+    cursor are not included in later pages, while inserts after it may appear.
+    Timezone-naive legacy timestamps remain loadable but have no UTC query key;
+    they sort after timestamped rows and do not match time-window filters.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise TypeError("limit must be an integer from 1 through 1000")
+    if limit < 1 or limit > _QUERY_MAX_LIMIT:
+        raise ValueError("limit must be an integer from 1 through 1000")
+    if reference is not None and not isinstance(reference, str):
+        raise TypeError("reference must be str or None")
+
+    normalized_statuses = _query_statuses(statuses)
+    normalized_since = _query_timestamp(since, field="since")
+    normalized_until = _query_timestamp(until, field="until")
+    if normalized_since is not None and normalized_until is not None:
+        if normalized_since > normalized_until:
+            raise ValueError("since must be earlier than or equal to until")
+    metadata_json = (
+        _metadata_to_storage(metadata_filter, path="metadata_filter")
+        if metadata_filter is not None
+        else {}
+    )
+    filters = _query_filter_fingerprint(
+        statuses=normalized_statuses,
+        since=normalized_since,
+        until=normalized_until,
+        reference=reference,
+        metadata=metadata_json,
+    )
+    cursor_position = None if cursor is None else _decode_query_cursor(cursor, filters=filters)
+
+    conn = _connect(db_path, readonly=readonly)
+    try:
+        if readonly:
+            ensure_database_compatibility(conn)
+            require_current_schema(
+                conn,
+                component=_TRANSACTION_SCHEMA_COMPONENT,
+                supported_version=_TRANSACTION_SCHEMA_VERSION,
+                label="transaction",
+            )
+        else:
+            _ensure_schema(conn)
+
+        query = (
+            "SELECT id, reference, status, retry_count, created_at_utc FROM transactions WHERE 1=1"
+        )
+        params: list[object] = []
+        if normalized_statuses:
+            placeholders = ", ".join("?" for _ in normalized_statuses)
+            query += f" AND status IN ({placeholders})"
+            params.extend(normalized_statuses)
+        if normalized_since is not None or normalized_until is not None:
+            query += " AND created_at_utc != ''"
+        if normalized_since is not None:
+            query += " AND created_at_utc >= ?"
+            params.append(normalized_since)
+        if normalized_until is not None:
+            query += " AND created_at_utc <= ?"
+            params.append(normalized_until)
+        if reference is not None:
+            query += " AND reference = ?"
+            params.append(reference)
+        for key, value_json in sorted(metadata_json.items()):
+            query += (
+                " AND EXISTS ("
+                "SELECT 1 FROM transaction_metadata tm "
+                "WHERE tm.transaction_id = transactions.id "
+                "AND tm.key = ? AND tm.value_json = ?)"
+            )
+            params.extend([key, value_json])
+        if cursor_position is not None:
+            cursor_created_at, cursor_id = cursor_position
+            query += (
+                " AND (created_at_utc < ? OR (created_at_utc = ? AND id > ?))"
+            )
+            params.extend([cursor_created_at, cursor_created_at, cursor_id])
+        query += " ORDER BY created_at_utc DESC, id ASC LIMIT ?"
+        params.append(limit + 1)
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    transactions = tuple(
+        TransactionSummary(
+            id=row["id"],
+            reference=row["reference"],
+            status=Status(row["status"]),
+            retry_count=row["retry_count"],
+            created_at=_timestamp_from_storage(
+                row["created_at_utc"],
+                path="transactions.created_at_utc",
+                transaction_id=row["id"],
+            ),
+        )
+        for row in page_rows
+    )
+    next_cursor = None
+    if has_more and page_rows:
+        last_row = page_rows[-1]
+        next_cursor = _encode_query_cursor(
+            created_at_utc=last_row["created_at_utc"],
+            transaction_id=last_row["id"],
+            filters=filters,
+        )
+    return TransactionPage(
+        transactions=transactions,
+        has_more=has_more,
+        next_cursor=next_cursor,
+    )
 
 
 def list_transactions(
