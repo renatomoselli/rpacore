@@ -377,16 +377,16 @@ load_transaction(transaction_id, db_path="rpacore.db")
 list_transactions(db_path="rpacore.db")
 ```
 
-The transaction export iterator snapshots all matching identifiers in
-`created_at DESC, id ASC` order and closes its inspection connection before it
-yields the first loaded transaction. Inserts after iteration starts are not
-part of that export. Updates to an already selected transaction are visible if
-they commit before that individual record is loaded. A selected transaction
-deleted by concurrent cleanup before its load is omitted. A paused or abandoned
-export therefore retains identifier memory but no SQLite read lock. Export has
-no transaction-list limit: identifier memory scales with the selected
-transaction count. `list_transactions()` uses the same concurrent-deletion
-omission rule for its bounded result set.
+CLI list and export select full records through `query_transactions()` summary
+pages ordered by normalized UTC creation time and transaction id. Each page is
+loaded independently, so inserts before the cursor do not appear later while
+inserts after it can appear in a later page. Updates to an already selected
+transaction are visible if they commit before that individual record is loaded;
+a selected transaction deleted by concurrent cleanup before its load is omitted.
+This avoids a long-lived SQLite read lock and retains only one summary page at a
+time. Export has no transaction-list cap and walks additional pages as needed.
+`list_transactions()` remains the compatible full-record API with its existing
+bounded snapshot behavior.
 
 These function parameters are still named `db_path` because they directly name
 the database file being used by the function. In configuration, the transaction

@@ -22,6 +22,9 @@ All notable user-facing changes are recorded here.
 
 ### Changed
 
+- Transaction CLI list and export now select membership through normalized-UTC
+  query pages, avoiding export's unbounded identifier snapshot while preserving
+  JSON and NDJSON export format version 1.
 - Expired leases now consume queue retry budget, and malformed pending payloads
   are quarantined so later valid work can continue.
 

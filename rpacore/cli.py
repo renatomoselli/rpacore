@@ -9,14 +9,14 @@ import sys
 import tempfile
 import threading
 import textwrap
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
 from rpacore import __version__
 from rpacore.exceptions import BusinessException
 from rpacore.manifest import load_project_manifest, resolve_project_entrypoint
-from rpacore.persistence import iter_transactions, list_transactions, load_transaction
+from rpacore.persistence import load_transaction, query_transactions
 from rpacore.serialization import serialize_transaction
 from rpacore.transaction import Transaction
 
@@ -28,6 +28,7 @@ EXPORT_FORMAT_VERSION = 1
 _NDJSON_EXPORT_KEYS = frozenset(
     {"export_format_version", "framework_version", "exported_at"}
 )
+_QUERY_PAGE_SIZE = 1_000
 _ENTRYPOINT_PATH_LOCK = threading.RLock()
 
 
@@ -177,11 +178,7 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
     try:
         db_path = _transaction_db_path(args.db_path)
         if args.transaction_command == "list":
-            transactions = list_transactions(
-                db_path,
-                limit=args.limit,
-                readonly=True,
-            )
+            transactions = list(_iter_queried_transactions(db_path, limit=args.limit))
             if args.json:
                 _write_json(
                     {
@@ -215,7 +212,7 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
                 _write_transaction_detail(transaction)
             return SUCCESS
         if args.transaction_command == "export":
-            transactions = iter_transactions(db_path, readonly=True)
+            transactions = _iter_queried_transactions(db_path)
             _write_transaction_export(transactions, export_format=args.format)
             return SUCCESS
     except KeyError as exc:
@@ -227,6 +224,30 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
     except Exception as exc:
         _print_error(f"Could not inspect transactions in {db_path}: {exc}")
         return EXECUTION_ERROR
+
+
+def _iter_queried_transactions(
+    db_path: str,
+    *,
+    limit: int | None = None,
+) -> Iterator[Transaction]:
+    """Yield full records selected through the versioned summary-page query."""
+    cursor = None
+    remaining = limit
+    while remaining is None or remaining > 0:
+        page_limit = _QUERY_PAGE_SIZE if remaining is None else min(_QUERY_PAGE_SIZE, remaining)
+        page = query_transactions(db_path, cursor=cursor, limit=page_limit)
+        for summary in page.transactions:
+            try:
+                yield load_transaction(summary.id, db_path, readonly=True)
+            except KeyError:
+                # A concurrently cleaned-up record cannot be rendered after it
+                # was selected by the page query.
+                continue
+        if not page.has_more:
+            return
+        cursor = page.next_cursor
+        remaining = None if remaining is None else remaining - len(page.transactions)
 
 
 def _transaction_db_path(db_path: str | None) -> str:

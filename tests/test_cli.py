@@ -19,6 +19,8 @@ from rpacore import (
     Skill,
     Status,
     Transaction,
+    TransactionPage,
+    TransactionSummary,
     list_transactions,
     save_transaction,
 )
@@ -43,6 +45,24 @@ def run_cli(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
+    )
+
+
+def query_page_for(*transactions: Transaction) -> TransactionPage:
+    """Return one complete summary page for CLI query-boundary tests."""
+    return TransactionPage(
+        transactions=tuple(
+            TransactionSummary(
+                id=transaction.id,
+                reference=transaction.reference,
+                status=transaction.status,
+                retry_count=transaction.retry_count,
+                created_at=transaction.created_at,
+            )
+            for transaction in transactions
+        ),
+        has_more=False,
+        next_cursor=None,
     )
 
 
@@ -618,22 +638,19 @@ class TestCliTransaction:
         payload = json.loads(result.stdout)
         assert payload["transactions"][0]["id"] == tx.id
 
-    def test_transaction_export_uses_streaming_iterator(
+    def test_transaction_export_uses_query_pages(
         self,
         tmp_path: Path,
         monkeypatch,
         capsys,
     ) -> None:
-        monkeypatch.setattr(
-            cli_module,
-            "list_transactions",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no list")),
-        )
-        monkeypatch.setattr(
-            cli_module,
-            "iter_transactions",
-            lambda *_args, **_kwargs: iter([]),
-        )
+        calls: list[dict[str, object]] = []
+
+        def query_page(*_args, **kwargs) -> TransactionPage:
+            calls.append(kwargs)
+            return query_page_for()
+
+        monkeypatch.setattr(cli_module, "query_transactions", query_page)
 
         result = cli_module.main(
             [
@@ -650,6 +667,55 @@ class TestCliTransaction:
         assert result == 0
         assert captured.err == ""
         assert json.loads(captured.out)["transactions"] == []
+        assert calls == [{"cursor": None, "limit": 1_000}]
+
+    def test_transaction_export_follows_query_page_cursors(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        capsys,
+    ) -> None:
+        first = Transaction(reference="first")
+        second = Transaction(reference="second")
+        pages = {
+            None: TransactionPage(query_page_for(first).transactions, True, "next-page"),
+            "next-page": query_page_for(second),
+        }
+        calls: list[dict[str, object]] = []
+
+        def query_page(*_args, **kwargs) -> TransactionPage:
+            calls.append(kwargs)
+            return pages[kwargs["cursor"]]
+
+        transactions = {first.id: first, second.id: second}
+        monkeypatch.setattr(cli_module, "query_transactions", query_page)
+        monkeypatch.setattr(
+            cli_module,
+            "load_transaction",
+            lambda transaction_id, *_args, **_kwargs: transactions[transaction_id],
+        )
+
+        result = cli_module.main(
+            [
+                "transaction",
+                "export",
+                "--db",
+                str(tmp_path / "transactions.db"),
+                "--format",
+                "json",
+            ]
+        )
+
+        captured = capsys.readouterr()
+        assert result == 0
+        assert captured.err == ""
+        assert [
+            transaction["id"] for transaction in json.loads(captured.out)["transactions"]
+        ] == [first.id, second.id]
+        assert calls == [
+            {"cursor": None, "limit": 1_000},
+            {"cursor": "next-page", "limit": 1_000},
+        ]
 
     def test_transaction_export_does_not_block_concurrent_checkpoint(
         self,
@@ -776,10 +842,16 @@ class TestCliTransaction:
     ) -> None:
         good = Transaction(reference="good")
         bad = Transaction(reference="bad", state={"runtime": object()})
+        transactions = {good.id: good, bad.id: bad}
         monkeypatch.setattr(
             cli_module,
-            "iter_transactions",
-            lambda *_args, **_kwargs: iter([good, bad]),
+            "query_transactions",
+            lambda *_args, **_kwargs: query_page_for(good, bad),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "load_transaction",
+            lambda transaction_id, *_args, **_kwargs: transactions[transaction_id],
         )
 
         result = cli_module.main(
@@ -804,10 +876,16 @@ class TestCliTransaction:
         monkeypatch,
         capsys,
     ) -> None:
+        transaction = Transaction(reference="collision")
         monkeypatch.setattr(
             cli_module,
-            "iter_transactions",
-            lambda *_args, **_kwargs: iter([Transaction(reference="collision")]),
+            "query_transactions",
+            lambda *_args, **_kwargs: query_page_for(transaction),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "load_transaction",
+            lambda *_args, **_kwargs: transaction,
         )
         monkeypatch.setattr(
             cli_module,
@@ -838,7 +916,12 @@ class TestCliTransaction:
         capsys,
     ) -> None:
         tx = Transaction(reference="invoice", state={"runtime": object()})
-        monkeypatch.setattr(cli_module, "list_transactions", lambda *_args, **_kwargs: [tx])
+        monkeypatch.setattr(
+            cli_module,
+            "query_transactions",
+            lambda *_args, **_kwargs: query_page_for(tx),
+        )
+        monkeypatch.setattr(cli_module, "load_transaction", lambda *_args, **_kwargs: tx)
 
         result = cli_module.main(
             ["transaction", "list", "--db", str(tmp_path / "transactions.db"), "--json"]
