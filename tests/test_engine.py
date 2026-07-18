@@ -9,6 +9,7 @@ import pytest
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
+from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.persistence import load_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
@@ -53,6 +54,9 @@ class TestEngineHappyPath:
         Engine().run(_ctx(tx))
         assert tx.status is Status.SUCCESSFUL
         assert all(s.status is Status.SUCCESSFUL for s in tx.skills)
+        assert tx.outcome_category is OutcomeCategory.SUCCESSFUL
+        assert tx.retry_disposition is RetryDisposition.NOT_APPLICABLE
+        assert tx.failure_code == ""
 
     def test_successful_run_records_timestamps_and_history(self) -> None:
         tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
@@ -146,6 +150,8 @@ class TestEngineBusinessException:
         )
         Engine().run(_ctx(tx))
         assert tx.status is Status.FAILED
+        assert tx.outcome_category is OutcomeCategory.BUSINESS_FAILED
+        assert tx.retry_disposition is RetryDisposition.NOT_REQUESTED
 
     def test_stopping_business_exception_skips_downstream_pending_skills(self) -> None:
         tx = Transaction(
@@ -282,6 +288,8 @@ class TestEngineUnhandledException:
         assert len(tx.skills[0].exceptions) == 1
         assert isinstance(tx.skills[0].exceptions[0], SystemException)
         assert "unexpected" in str(tx.skills[0].exceptions[0])
+        assert tx.skills[0].exceptions[0].code == "rpacore.system.unexpected"
+        assert tx.failure_code == "rpacore.system.unexpected"
 
     def test_unhandled_exception_stops_execution(self) -> None:
         class BadSkill(Skill):
@@ -306,6 +314,17 @@ class TestEngineUnhandledException:
 
 
 class TestEngineStateTransitions:
+    def test_execution_validation_records_terminal_outcome(self) -> None:
+        tx = Transaction(reference="", skills=[SuccessSkill("a", 1)])
+
+        with pytest.raises(ExecutionValidationError, match="transaction.reference"):
+            Engine().run(_ctx(tx))
+
+        assert tx.status is Status.FAILED
+        assert tx.outcome_category is OutcomeCategory.VALIDATION_FAILED
+        assert tx.retry_disposition is RetryDisposition.NOT_REQUESTED
+        assert tx.failure_code == "rpacore.validation.execution"
+
     def test_transaction_is_in_progress_during_execution(self) -> None:
         captured: list[Status] = []
 
@@ -506,6 +525,8 @@ class TestEngineCheckpointing:
 
         assert tx.status is Status.FAILED
         assert tx.history[-1].event is HistoryEvent.TRANSACTION_COMPLETED
+        assert tx.outcome_category is OutcomeCategory.INTERRUPTED
+        assert tx.retry_disposition is RetryDisposition.UNKNOWN
 
     def test_stopping_business_exception_checkpoints_downstream_skips_as_batch(self) -> None:
         checkpoints: list[list[Status]] = []
@@ -894,6 +915,8 @@ class TestEngineRetry:
         )
         Engine(max_retries=2).run(_ctx(tx))
         assert tx.status is Status.FAILED
+        assert tx.outcome_category is OutcomeCategory.SYSTEM_FAILED
+        assert tx.retry_disposition is RetryDisposition.RETRY_EXHAUSTED
 
     def test_successful_skills_not_retried(self) -> None:
         counts: dict[str, int] = {"a": 0, "b": 0}

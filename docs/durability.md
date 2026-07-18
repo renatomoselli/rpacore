@@ -50,6 +50,16 @@ boundary as a versioned, read-only summary page. The filter is intentionally
 limited: it does not provide nested path queries, partial matches, or SQLite
 JSON-extension behavior.
 
+`Transaction.status` remains a lifecycle value. Its durable
+`outcome_category`, `retry_disposition`, and optional `failure_code` describe
+terminal work truth independently: they are not derived from exception prose or
+retry counts. The Engine sets its own terminal outcome and retry decision at the
+point it decides them. A queue attempt keeps its separate delivery outcome, so a
+later lease loss or requeue does not rewrite an already completed transaction.
+Legacy or incomplete rows use `unknown`; they are not backfilled with invented
+causes. Failure codes are empty or lowercase dot-separated ASCII namespaces;
+`rpacore.*` is reserved for framework-owned causes.
+
 `Transaction.artifacts` records generated or captured file paths as durable audit
 records. Skills register artifacts with
 `ProcessContext.add_artifact(name, path, kind="", metadata=None)`. Each artifact
@@ -458,14 +468,14 @@ The current transaction persistence component is recorded as:
 
 ```text
 component = "transactions"
-version   = 6
+version   = 8
 ```
 
 The SQLite queue records its own component version:
 
 ```text
 component = "queue"
-version   = 3
+version   = 4
 ```
 
 This lets transaction and queue tables safely coexist in one SQLite file if a
@@ -480,7 +490,7 @@ transaction schema and never migrates.
 ## Migrations
 
 Transaction schema migrations are explicit and sequential. The current latest
-transaction schema is version 7.
+transaction schema is version 8.
 
 Version 1 stores:
 
@@ -531,8 +541,13 @@ represent the same instant. The migration sequence runs in an explicit SQLite
 write transaction, so a failed migration rolls back its schema changes and
 component version marker together.
 
+Version 8 adds transaction `outcome_category`, `retry_disposition`, and
+`failure_code`, plus the optional `code` on persisted skill exceptions. All
+new fields default to `unknown` or empty rather than inferring missing terminal
+truth from prior status, messages, or retries.
+
 Private-development databases created before component schema versions are still
-readable. When opened, they are migrated to transaction schema version 7 by
+readable. When opened, they are migrated to transaction schema version 8 by
 adding missing columns and recording the component version.
 
 Migration defaults must not invent execution history. Current legacy defaults
@@ -548,6 +563,8 @@ are deliberately limited:
 - missing artifacts default to an empty list
 - missing revision defaults to zero
 - missing queue item id and claim token default to empty strings
+- missing outcome category and retry disposition default to `unknown`
+- missing transaction and exception failure codes default to empty strings
 
 Future persisted models must add fixture-based migration tests from the previous
 latest schema to the new latest schema.
@@ -561,7 +578,7 @@ discarding their transaction binding, so they must be reacquired with a token.
 Version 4 begins attempt history for future claims; it does not invent attempt
 records for older rows.
 
-Treat the queue-v4/transaction-v7 upgrade as offline: stop every worker, back up
+Treat transaction-schema upgrades and the queue-v4 upgrade as offline: stop every worker, back up
 both database files together, upgrade and open both with the new runtime, then
 restart workers so pending items are reacquired. Old workers reject the newer
 schema on their next framework database operation, but the offline boundary is

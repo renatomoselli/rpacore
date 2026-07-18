@@ -12,6 +12,7 @@ from rpacore._json_state import validate_json_object
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.logger import get_logger
+from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.screenshot import capture_screenshot
 from rpacore.skill import Skill
 from rpacore.status import Status
@@ -78,12 +79,18 @@ class Engine:
             transaction.validate_for_execution()
         except ExecutionValidationError:
             transaction.status = Status.FAILED
+            transaction.outcome_category = OutcomeCategory.VALIDATION_FAILED
+            transaction.retry_disposition = RetryDisposition.NOT_REQUESTED
+            transaction.failure_code = "rpacore.validation.execution"
             transaction.finished_at = datetime.now(timezone.utc)
             transaction.append_history(HistoryEvent.TRANSACTION_COMPLETED)
             raise
         initial_blocked = self._initial_blocked_skill_ids(transaction)
         self._reset_skipped_skills(transaction)
         transaction.status = Status.IN_PROGRESS
+        transaction.outcome_category = OutcomeCategory.UNKNOWN
+        transaction.retry_disposition = RetryDisposition.UNKNOWN
+        transaction.failure_code = ""
         if transaction.started_at is None:
             transaction.started_at = datetime.now(timezone.utc)
         transaction.finished_at = None
@@ -112,6 +119,9 @@ class Engine:
                 self._checkpoint(transaction, checkpoint)
         except MemoryError:
             transaction.status = Status.FAILED
+            transaction.outcome_category = OutcomeCategory.INTERRUPTED
+            transaction.retry_disposition = RetryDisposition.UNKNOWN
+            transaction.failure_code = ""
             if transaction.finished_at is None:
                 transaction.finished_at = datetime.now(timezone.utc)
             transaction.append_history(HistoryEvent.TRANSACTION_COMPLETED)
@@ -125,8 +135,19 @@ class Engine:
 
         if all(s.status in (Status.SUCCESSFUL, Status.SKIPPED) for s in transaction.skills):
             transaction.status = Status.SUCCESSFUL
+            transaction.outcome_category = OutcomeCategory.SUCCESSFUL
+            transaction.retry_disposition = RetryDisposition.NOT_APPLICABLE
+            transaction.failure_code = ""
         else:
             transaction.status = Status.FAILED
+            terminal_exception = self._last_failed_exception(transaction)
+            if isinstance(terminal_exception, BusinessException):
+                transaction.outcome_category = OutcomeCategory.BUSINESS_FAILED
+                transaction.retry_disposition = RetryDisposition.NOT_REQUESTED
+            else:
+                transaction.outcome_category = OutcomeCategory.SYSTEM_FAILED
+                transaction.retry_disposition = RetryDisposition.RETRY_EXHAUSTED
+            transaction.failure_code = "" if terminal_exception is None else terminal_exception.code
         transaction.finished_at = datetime.now(timezone.utc)
         transaction.append_history(HistoryEvent.TRANSACTION_COMPLETED)
         self._log_transaction_completed(transaction)
@@ -248,6 +269,7 @@ class Engine:
                     str(exc),
                     action=skill.name,
                     retry_number=transaction.retry_count,
+                    code="rpacore.system.unexpected",
                 )
                 skill.status = Status.FAILED
                 skill.exceptions.append(wrapped)
@@ -266,6 +288,26 @@ class Engine:
                     transaction.append_history(HistoryEvent.SKILL_SKIPPED, skill=skill)
                 self._log_skill_completed(transaction, skill)
                 self._checkpoint(transaction, checkpoint)
+
+    def _last_failed_exception(
+        self,
+        transaction: Transaction,
+    ) -> BusinessException | SystemException | None:
+        """Return the exception recorded by the last durable skill failure."""
+        skills = {
+            (skill.name, skill.execution_order): skill
+            for skill in transaction.skills
+        }
+        for entry in reversed(transaction.history):
+            if entry.event is not HistoryEvent.SKILL_FAILED:
+                continue
+            skill = skills.get((entry.skill_name, entry.skill_execution_order))
+            if skill is None:
+                continue
+            for exc in reversed(skill.exceptions):
+                if exc.retry_number == entry.retry_number:
+                    return exc
+        return None
 
     def _register_screenshot_artifact(
         self,

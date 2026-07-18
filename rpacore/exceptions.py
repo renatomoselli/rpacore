@@ -7,6 +7,8 @@ Two categories:
 
 from datetime import datetime, timezone
 
+from rpacore.outcome import validate_failure_code
+
 
 class ExecutionValidationError(ValueError):
     """Permanent invalid transaction or skill wiring detected before execution."""
@@ -29,6 +31,7 @@ class BusinessException(Exception):
         datetime_occurred: datetime | None = None,
         screenshot_path: str = "",
         stop: bool = False,
+        code: str = "",
     ) -> None:
         super().__init__(message)
         self.action: str = action
@@ -36,6 +39,7 @@ class BusinessException(Exception):
         self.datetime_occurred: datetime = datetime_occurred or datetime.now(timezone.utc)
         self.screenshot_path: str = screenshot_path
         self.stop: bool = stop
+        self.code: str = validate_failure_code(code)
 
     @property
     def stops_execution(self) -> bool:
@@ -57,12 +61,14 @@ class SystemException(Exception):
         retry_number: int = 0,
         datetime_occurred: datetime | None = None,
         screenshot_path: str = "",
+        code: str = "",
     ) -> None:
         super().__init__(message)
         self.action: str = action
         self.retry_number: int = retry_number
         self.datetime_occurred: datetime = datetime_occurred or datetime.now(timezone.utc)
         self.screenshot_path: str = screenshot_path
+        self.code: str = validate_failure_code(code)
 
     @property
     def stops_execution(self) -> bool:

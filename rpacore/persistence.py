@@ -23,6 +23,7 @@ from rpacore._sqlite import (
     require_current_schema,
 )
 from rpacore.exceptions import BusinessException, SystemException
+from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
@@ -293,6 +294,30 @@ def _migrate_transactions_to_v7(conn: sqlite3.Connection) -> None:
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 7)
 
 
+def _migrate_transactions_to_v8(conn: sqlite3.Connection) -> None:
+    """Add durable terminal outcome truth and optional failure codes."""
+    _ensure_column(
+        conn,
+        "transactions",
+        "outcome_category",
+        "outcome_category TEXT NOT NULL DEFAULT 'unknown'",
+    )
+    _ensure_column(
+        conn,
+        "transactions",
+        "retry_disposition",
+        "retry_disposition TEXT NOT NULL DEFAULT 'unknown'",
+    )
+    _ensure_column(
+        conn,
+        "transactions",
+        "failure_code",
+        "failure_code TEXT NOT NULL DEFAULT ''",
+    )
+    _ensure_column(conn, "exceptions", "code", "code TEXT NOT NULL DEFAULT ''")
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 8)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run explicit transaction schema migrations through one write transaction."""
     # sqlite3's connection context manager does not begin a transaction for
@@ -335,6 +360,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 7:
             _migrate_transactions_to_v7(conn)
             current_version = 7
+        if current_version < 8:
+            _migrate_transactions_to_v8(conn)
+            current_version = 8
         if current_version != _TRANSACTION_SCHEMA_VERSION:
             raise RuntimeError(
                 "Unsupported transaction schema version "
@@ -617,13 +645,17 @@ def _write_transaction_rows(
 
     conn.execute(
         "INSERT OR IGNORE INTO transactions "
-        "(id, reference, status, retry_count, created_at, created_at_utc, started_at, finished_at, state) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "(id, reference, status, retry_count, outcome_category, retry_disposition, failure_code, "
+        "created_at, created_at_utc, started_at, finished_at, state) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             transaction.id,
             transaction.reference,
             transaction.status,
             transaction.retry_count,
+            transaction.outcome_category,
+            transaction.retry_disposition,
+            transaction.failure_code,
             created_at,
             created_at_utc,
             started_at or None,
@@ -635,6 +667,9 @@ def _write_transaction_rows(
         transaction.reference,
         transaction.status,
         transaction.retry_count,
+        transaction.outcome_category,
+        transaction.retry_disposition,
+        transaction.failure_code,
         created_at,
         created_at_utc,
         started_at or None,
@@ -644,6 +679,7 @@ def _write_transaction_rows(
     if expected_revision is None:
         result = conn.execute(
             "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
+            "outcome_category = ?, retry_disposition = ?, failure_code = ?, "
             "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END, "
             "created_at_utc = CASE WHEN created_at_utc = '' THEN ? ELSE created_at_utc END, "
             "started_at = ?, finished_at = ?, state = ?, revision = revision + 1 "
@@ -653,6 +689,7 @@ def _write_transaction_rows(
     else:
         result = conn.execute(
             "UPDATE transactions SET reference = ?, status = ?, retry_count = ?, "
+            "outcome_category = ?, retry_disposition = ?, failure_code = ?, "
             "created_at = CASE WHEN created_at = '' THEN ? ELSE created_at END, "
             "created_at_utc = CASE WHEN created_at_utc = '' THEN ? ELSE created_at_utc END, "
             "started_at = ?, finished_at = ?, state = ?, revision = revision + 1, "
@@ -685,8 +722,8 @@ def _write_transaction_rows(
             conn.execute(
                 "INSERT INTO exceptions "
                 "(skill_id, exception_type, message, action, retry_number, "
-                "datetime_occurred, screenshot_path, stops_execution) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "datetime_occurred, screenshot_path, stops_execution, code) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     sid,
                     "business" if isinstance(exc, BusinessException) else "system",
@@ -696,6 +733,7 @@ def _write_transaction_rows(
                     exc.datetime_occurred.isoformat(),
                     exc.screenshot_path,
                     1 if exc.stops_execution else 0,
+                    exc.code,
                 ),
             )
     for entry in transaction.history:
@@ -976,7 +1014,8 @@ def load_transaction(
         else:
             _ensure_schema(conn)
         row = conn.execute(
-            "SELECT id, reference, status, retry_count, created_at, started_at, finished_at, state "
+            "SELECT id, reference, status, retry_count, outcome_category, retry_disposition, "
+            "failure_code, created_at, started_at, finished_at, state "
             "FROM transactions WHERE id = ?",
             (transaction_id,),
         ).fetchone()
@@ -1001,7 +1040,7 @@ def load_transaction(
 
             exc_rows = conn.execute(
                 "SELECT exception_type, message, action, retry_number, datetime_occurred, "
-                "screenshot_path, stops_execution FROM exceptions WHERE skill_id = ? ORDER BY id",
+                "screenshot_path, stops_execution, code FROM exceptions WHERE skill_id = ? ORDER BY id",
                 (sr["id"],),
             ).fetchall()
             for er in exc_rows:
@@ -1015,6 +1054,7 @@ def load_transaction(
                         datetime_occurred=dt,
                         screenshot_path=screenshot,
                         stop=bool(er["stops_execution"]),
+                        code=er["code"],
                     )
                 else:
                     exc = SystemException(
@@ -1023,6 +1063,7 @@ def load_transaction(
                         retry_number=er["retry_number"],
                         datetime_occurred=dt,
                         screenshot_path=screenshot,
+                        code=er["code"],
                     )
                 skill.exceptions.append(exc)
             skills.append(skill)
@@ -1054,6 +1095,9 @@ def load_transaction(
             id=row["id"],
             status=tx_status,
             retry_count=row["retry_count"],
+            outcome_category=OutcomeCategory(row["outcome_category"]),
+            retry_disposition=RetryDisposition(row["retry_disposition"]),
+            failure_code=row["failure_code"],
             created_at=_timestamp_from_storage(
                 row["created_at"], path="transactions.created_at", transaction_id=transaction_id
             ),

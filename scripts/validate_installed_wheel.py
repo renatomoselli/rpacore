@@ -100,7 +100,9 @@ import rpacore
 from rpacore import (
     ConfigField,
     Engine,
+    OutcomeCategory,
     ProcessContext,
+    RetryDisposition,
     Skill,
     Status,
     Transaction,
@@ -124,6 +126,8 @@ ctx = ProcessContext(transaction=tx)
 Engine().run(ctx)
 
 assert tx.status is Status.SUCCESSFUL
+assert tx.outcome_category is OutcomeCategory.SUCCESSFUL
+assert tx.retry_disposition is RetryDisposition.NOT_APPLICABLE
 assert tx.skills[0].status is Status.SUCCESSFUL
 assert ctx.state == {{"ran": True}}
 assert validate_config(

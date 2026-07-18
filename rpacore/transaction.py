@@ -9,6 +9,7 @@ from enum import StrEnum
 
 from rpacore._json_state import validate_json_object
 from rpacore.exceptions import ExecutionValidationError
+from rpacore.outcome import OutcomeCategory, RetryDisposition, validate_failure_code
 from rpacore.skill import Skill
 from rpacore.status import Status
 
@@ -76,10 +77,18 @@ class Transaction:
     artifacts: list[Artifact] = field(default_factory=list)
     skills: list[Skill] = field(default_factory=list)
     history: list[HistoryEntry] = field(default_factory=list)
+    outcome_category: OutcomeCategory = OutcomeCategory.UNKNOWN
+    retry_disposition: RetryDisposition = RetryDisposition.UNKNOWN
+    failure_code: str = ""
 
     def __post_init__(self) -> None:
         if self.retry_count < 0:
             raise ValueError(f"retry_count must be >= 0, got {self.retry_count}")
+        if not isinstance(self.outcome_category, OutcomeCategory):
+            raise TypeError("outcome_category must be an OutcomeCategory")
+        if not isinstance(self.retry_disposition, RetryDisposition):
+            raise TypeError("retry_disposition must be a RetryDisposition")
+        self.failure_code = validate_failure_code(self.failure_code)
         self.state = dict(self.state)
         self.metadata = dict(self.metadata)
         self.artifacts = list(self.artifacts)
@@ -160,6 +169,11 @@ class Transaction:
 
     def validate_durable_data(self) -> None:
         """Validate every JSON-backed value owned by the transaction."""
+        if not isinstance(self.outcome_category, OutcomeCategory):
+            raise TypeError("transaction.outcome_category must be an OutcomeCategory")
+        if not isinstance(self.retry_disposition, RetryDisposition):
+            raise TypeError("transaction.retry_disposition must be a RetryDisposition")
+        self.failure_code = validate_failure_code(self.failure_code)
         validate_json_object(self.state, path="transaction.state")
         validate_json_object(self.metadata, path="transaction.metadata")
         for index, artifact in enumerate(self.artifacts):

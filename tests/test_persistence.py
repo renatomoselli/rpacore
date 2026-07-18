@@ -10,6 +10,7 @@ import pytest
 import rpacore.persistence as persistence_module
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
+from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.persistence import (
     TransactionFenceError,
     TransactionPage,
@@ -347,6 +348,28 @@ class TestSaveAndLoad:
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
         assert loaded.retry_count == 3
+
+    def test_roundtrip_preserves_outcome_and_failure_codes(self, db_path) -> None:
+        skill = Skill("validate", 1)
+        skill.status = Status.FAILED
+        skill.exceptions.append(
+            BusinessException("missing invoice", code="acme.invoice.missing_number")
+        )
+        tx = make_transaction(
+            status=Status.FAILED,
+            outcome_category=OutcomeCategory.BUSINESS_FAILED,
+            retry_disposition=RetryDisposition.NOT_REQUESTED,
+            failure_code="acme.invoice.missing_number",
+            skills=[skill],
+        )
+
+        save_transaction(tx, db_path)
+        loaded = load_transaction(tx.id, db_path)
+
+        assert loaded.outcome_category is OutcomeCategory.BUSINESS_FAILED
+        assert loaded.retry_disposition is RetryDisposition.NOT_REQUESTED
+        assert loaded.failure_code == "acme.invoice.missing_number"
+        assert loaded.skills[0].exceptions[0].code == "acme.invoice.missing_number"
 
     def test_roundtrip_preserves_transaction_state(self, db_path) -> None:
         tx = make_transaction(state={"invoice": {"id": 42}, "tags": ["new", "vip"]})
@@ -1992,6 +2015,10 @@ class TestSchemaMigration:
         assert str(loaded.skills[0].exceptions[0]) == "missing field"
         assert loaded.skills[0].exceptions[0].screenshot_path == "shot.png"
         assert loaded.skills[0].exceptions[0].stops_execution is False
+        assert loaded.outcome_category is OutcomeCategory.UNKNOWN
+        assert loaded.retry_disposition is RetryDisposition.UNKNOWN
+        assert loaded.failure_code == ""
+        assert loaded.skills[0].exceptions[0].code == ""
 
     def test_legacy_schema_gets_created_at_column(self, db_path) -> None:
         create_legacy_db(db_path)
@@ -2137,6 +2164,37 @@ class TestSchemaMigration:
         assert metadata_tables == 1
         assert artifact_tables == 1
 
+    def test_v7_schema_migrates_outcome_and_failure_code_defaults(self, db_path) -> None:
+        transaction = make_transaction()
+        save_transaction(transaction, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("ALTER TABLE exceptions DROP COLUMN code")
+            conn.execute("ALTER TABLE transactions DROP COLUMN outcome_category")
+            conn.execute("ALTER TABLE transactions DROP COLUMN retry_disposition")
+            conn.execute("ALTER TABLE transactions DROP COLUMN failure_code")
+            conn.execute(
+                "UPDATE rpacore_schema_versions SET version = 7 WHERE component = 'transactions'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        loaded = load_transaction(transaction.id, db_path)
+
+        assert loaded.outcome_category is OutcomeCategory.UNKNOWN
+        assert loaded.retry_disposition is RetryDisposition.UNKNOWN
+        assert loaded.failure_code == ""
+        conn = sqlite3.connect(db_path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(transactions)")}
+            exception_columns = {row[1] for row in conn.execute("PRAGMA table_info(exceptions)")}
+        finally:
+            conn.close()
+        assert {"outcome_category", "retry_disposition", "failure_code"}.issubset(columns)
+        assert "code" in exception_columns
+
     def test_component_schema_version_is_recorded_after_migration(self, db_path) -> None:
         create_legacy_db(db_path)
 
@@ -2149,7 +2207,7 @@ class TestSchemaMigration:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert version == 7
+        assert version == 8
 
     def test_transaction_and_queue_schema_versions_can_share_database(self, db_path) -> None:
         from rpacore.queue import QueueItem, SqliteQueue
@@ -2166,7 +2224,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 4), ("transactions", 7)]
+        assert rows == [("queue", 4), ("transactions", 8)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)
@@ -2177,13 +2235,13 @@ class TestSchemaMigration:
             )
             conn.execute(
                 "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
-                ("transactions", 8),
+                ("transactions", 9),
             )
             conn.commit()
         finally:
             conn.close()
 
-        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 8"):
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 9"):
             list_transactions(db_path)
 
     @pytest.mark.parametrize("readonly", [False, True])

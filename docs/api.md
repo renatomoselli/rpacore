@@ -19,8 +19,9 @@ contract. Public submodules remain implementation locations; see
 | `execute_transaction` | Run one transaction with a `ProcessContext`, optional strict SQLite checkpoints, and optional runtime resources. | Mutates the transaction through `Engine.run()`. When `transaction_db_path` is set, creates or migrates the SQLite transaction database and checkpoints each transition. |
 | `ProcessContext` | Runtime context passed to skills. | Carries durable `state`, runtime-only `resources`, config, and transaction reference. Resources are not serialized. |
 | `Skill` | Base class for user-authored work units. | User subclasses implement `execute(ctx)`. Side effects belong to user code. |
-| `Transaction` | Unit of execution and persistence. | Stores reference, status, skills, durable state, metadata, artifacts, and history. Validates wiring and JSON-safe durable data before execution or persistence. |
+| `Transaction` | Unit of execution and persistence. | Stores reference, lifecycle status, terminal outcome/retry truth, skills, durable state, metadata, artifacts, and history. Validates wiring and JSON-safe durable data before execution or persistence. |
 | `Status` | Transaction and skill status enum. | No side effects. |
+| `OutcomeCategory`, `RetryDisposition` | Stable terminal work reason and actual retry decision. | No side effects. `unknown` represents legacy or incomplete truth; it is never inferred from message text or retry count. |
 
 `Engine.run(ctx, checkpoint=...)` validates wiring and JSON-safe transaction
 state, metadata, skill arguments, and artifact metadata before user skill code
@@ -44,6 +45,17 @@ one-off runs that should persist strict SQLite checkpoints. Use raw
 
 Unhandled exceptions from skill code are recorded as system failures.
 `MemoryError` is not masked by checkpoint errors.
+
+`BusinessException` and `SystemException` accept an optional `code=`. Codes are
+empty or lowercase dot-separated ASCII namespaces, such as
+`acme.invoice.missing_number`; `rpacore.*` is reserved for framework-owned
+causes. The Engine records its terminal transaction outcome separately from
+`Status`: success is `successful`/`not_applicable`, a terminal business or
+validation result is `not_requested`, and a system failure after the Engine's
+configured retry budget is `retry_exhausted`. Interrupted and legacy/incomplete
+records remain explicit rather than guessed. Validation failures receive their
+in-memory outcome before they are re-raised, but strict persistence still does
+not create a transaction row for invalid wiring or durable data.
 
 ## Persistence, Serialization, and Recovery
 

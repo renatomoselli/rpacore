@@ -22,6 +22,7 @@ class TestBusinessException:
         assert exc.retry_number == 0
         assert exc.screenshot_path == ""
         assert exc.stop is False
+        assert exc.code == ""
         assert isinstance(exc.datetime_occurred, datetime)
 
     def test_custom_fields(self) -> None:
@@ -39,6 +40,16 @@ class TestBusinessException:
         assert exc.datetime_occurred == dt
         assert exc.screenshot_path == "/tmp/shot.png"
         assert exc.stop is True
+
+    def test_accepts_namespaced_code(self) -> None:
+        exc = BusinessException("bad invoice", code="acme.invoice.missing_number")
+
+        assert exc.code == "acme.invoice.missing_number"
+
+    @pytest.mark.parametrize("code", ["missing", "Acme.invoice", "acme..invoice", "acme.invoice-"])
+    def test_rejects_invalid_code(self, code: str) -> None:
+        with pytest.raises(ValueError, match="code must be empty"):
+            BusinessException("bad invoice", code=code)
 
     def test_stops_execution_is_false(self) -> None:
         exc = BusinessException("test")
@@ -67,6 +78,7 @@ class TestSystemException:
         assert exc.action == ""
         assert exc.retry_number == 0
         assert exc.screenshot_path == ""
+        assert exc.code == ""
         assert isinstance(exc.datetime_occurred, datetime)
 
     def test_custom_fields(self) -> None:
@@ -82,6 +94,10 @@ class TestSystemException:
         assert exc.retry_number == 1
         assert exc.datetime_occurred == dt
         assert exc.screenshot_path == "/tmp/crash.png"
+
+    def test_rejects_non_string_code(self) -> None:
+        with pytest.raises(TypeError, match="code must be a str"):
+            SystemException("crash", code=1)  # type: ignore[arg-type]
 
     def test_stops_execution_is_true(self) -> None:
         exc = SystemException("test")

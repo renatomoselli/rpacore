@@ -19,6 +19,9 @@ All notable user-facing changes are recorded here.
 - Added reason-bearing `SqliteQueue.force_complete()` and `force_fail()`
   administrative overrides with durable `QueueAdminEvent` inspection.
 - Added durable `QueueAttempt` outcomes and `QueuePoisonEvent` inspection.
+- Added `OutcomeCategory` and `RetryDisposition` terminal work vocabulary,
+  plus optional namespaced failure codes on framework exceptions and persisted
+  transaction outcomes.
 
 ### Changed
 
@@ -40,6 +43,10 @@ All notable user-facing changes are recorded here.
 - Queue schema version 4 records attempts and poison dispositions. Upgrade queue
   databases offline with the same stop, backup, migrate, and restart procedure
   required for the queue/transaction fencing upgrade.
+
+- Transaction schema version 8 records terminal outcome/retry truth and optional
+  failure codes. Stop workers and back up transaction databases before upgrade;
+  older runtimes reject the newer schema rather than silently ignoring it.
 
 - Renamed maintainer release validation interfaces from evidence/go-no-go
   wording to validation results and approval wording.

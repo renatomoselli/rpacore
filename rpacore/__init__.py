@@ -27,6 +27,7 @@ from rpacore.manifest import (
     resolve_project_entrypoint,
 )
 from rpacore.notify import EmailNotifier, Notifier, WebhookNotifier, build_notifiers, dispatch
+from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.paths import atomic_output_path, resolve_config_path, resolve_config_paths
 from rpacore.persistence import (
     TransactionFenceError,
@@ -71,6 +72,7 @@ __all__ = [
     "HistoryEvent",
     "KeyringCredentialProvider",
     "Notifier",
+    "OutcomeCategory",
     "ProcessContext",
     "ProjectManifest",
     "QueueAdminEvent",
@@ -82,6 +84,7 @@ __all__ = [
     "QueueProvider",
     "QueueRunSummary",
     "QueueStatus",
+    "RetryDisposition",
     "Skill",
     "SkillReport",
     "SqliteQueue",

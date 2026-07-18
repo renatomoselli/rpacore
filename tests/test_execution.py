@@ -14,7 +14,9 @@ from rpacore import (
     BusinessException,
     Engine,
     ExecutionValidationError,
+    OutcomeCategory,
     ProcessContext,
+    RetryDisposition,
     Skill,
     Status,
     SystemException,
@@ -66,6 +68,8 @@ class TestExecuteTransaction:
 
         loaded = load_transaction(transaction.id, db_path=str(db_path))
         assert loaded.status is Status.SUCCESSFUL
+        assert loaded.outcome_category is OutcomeCategory.SUCCESSFUL
+        assert loaded.retry_disposition is RetryDisposition.NOT_APPLICABLE
         assert loaded.state == {"done": True}
         assert loaded.skills[0].status is Status.SUCCESSFUL
 
