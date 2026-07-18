@@ -19,7 +19,7 @@ from rpacore.credentials import CredentialNotFoundError, CredentialProvider, Env
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.execution import execute_transaction
-from rpacore.logger import configure_logger, get_logger
+from rpacore.logger import bind_log_context, configure_logger, get_logger
 from rpacore.manifest import (
     ProjectManifest,
     find_project_manifest,
@@ -50,7 +50,7 @@ from rpacore.queue import (
     SqliteQueue,
 )
 from rpacore.recovery import resume_transaction
-from rpacore.report import ArtifactReport, SkillReport, TransactionReport, generate_report, render_html, render_text
+from rpacore.report import ArtifactReport, OutcomeReport, SkillReport, TransactionReport, generate_report, render_html, render_text
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.serialization import TRANSACTION_FORMAT_VERSION, serialize_transaction
 from rpacore.skill import Skill
@@ -73,6 +73,7 @@ __all__ = [
     "KeyringCredentialProvider",
     "Notifier",
     "OutcomeCategory",
+    "OutcomeReport",
     "ProcessContext",
     "ProjectManifest",
     "QueueAdminEvent",
@@ -98,6 +99,7 @@ __all__ = [
     "TransactionSummary",
     "WebhookNotifier",
     "atomic_output_path",
+    "bind_log_context",
     "build_credential_provider",
     "build_notifiers",
     "configure_logger",

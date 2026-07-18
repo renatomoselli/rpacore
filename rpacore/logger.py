@@ -6,13 +6,19 @@ import json
 import logging
 import math
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import TextIO
+from typing import Iterator, TextIO
 
 _LOGGER_NAME = "rpacore"
 LOG_FORMAT_VERSION = 1
+LOG_FORMAT_VERSION_V2 = 2
 _RESERVED_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
 _REDACTED_EXTRA_FIELDS = frozenset({"config", "credentials", "resources"})
+_V2_REDACTED_EXTRA_FIELDS = _REDACTED_EXTRA_FIELDS | frozenset(
+    {"state", "metadata", "path", "paths", "url", "urls"}
+)
 _CANONICAL_JSON_FIELDS = frozenset(
     {
         "log_format_version",
@@ -24,6 +30,39 @@ _CANONICAL_JSON_FIELDS = frozenset(
         "stack",
     }
 )
+_CANONICAL_V2_FIELDS = frozenset(
+    {
+        "log_format_version",
+        "timestamp",
+        "severity",
+        "logger",
+        "event",
+        "message",
+        "attributes",
+        "exception",
+        "stacktrace",
+    }
+)
+_LOG_CONTEXT_FIELDS = frozenset(
+    {
+        "transaction_id",
+        "transaction_reference",
+        "skill_name",
+        "skill_execution_order",
+        "queue_item_id",
+        "queue_reference",
+        "worker_id",
+        "retry_number",
+        "attempt_number",
+    }
+)
+_LOG_CONTEXT: ContextVar[dict[str, str | int]] = ContextVar(
+    "rpacore_log_context",
+    default={},
+)
+_V2_EVENT_NAMES = {
+    "queue_run_completed": "rpacore.queue.run_completed",
+}
 _OWNED_HANDLER_ATTRIBUTE = "_rpacore_owned_handler"
 
 
@@ -36,13 +75,17 @@ def _extra_fields(record: logging.LogRecord) -> dict[str, object]:
     }
 
 
-def _sanitized_extra_fields(extra: dict[str, object]) -> dict[str, object]:
+def _sanitized_extra_fields(
+    extra: dict[str, object],
+    *,
+    redacted_fields: frozenset[str] = _REDACTED_EXTRA_FIELDS,
+    canonical_fields: frozenset[str] = _CANONICAL_JSON_FIELDS,
+) -> dict[str, object]:
     """Return safe event attributes without canonical-envelope collisions."""
     return {
-        key: _json_log_value(value)
+        key: _json_log_value(value, redacted_fields=redacted_fields)
         for key, value in extra.items()
-        if key not in _REDACTED_EXTRA_FIELDS
-        and key not in _CANONICAL_JSON_FIELDS
+        if key not in redacted_fields and key not in canonical_fields
     }
 
 
@@ -72,11 +115,26 @@ class TextFormatter(logging.Formatter):
 
 
 class JsonFormatter(logging.Formatter):
-    """JSON formatter for rpacore events."""
+    """JSON formatter for rpacore events.
+
+    Version 1 remains the default compatibility format. Version 2 uses a
+    protected envelope and nests event attributes under ``attributes``.
+    """
+
+    def __init__(self, *, version: int = LOG_FORMAT_VERSION) -> None:
+        if version not in (LOG_FORMAT_VERSION, LOG_FORMAT_VERSION_V2):
+            raise ValueError(
+                "JSON log version must be 1 or 2, "
+                f"got {version!r}"
+            )
+        super().__init__()
+        self.version = version
 
     def format(self, record: logging.LogRecord) -> str:
         extra = _extra_fields(record)
         event = str(extra.pop("event", "log"))
+        if self.version == LOG_FORMAT_VERSION_V2:
+            return self._format_v2(record, event, extra)
         payload: dict[str, object] = {
             "log_format_version": LOG_FORMAT_VERSION,
             "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
@@ -100,40 +158,128 @@ class JsonFormatter(logging.Formatter):
             payload["stack"] = self.formatStack(record.stack_info)
         return json.dumps(payload, allow_nan=False, sort_keys=True, separators=(",", ":"))
 
+    def _format_v2(
+        self,
+        record: logging.LogRecord,
+        event: str,
+        extra: dict[str, object],
+    ) -> str:
+        attributes = _sanitized_extra_fields(
+            extra,
+            redacted_fields=_V2_REDACTED_EXTRA_FIELDS,
+            canonical_fields=_CANONICAL_V2_FIELDS,
+        )
+        attributes.update(_LOG_CONTEXT.get())
+        payload: dict[str, object] = {
+            "log_format_version": LOG_FORMAT_VERSION_V2,
+            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
+            "severity": record.levelname.lower(),
+            "logger": record.name,
+            "event": _v2_event_name(event),
+            "message": record.getMessage(),
+            "attributes": attributes,
+        }
+        if record.exc_info:
+            exception_type, exception, _ = record.exc_info
+            payload["exception"] = {
+                "type": (
+                    exception_type.__name__
+                    if exception_type is not None
+                    else "Exception"
+                ),
+                "message": "" if exception is None else str(exception),
+                "stacktrace": self.formatException(record.exc_info),
+            }
+        if record.stack_info:
+            payload["stacktrace"] = self.formatStack(record.stack_info)
+        return json.dumps(payload, allow_nan=False, sort_keys=True, separators=(",", ":"))
 
-def _json_log_value(value: object) -> object:
+
+def _v2_event_name(event: str) -> str:
+    """Return the documented v2 vocabulary name for a framework event."""
+    if event.startswith("rpacore."):
+        return event
+    return _V2_EVENT_NAMES.get(event, f"rpacore.{event.replace('_', '.')}")
+
+
+@contextmanager
+def bind_log_context(**attributes: str | int) -> Iterator[None]:
+    """Temporarily bind approved scalar correlation attributes to log records.
+
+    Context is local to the current execution context. Callers that create a
+    new thread must bind the needed fields again in that thread.
+    """
+    invalid = set(attributes) - _LOG_CONTEXT_FIELDS
+    if invalid:
+        raise ValueError(
+            "Unsupported log context field(s): "
+            + ", ".join(sorted(invalid))
+        )
+    for key, value in attributes.items():
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            raise TypeError(
+                f"log context {key!r} must be a str or int, got {value!r}"
+            )
+        if isinstance(value, str) and not value:
+            raise ValueError(f"log context {key!r} must not be empty")
+        if isinstance(value, int) and value < 0:
+            raise ValueError(f"log context {key!r} must be >= 0")
+    token = _LOG_CONTEXT.set({**_LOG_CONTEXT.get(), **attributes})
+    try:
+        yield
+    finally:
+        _LOG_CONTEXT.reset(token)
+
+
+def _json_log_value(
+    value: object,
+    *,
+    redacted_fields: frozenset[str] = _REDACTED_EXTRA_FIELDS,
+) -> object:
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else str(value)
     if isinstance(value, list):
-        return [_json_log_value(item) for item in value]
+        return [_json_log_value(item, redacted_fields=redacted_fields) for item in value]
     if isinstance(value, tuple):
-        return [_json_log_value(item) for item in value]
+        return [_json_log_value(item, redacted_fields=redacted_fields) for item in value]
     if isinstance(value, (set, frozenset)):
-        items = [_json_log_value(item) for item in value]
+        items = [_json_log_value(item, redacted_fields=redacted_fields) for item in value]
         return sorted(
             items,
             key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
         )
     if isinstance(value, dict):
         return {
-            str(key): _json_log_value(item)
+            str(key): _json_log_value(item, redacted_fields=redacted_fields)
             for key, item in value.items()
-            if str(key) not in _REDACTED_EXTRA_FIELDS
+            if str(key) not in redacted_fields
         }
     return type(value).__name__
 
 
 def get_logger(name: str = _LOGGER_NAME) -> logging.Logger:
-    """Return the rpacore logger without forcing output."""
-    logger = logging.getLogger(name)
-    if not logger.handlers:
+    """Return a rpacore logger without forcing output.
+
+    Names outside the framework hierarchy become ``rpacore.application.*``
+    descendants so configuring the ``rpacore`` root captures framework and
+    application events consistently.
+    """
+    resolved_name = _logger_name(name)
+    logger = logging.getLogger(resolved_name)
+    if resolved_name == _LOGGER_NAME and not logger.handlers:
         handler = logging.NullHandler()
         setattr(handler, _OWNED_HANDLER_ATTRIBUTE, True)
         logger.addHandler(handler)
-    logger.propagate = False
+    logger.propagate = resolved_name != _LOGGER_NAME
     return logger
+
+
+def _logger_name(name: str) -> str:
+    if name == _LOGGER_NAME or name.startswith(f"{_LOGGER_NAME}."):
+        return name
+    return f"{_LOGGER_NAME}.application.{name}"
 
 
 def configure_logger(
@@ -142,6 +288,7 @@ def configure_logger(
     level: str | int = logging.INFO,
     fmt: str = "text",
     stream: TextIO | None = None,
+    json_version: int = LOG_FORMAT_VERSION,
 ) -> logging.Logger:
     """Configure and return an rpacore logger.
 
@@ -152,7 +299,7 @@ def configure_logger(
     if fmt == "text":
         formatter: logging.Formatter = TextFormatter()
     elif fmt == "json":
-        formatter = JsonFormatter()
+        formatter = JsonFormatter(version=json_version)
     else:
         raise ValueError(f"fmt must be 'text' or 'json', got {fmt!r}")
 
@@ -164,7 +311,7 @@ def configure_logger(
     handler.setFormatter(formatter)
     setattr(handler, _OWNED_HANDLER_ATTRIBUTE, True)
 
-    logger = logging.getLogger(name)
+    logger = logging.getLogger(_logger_name(name))
     previous_owned = [
         existing
         for existing in logger.handlers

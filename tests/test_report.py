@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from rpacore.exceptions import BusinessException, SystemException
+from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.report import (
     ArtifactReport,
@@ -159,6 +160,29 @@ class TestGenerateReport:
         assert report.transaction_record["transaction_format_version"] == 1
         assert report.transaction_record["id"] == tx.id
 
+    def test_report_projects_captured_outcome_without_reclassifying_history(self):
+        skill = make_skill("save", 1, Status.FAILED)
+        skill.exceptions = [sys_("transport failure")]
+        tx = make_transaction(status=Status.FAILED, skills=[skill])
+        tx.outcome_category = OutcomeCategory.BUSINESS_FAILED
+        tx.retry_disposition = RetryDisposition.NOT_REQUESTED
+        tx.failure_code = "acme.invoice.duplicate"
+
+        report = generate_report(tx)
+
+        assert report.outcome.category is OutcomeCategory.BUSINESS_FAILED
+        assert report.outcome.retry_disposition is RetryDisposition.NOT_REQUESTED
+        assert report.outcome.failure_code == "acme.invoice.duplicate"
+        assert report.transaction_record["transaction_format_version"] == 1
+        assert "outcome_category" not in report.transaction_record
+
+    def test_report_defaults_legacy_outcome_to_unknown(self):
+        report = generate_report(make_transaction())
+
+        assert report.outcome.category is OutcomeCategory.UNKNOWN
+        assert report.outcome.retry_disposition is RetryDisposition.UNKNOWN
+        assert report.outcome.failure_code == ""
+
     def test_report_omits_transaction_record_when_serialization_fails(self):
         tx = make_transaction()
         tx.state = {"runtime": object()}
@@ -292,6 +316,20 @@ class TestRenderText:
         report = generate_report(tx)
         assert "order-99" in render_text(report)
 
+    def test_contains_captured_outcome_and_failure_code(self):
+        tx = make_transaction(status=Status.FAILED)
+        tx.outcome_category = OutcomeCategory.SYSTEM_FAILED
+        tx.retry_disposition = RetryDisposition.RETRY_EXHAUSTED
+        tx.failure_code = "rpacore.system.unexpected"
+
+        text = render_text(generate_report(tx))
+
+        assert "Outcome:     system_failed  Retry disposition: retry_exhausted" in text
+        assert "Failure code: rpacore.system.unexpected" in text
+
+    def test_omits_empty_failure_code(self):
+        assert "Failure code:" not in render_text(self._report())
+
     def test_contains_skill_icon(self):
         text = render_text(self._report())
         assert "[✗]" in text
@@ -414,6 +452,24 @@ class TestRenderHTML:
         html = render_html(self._report())
         assert "html-ref" in html
 
+    def test_contains_captured_outcome_and_failure_code(self):
+        tx = make_transaction(status=Status.FAILED)
+        tx.outcome_category = OutcomeCategory.SYSTEM_FAILED
+        tx.retry_disposition = RetryDisposition.RETRY_EXHAUSTED
+        tx.failure_code = "rpacore.system.unexpected"
+
+        html = render_html(generate_report(tx))
+
+        assert "Outcome: <strong>system_failed</strong>" in html
+        assert "Retry disposition: retry_exhausted" in html
+        assert "<code>rpacore.system.unexpected</code>" in html
+
+    def test_omits_empty_failure_code_without_blank_html_line(self):
+        html = render_html(self._report())
+
+        assert "Failure code:" not in html
+        assert "Retry disposition: unknown</p>\n<p>Created:" in html
+
     def test_contains_failed_css_class(self):
         html = render_html(self._report())
         assert 'class="skill failed"' in html
@@ -515,6 +571,25 @@ class TestRenderHTML:
         assert "&lt;invoice&gt;" in html
         assert "/missing/invoice.pdf" in html
         assert "&lt;skill&gt;" in html
+
+
+@pytest.mark.parametrize(
+    ("renderer", "outcome_line"),
+    [
+        (render_text, "Outcome:     unknown  Retry disposition: unknown"),
+        (render_html, "Outcome: <strong>unknown</strong>"),
+    ],
+)
+def test_renderers_preserve_unknown_outcome_with_failure_code(renderer, outcome_line):
+    tx = make_transaction(status=Status.FAILED)
+    tx.outcome_category = OutcomeCategory.UNKNOWN
+    tx.failure_code = "acme.legacy.incomplete"
+
+    rendered = renderer(generate_report(tx))
+
+    assert outcome_line in rendered
+    assert "Failure code:" in rendered
+    assert "acme.legacy.incomplete" in rendered
 
 
 # ---------------------------------------------------------------------------

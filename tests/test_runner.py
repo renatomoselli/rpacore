@@ -594,6 +594,20 @@ class TestAfterItem:
         assert isinstance(errors[0], RuntimeError)
         assert str(errors[0]) == "report crash"
 
+    def test_report_generation_error_does_not_retry_business_failure(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            runner_module,
+            "generate_report",
+            lambda transaction: (_ for _ in ()).throw(RuntimeError("report crash")),
+        )
+
+        summary, queue = _run([_item("a")], skill_cls=_BusinessFailSkill)
+
+        assert summary.failed == 1
+        assert summary.retry_scheduled == 0
+        assert summary.terminal_failed == 1
+        assert queue.fail_retries == [False]
+
     def test_report_generation_memory_error_propagates(self, monkeypatch) -> None:
         def _boom_report(tx: Transaction) -> object:
             raise MemoryError("out of memory")

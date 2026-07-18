@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from rpacore.exceptions import BusinessException, SystemException
+from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.serialization import serialize_transaction
 from rpacore.status import Status
 
@@ -50,6 +51,20 @@ class ArtifactReport:
     metadata: dict[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class OutcomeReport:
+    """Terminal transaction truth captured by the owning execution boundary.
+
+    This is a direct projection of durable transaction fields. It does not
+    infer an outcome or retry decision from lifecycle status, exception prose,
+    history, or queue attempts.
+    """
+
+    category: OutcomeCategory = OutcomeCategory.UNKNOWN
+    retry_disposition: RetryDisposition = RetryDisposition.UNKNOWN
+    failure_code: str = ""
+
+
 @dataclass
 class TransactionReport:
     """Reporting view of a completed transaction."""
@@ -59,6 +74,7 @@ class TransactionReport:
     status: Status
     retry_count: int
     skills: list[SkillReport]
+    outcome: OutcomeReport = field(default_factory=OutcomeReport)
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -108,6 +124,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         status=transaction.status,
         retry_count=transaction.retry_count,
         skills=skill_reports,
+        outcome=_project_transaction_outcome(transaction),
         created_at=transaction.created_at,
         started_at=transaction.started_at,
         finished_at=transaction.finished_at,
@@ -115,6 +132,15 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         artifacts=artifact_reports,
         history=list(transaction.history),
         transaction_record=transaction_record,
+    )
+
+
+def _project_transaction_outcome(transaction: Transaction) -> OutcomeReport:
+    """Project captured transaction truth without reconstructing absent evidence."""
+    return OutcomeReport(
+        category=transaction.outcome_category,
+        retry_disposition=transaction.retry_disposition,
+        failure_code=transaction.failure_code,
     )
 
 
@@ -135,6 +161,7 @@ def _snapshot_report(report: TransactionReport) -> TransactionReport:
             )
             for skill in report.skills
         ],
+        outcome=report.outcome,
         created_at=report.created_at,
         started_at=report.started_at,
         finished_at=report.finished_at,
@@ -185,12 +212,18 @@ def render_text(report: TransactionReport) -> str:
     lines = [
         f"Transaction: {report.reference} ({report.transaction_id})",
         f"Status:      {report.status}  Retries: {report.retry_count}",
+        "Outcome:     "
+        f"{report.outcome.category}  Retry disposition: {report.outcome.retry_disposition}",
+    ]
+    if report.outcome.failure_code:
+        lines.append(f"Failure code: {report.outcome.failure_code}")
+    lines.extend([
         f"Created:     {_format_dt(report.created_at)}",
         f"Started:     {_format_dt(report.started_at)}",
         f"Finished:    {_format_dt(report.finished_at)}",
         f"Generated:   {report.generated_at.isoformat()}",
         "",
-    ]
+    ])
     for sr in report.skills:
         lines.append(
             f"  [{sr.icon}] {sr.name} (order {sr.execution_order}) — {sr.status}"
@@ -254,6 +287,7 @@ h2{margin-bottom:.25rem}
 <body>
 <h2>$reference</h2>
 <p>Status: <strong>$status</strong> &nbsp; Retries: $retry_count &nbsp; Generated: $generated_at</p>
+<p>Outcome: <strong>$outcome_category</strong> &nbsp; Retry disposition: $retry_disposition</p>$failure_code_html
 <p>Created: $created_at &nbsp; Started: $started_at &nbsp; Finished: $finished_at</p>
 <p>ID: <code>$transaction_id</code></p>
 $skills_html
@@ -431,6 +465,13 @@ def render_html(report: TransactionReport) -> str:
         reference=_esc(report.reference),
         status=report.status,
         retry_count=report.retry_count,
+        outcome_category=_esc(str(report.outcome.category)),
+        retry_disposition=_esc(str(report.outcome.retry_disposition)),
+        failure_code_html=(
+            f"\n<p>Failure code: <code>{_esc(report.outcome.failure_code)}</code></p>"
+            if report.outcome.failure_code
+            else ""
+        ),
         generated_at=_esc(report.generated_at.isoformat()),
         created_at=_esc(_format_dt(report.created_at)),
         started_at=_esc(_format_dt(report.started_at)),

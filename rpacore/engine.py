@@ -11,7 +11,7 @@ from typing import Callable, Literal
 from rpacore._json_state import validate_json_object
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
-from rpacore.logger import get_logger
+from rpacore.logger import bind_log_context, get_logger
 from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.screenshot import capture_screenshot
 from rpacore.skill import Skill
@@ -74,6 +74,20 @@ class Engine:
         checkpoint: Callable[[Transaction], None] | None = None,
     ) -> None:
         """Execute all skills in the transaction, retrying retryable failed skills up to max_retries times."""
+        transaction = ctx.transaction
+        log_context: dict[str, str] = {"transaction_id": transaction.id}
+        if transaction.reference:
+            log_context["transaction_reference"] = transaction.reference
+        with bind_log_context(**log_context):
+            self._run(ctx, checkpoint=checkpoint)
+
+    def _run(
+        self,
+        ctx: ProcessContext,
+        *,
+        checkpoint: Callable[[Transaction], None] | None = None,
+    ) -> None:
+        """Run the transaction while its correlation context is bound."""
         transaction = ctx.transaction
         try:
             transaction.validate_for_execution()

@@ -93,6 +93,8 @@ def _remove_tree(path: Path) -> None:
 def _smoke_code(repo_root: Path) -> str:
     return f"""
 from pathlib import Path
+import io
+import json
 import platform
 import sqlite3
 
@@ -100,12 +102,16 @@ import rpacore
 from rpacore import (
     ConfigField,
     Engine,
+    bind_log_context,
+    configure_logger,
     OutcomeCategory,
+    OutcomeReport,
     ProcessContext,
     RetryDisposition,
     Skill,
     Status,
     Transaction,
+    generate_report,
     query_transactions,
     save_transaction,
     validate_config,
@@ -130,6 +136,14 @@ assert tx.outcome_category is OutcomeCategory.SUCCESSFUL
 assert tx.retry_disposition is RetryDisposition.NOT_APPLICABLE
 assert tx.skills[0].status is Status.SUCCESSFUL
 assert ctx.state == {{"ran": True}}
+report = generate_report(tx)
+assert isinstance(report.outcome, OutcomeReport)
+assert report.outcome.category is OutcomeCategory.SUCCESSFUL
+assert report.outcome.retry_disposition is RetryDisposition.NOT_APPLICABLE
+default_report = generate_report(Transaction(reference="default-outcome-smoke"))
+assert default_report.outcome.category is OutcomeCategory.UNKNOWN
+assert default_report.outcome.retry_disposition is RetryDisposition.UNKNOWN
+assert default_report.outcome.failure_code == ""
 assert validate_config(
     {{}},
     (ConfigField("retry_count", int, required=False, default=0, min_value=0),),
@@ -138,6 +152,14 @@ save_transaction(Transaction(id="query-smoke", reference="query-smoke"), "query-
 query_page = query_transactions("query-smoke.db")
 assert [summary.id for summary in query_page.transactions] == ["query-smoke"]
 assert query_page.format_version == 1
+log_stream = io.StringIO()
+log = configure_logger(fmt="json", json_version=2, stream=log_stream)
+with bind_log_context(transaction_id="installed-wheel-log"):
+    log.info("Installed wheel log proof", extra={{"event": "wheel_log_proof"}})
+log_payload = json.loads(log_stream.getvalue())
+assert log_payload["log_format_version"] == 2
+assert log_payload["event"] == "rpacore.wheel.log.proof"
+assert log_payload["attributes"]["transaction_id"] == "installed-wheel-log"
 print(rpacore.__version__)
 print(f"Python {{platform.python_version()}}; SQLite {{sqlite3.sqlite_version}}")
 """

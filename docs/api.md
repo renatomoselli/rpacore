@@ -110,8 +110,8 @@ environment variables, or enforce cross-field rules.
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
 | `CredentialProvider`, `EnvCredentialProvider`, `KeyringCredentialProvider`, `CredentialNotFoundError`, `build_credential_provider` | Resolve credentials from documented providers. | Environment/keyring reads depending on provider. Credentials are not persisted by RPA Core. |
-| `configure_logger`, `get_logger` | Configure stdlib logging. | Successful configuration atomically replaces RPA Core-owned handlers while preserving application handlers. Invalid configuration leaves the logger unchanged. |
-| `ArtifactReport`, `SkillReport`, `TransactionReport`, `generate_report`, `render_html`, `render_text` | Build and render transaction reports. | Report generation snapshots JSON-safe nested data and exceptions; rendering has no file I/O. |
+| `configure_logger`, `get_logger`, `bind_log_context` | Configure stdlib logging and scoped correlation. | Successful configuration atomically replaces RPA Core-owned handlers while preserving application handlers. Invalid configuration leaves the logger unchanged. Context is restored when a binding scope exits. |
+| `ArtifactReport`, `OutcomeReport`, `SkillReport`, `TransactionReport`, `generate_report`, `render_html`, `render_text` | Build and render transaction reports. | `TransactionReport.outcome` directly projects captured terminal category, retry disposition, and optional failure code; it does not infer them from status, history, or queue attempts. Report generation snapshots JSON-safe nested data and exceptions; rendering has no file I/O. |
 | `Notifier`, `EmailNotifier`, `WebhookNotifier`, `build_notifiers`, `dispatch` | Send notifications. | Dispatch gives each notifier an isolated report snapshot. SMTP or HTTP requests occur when configured. Payloads can contain sensitive transaction data. |
 
 ### Logging format contract
@@ -121,11 +121,31 @@ tracebacks and explicit stack information are appended as additional sections
 when present, so consumers must not assume a fixed number of delimiters. Use
 `JsonFormatter` for machine parsing.
 
-JSON log format v1 always includes `log_format_version`, UTC `timestamp`,
-`event`, `level`, and `message`. It additionally includes an `exception` object
-with `type`, `message`, and `traceback` when exception information is present,
-and a `stack` string when stack information is present. These optional fields
-are additive within v1; strict consumers must allow them.
+JSON log format v1 is the default and always includes `log_format_version`, UTC
+`timestamp`, `event`, `level`, and `message`. It additionally includes an
+`exception` object with `type`, `message`, and `traceback` when exception
+information is present, and a `stack` string when stack information is present.
+These optional fields are additive within v1; strict consumers must allow them.
+
+Pass `json_version=2` to `configure_logger(fmt="json", ...)`, or construct
+`JsonFormatter(version=2)`, to opt into JSON log format v2. Its protected
+envelope has `log_format_version`, UTC `timestamp`, `severity`, `logger`,
+namespaced `event`, `message`, and nested `attributes`. Exception details use
+`exception.type`, `exception.message`, and `exception.stacktrace`; explicit
+stack information is `stacktrace`. V2 intentionally keeps attributes separate
+from the envelope and omits automatic config, credential, resource, state,
+metadata, path, and URL fields. Existing v1 output is unchanged unless v2 is
+selected. Framework event names are prefixed with `rpacore.` and use dot
+separators; for example, `queue_run_completed` is
+`rpacore.queue.run_completed` in v2.
+
+`bind_log_context()` temporarily attaches approved scalar correlation fields
+such as transaction, queue-item, worker, skill, retry, and attempt identifiers.
+Nested scopes restore the prior context even when execution raises. Context is
+local to the current execution context: code that starts a new thread must bind
+the identifiers it needs in that thread. `get_logger("my_automation")` returns
+an `rpacore.application.my_automation` child, so a configured `rpacore` root
+captures both framework and application events without duplicate handlers.
 
 ## Queue Processing
 

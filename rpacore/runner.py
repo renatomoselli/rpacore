@@ -19,7 +19,7 @@ from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialProvider
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.engine import Engine
-from rpacore.logger import get_logger
+from rpacore.logger import bind_log_context, get_logger
 from rpacore.notify import Notifier, dispatch
 from rpacore.persistence import (
     TransactionFenceError,
@@ -285,6 +285,20 @@ def run_queue_loop(
                     "on_finish callback raised during lifecycle cleanup",
                     extra={"event": "on_finish_error", "worker_id": worker_id},
                 )
+        log.info(
+            "Queue run completed",
+            extra={
+                "event": "queue_run_completed",
+                "worker_id": worker_id,
+                "processed": summary.processed,
+                "completed": summary.completed,
+                "failed": summary.failed,
+                "retry_scheduled": summary.retry_scheduled,
+                "terminal_failed": summary.terminal_failed,
+                "lease_lost": summary.lease_lost,
+                "transition_unknown": summary.transition_unknown,
+            },
+        )
 
 
 def _add_cleanup_failure_note(
@@ -376,9 +390,53 @@ def _run_claimed_item(
     heartbeat: _LeaseHeartbeat,
 ) -> bool:
     """Process one claimed item; return whether the queue loop should continue."""
+    with bind_log_context(
+        queue_item_id=item.id,
+        queue_reference=item.reference,
+        worker_id=worker_id,
+    ):
+        return _run_claimed_item_with_context(
+            queue,
+            engine,
+            build_transaction,
+            config,
+            credentials,
+            item,
+            worker_id=worker_id,
+            notifiers=notifiers,
+            log=log,
+            after_item=after_item,
+            retry_business_failures=retry_business_failures,
+            transaction_db_path=transaction_db_path,
+            shared_resources=shared_resources,
+            summary=summary,
+            heartbeat=heartbeat,
+        )
+
+
+def _run_claimed_item_with_context(
+    queue: QueueProvider,
+    engine: Engine,
+    build_transaction: Callable[[QueueItem], Transaction],
+    config: dict[str, object],
+    credentials: CredentialProvider,
+    item: QueueItem,
+    *,
+    worker_id: str,
+    notifiers: list[Notifier],
+    log: logging.Logger,
+    after_item: Callable[[QueueItem, Transaction | None, Exception | None], None] | None,
+    retry_business_failures: bool,
+    transaction_db_path: str | None,
+    shared_resources: dict[str, object],
+    summary: QueueRunSummary,
+    heartbeat: _LeaseHeartbeat,
+) -> bool:
+    """Process one claimed item with queue correlation bound."""
     transaction: Transaction | None = None
     ctx: ProcessContext | None = None
     error: Exception | None = None
+    outcome_error: Exception | None = None
     originally_intended_complete = False
     callback_failed = False
     lease_lost = False
@@ -423,6 +481,7 @@ def _run_claimed_item(
         raise
     except Exception as exc:
         error = exc
+        outcome_error = exc
         lease_lost = isinstance(exc, (QueueLeaseLostError, TransactionFenceError))
         log.exception(
             "Unexpected error processing queue item",
@@ -434,12 +493,15 @@ def _run_claimed_item(
             heartbeat.raise_if_failed()
         except QueueLeaseLostError as exc:
             error = exc
+            outcome_error = exc
             lease_lost = True
         except _FATAL_SIGNALS:
             raise
         except Exception as exc:
             if error is None:
                 error = exc
+            if outcome_error is None:
+                outcome_error = exc
 
     if ctx is not None and not lease_lost:
         try:
@@ -481,12 +543,15 @@ def _run_claimed_item(
             heartbeat.raise_if_failed()
         except QueueLeaseLostError as exc:
             error = exc
+            outcome_error = exc
             lease_lost = True
         except _FATAL_SIGNALS:
             raise
         except Exception as exc:
             if error is None:
                 error = exc
+            if outcome_error is None:
+                outcome_error = exc
 
     if lease_lost:
         summary.failed += 1
@@ -512,18 +577,18 @@ def _run_claimed_item(
         )
         return True
 
-    if isinstance(error, _CheckpointError):
-        retry = error.retry
-    elif isinstance(error, _DurableTransactionBindingError):
+    if isinstance(outcome_error, _CheckpointError):
+        retry = outcome_error.retry
+    elif isinstance(outcome_error, _DurableTransactionBindingError):
         retry = False
-    elif isinstance(error, _LeaseRenewalError):
+    elif isinstance(outcome_error, _LeaseRenewalError):
         retry = True
-    elif isinstance(error, (ExecutionValidationError, JsonStateError)):
+    elif isinstance(outcome_error, (ExecutionValidationError, JsonStateError)):
         retry = False
     else:
         retry = (
             retry_business_failures
-            or error is not None
+            or outcome_error is not None
             or not _transaction_has_only_business_failures(transaction)
         )
     transition_outcome, transition_error = _fail_queue_item_with_retries(

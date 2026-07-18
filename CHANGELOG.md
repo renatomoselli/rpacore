@@ -25,6 +25,13 @@ All notable user-facing changes are recorded here.
 - Added disposition-specific queue-run summary counters. `SqliteQueue.fail()`
   now returns the actual durable attempt disposition; custom providers can
   return `None`, which the runner reports as an unknown transition.
+- Added `OutcomeReport` and text/HTML report fields that directly expose a
+  transaction's captured outcome category, retry disposition, and optional
+  failure code. The canonical JSON transaction export remains format version 1.
+- Added opt-in JSON log format v2 with a protected nested attribute envelope,
+  scoped scalar correlation context, corrected application logger hierarchy,
+  and a terminal queue-run summary event. JSON log format v1 remains the
+  default compatibility format.
 
 ### Changed
 
