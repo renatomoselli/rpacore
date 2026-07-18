@@ -1146,13 +1146,14 @@ class TestSqliteQueueAttemptsAndPoison:
 
         claimed = q.next_item("worker")
         assert claimed is not None
-        q.fail(
+        outcome = q.fail(
             claimed.id,
             retry=False,
             claimed_by=claimed.claimed_by,
             claim_token=claimed.claim_token,
         )
 
+        assert outcome is QueueAttemptOutcome.FAILED
         attempts = q.list_attempts(item.id)
         assert len(attempts) == 1
         assert attempts[0].outcome is QueueAttemptOutcome.FAILED

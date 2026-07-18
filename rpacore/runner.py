@@ -29,7 +29,13 @@ from rpacore.persistence import (
     _save_queue_transaction_fenced,
     load_transaction,
 )
-from rpacore.queue import QueueItem, QueueLeaseLostError, QueueProvider, SqliteQueue
+from rpacore.queue import (
+    QueueAttemptOutcome,
+    QueueItem,
+    QueueLeaseLostError,
+    QueueProvider,
+    SqliteQueue,
+)
 from rpacore.recovery import resume_transaction
 from rpacore.report import generate_report
 from rpacore.status import Status
@@ -82,7 +88,14 @@ class _LeaseHeartbeat:
 
 @dataclass
 class QueueRunSummary:
-    """Counts from a completed run_queue_loop() call."""
+    """Claim and transition counts from a completed ``run_queue_loop()`` call.
+
+    ``processed`` and ``failed`` are compatibility aggregates: processed means
+    claims handed to this runner, while failed includes terminal failures,
+    scheduled retries, and lease loss. The disposition-specific counters are
+    authoritative when present; ``transition_unknown`` covers providers that
+    do not attest the result of ``fail()``.
+    """
 
     processed: int = field(default=0)
     completed: int = field(default=0)
@@ -91,6 +104,10 @@ class QueueRunSummary:
     persistence_errors: int = field(default=0)
     lifecycle_errors: int = field(default=0)
     notification_errors: int = field(default=0)
+    retry_scheduled: int = field(default=0)
+    terminal_failed: int = field(default=0)
+    lease_lost: int = field(default=0)
+    transition_unknown: int = field(default=0)
 
 
 def run_queue_loop(
@@ -473,6 +490,7 @@ def _run_claimed_item(
 
     if lease_lost:
         summary.failed += 1
+        summary.lease_lost += 1
         _log_lease_lost(log, item, worker_id, error)
         return False
 
@@ -508,7 +526,7 @@ def _run_claimed_item(
             or error is not None
             or not _transaction_has_only_business_failures(transaction)
         )
-    transition_error = _fail_queue_item_with_retries(
+    transition_outcome, transition_error = _fail_queue_item_with_retries(
         queue,
         item,
         retry=retry,
@@ -518,6 +536,12 @@ def _run_claimed_item(
     if transition_error is not None:
         raise transition_error
     summary.failed += 1
+    if transition_outcome is QueueAttemptOutcome.RETRY_SCHEDULED:
+        summary.retry_scheduled += 1
+    elif transition_outcome is QueueAttemptOutcome.FAILED:
+        summary.terminal_failed += 1
+    else:
+        summary.transition_unknown += 1
     if not error and not callback_failed and ctx is not None:
         log.warning(
             "Queue item failed (transaction status: %s)",
@@ -723,20 +747,29 @@ def _fail_queue_item_with_retries(
     retry: bool,
     worker_id: str,
     log: logging.Logger,
-) -> Exception | None:
-    """Fail a queue item, retrying short-lived SQLite lock failures."""
+) -> tuple[QueueAttemptOutcome | None, Exception | None]:
+    """Fail one claim and return its actual disposition when the provider attests it."""
     for attempt in range(_LEASE_RENEW_ATTEMPTS):
         try:
-            queue.fail(
+            outcome = queue.fail(
                 item.id,
                 retry=retry,
                 claimed_by=item.claimed_by,
                 claim_token=item.claim_token,
             )
-            return None
+            if outcome not in (
+                None,
+                QueueAttemptOutcome.RETRY_SCHEDULED,
+                QueueAttemptOutcome.FAILED,
+            ):
+                return None, RuntimeError(
+                    "QueueProvider.fail() must return None, retry_scheduled, or failed; "
+                    f"got {outcome!r}"
+                )
+            return outcome, None
         except sqlite3.OperationalError as exc:
             if not is_transient_sqlite_lock(exc) or attempt == _LEASE_RENEW_ATTEMPTS - 1:
-                return exc
+                return None, exc
             _sleep_before_sqlite_retry(
                 attempt,
                 delay_seconds=_LEASE_RETRY_DELAY_SECONDS,
@@ -751,8 +784,8 @@ def _fail_queue_item_with_retries(
         except MemoryError:
             raise
         except Exception as exc:
-            return exc
-    return None
+            return None, exc
+    return None, RuntimeError("Queue fail transition exhausted without a result")
 
 
 def _sleep_before_sqlite_retry(

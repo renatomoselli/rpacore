@@ -20,7 +20,7 @@ from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
-from rpacore.queue import QueueItem, QueueStatus, SqliteQueue
+from rpacore.queue import QueueAttemptOutcome, QueueItem, QueueStatus, SqliteQueue
 import rpacore.runner as runner_module
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.skill import Skill
@@ -76,9 +76,14 @@ class _FakeQueue:
         retry: bool = True,
         claimed_by: str,
         claim_token: str,
-    ) -> None:
+    ) -> QueueAttemptOutcome:
         self.failed.append(item_id)
         self.fail_retries.append(retry)
+        return (
+            QueueAttemptOutcome.RETRY_SCHEDULED
+            if retry
+            else QueueAttemptOutcome.FAILED
+        )
 
 
 class _RecordingSqliteQueue(SqliteQueue):
@@ -131,8 +136,8 @@ class _RecordingSqliteQueue(SqliteQueue):
         retry: bool = True,
         claimed_by: str,
         claim_token: str,
-    ) -> None:
-        super().fail(
+    ) -> QueueAttemptOutcome:
+        outcome = super().fail(
             item_id,
             retry=retry,
             claimed_by=claimed_by,
@@ -140,6 +145,7 @@ class _RecordingSqliteQueue(SqliteQueue):
         )
         self.failed.append(item_id)
         self.fail_retries.append(retry)
+        return outcome
 
 
 def _item(ref: str) -> QueueItem:
@@ -251,6 +257,8 @@ class TestQueueRunSummary:
         assert summary.processed == 2
         assert summary.completed == 0
         assert summary.failed == 2
+        assert summary.terminal_failed == 2
+        assert summary.retry_scheduled == 0
         assert queue.failed == ["a", "b"]
         assert queue.fail_retries == [False, False]
 
@@ -262,6 +270,8 @@ class TestQueueRunSummary:
         assert summary.processed == 2
         assert summary.completed == 0
         assert summary.failed == 2
+        assert summary.retry_scheduled == 2
+        assert summary.terminal_failed == 0
         assert queue.failed == ["a", "b"]
         assert queue.fail_retries == [True, True]
 
@@ -274,8 +284,69 @@ class TestQueueRunSummary:
         assert summary.processed == 1
         assert summary.completed == 0
         assert summary.failed == 1
+        assert summary.retry_scheduled == 1
         assert queue.failed == ["a"]
         assert queue.fail_retries == [True]
+
+    def test_sqlite_queue_reports_terminal_failure_after_retry_budget_is_exhausted(
+        self,
+        tmp_path,
+    ) -> None:
+        queue = _RecordingSqliteQueue(
+            [_item("a")],
+            str(tmp_path / "queue.db"),
+            max_retries=0,
+        )
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_SystemFailSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+        )
+
+        assert summary.processed == 1
+        assert summary.failed == 1
+        assert summary.retry_scheduled == 0
+        assert summary.terminal_failed == 1
+        assert summary.transition_unknown == 0
+
+    def test_unattested_custom_provider_transition_is_explicitly_unknown(self) -> None:
+        class _UnattestedQueue(_FakeQueue):
+            def fail(
+                self,
+                item_id: str,
+                *,
+                retry: bool = True,
+                claimed_by: str,
+                claim_token: str,
+            ) -> None:
+                self.failed.append(item_id)
+                self.fail_retries.append(retry)
+
+        queue = _UnattestedQueue([_item("a")])
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda item: Transaction(
+                reference=item.reference,
+                skills=[_BusinessFailSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+        )
+
+        assert summary.failed == 1
+        assert summary.terminal_failed == 0
+        assert summary.retry_scheduled == 0
+        assert summary.transition_unknown == 1
 
     def test_business_retry_policy_reruns_persisted_business_failure(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
@@ -703,7 +774,12 @@ class TestRunnerManagedTransactionPersistence:
             transaction_db_path=db_path,
         )
 
-        assert summary == QueueRunSummary(processed=1, completed=0, failed=1)
+        assert summary == QueueRunSummary(
+            processed=1,
+            completed=0,
+            failed=1,
+            terminal_failed=1,
+        )
         assert queue.failed == ["bad"]
         transactions = list_transactions(db_path=db_path)
         assert len(transactions) == 1
@@ -1238,7 +1314,7 @@ class TestRunnerManagedTransactionPersistence:
 
         stored = queue.get_item(item.id)
         assert stored is not None
-        assert summary == QueueRunSummary(processed=1, failed=1)
+        assert summary == QueueRunSummary(processed=1, failed=1, lease_lost=1)
         assert stored.status is QueueStatus.IN_PROGRESS
         assert stored.claim_token == replacement_tokens[0]
         durable = load_transaction(stored.transaction_id, transaction_db)
@@ -2298,7 +2374,7 @@ class TestQueueLeaseHeartbeat:
 
         assert not worker.is_alive()
         assert errors == []
-        assert summaries == [QueueRunSummary(processed=1, failed=1)]
+        assert summaries == [QueueRunSummary(processed=1, failed=1, lease_lost=1)]
         assert after_item_calls == []
         stored_first = queue.get_item(first.id)
         stored_second = queue.get_item(second.id)

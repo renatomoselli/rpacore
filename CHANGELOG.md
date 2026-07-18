@@ -22,6 +22,9 @@ All notable user-facing changes are recorded here.
 - Added `OutcomeCategory` and `RetryDisposition` terminal work vocabulary,
   plus optional namespaced failure codes on framework exceptions and persisted
   transaction outcomes.
+- Added disposition-specific queue-run summary counters. `SqliteQueue.fail()`
+  now returns the actual durable attempt disposition; custom providers can
+  return `None`, which the runner reports as an unknown transition.
 
 ### Changed
 

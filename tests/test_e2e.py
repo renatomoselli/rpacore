@@ -163,7 +163,13 @@ class TestEndToEndQueueWorkflow:
             mode="business",
         )
 
-        assert summary == QueueRunSummary(processed=1, completed=0, failed=1, callback_errors=0)
+        assert summary == QueueRunSummary(
+            processed=1,
+            completed=0,
+            failed=1,
+            callback_errors=0,
+            terminal_failed=1,
+        )
 
         stored_item = queue.get_item(item.id)
         assert stored_item is not None
@@ -192,7 +198,13 @@ class TestEndToEndQueueWorkflow:
             mode="unexpected",
         )
 
-        assert summary == QueueRunSummary(processed=1, completed=0, failed=1, callback_errors=0)
+        assert summary == QueueRunSummary(
+            processed=1,
+            completed=0,
+            failed=1,
+            callback_errors=0,
+            terminal_failed=1,
+        )
 
         stored_item = queue.get_item(item.id)
         assert stored_item is not None

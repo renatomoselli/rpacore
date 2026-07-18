@@ -111,7 +111,7 @@ class QueueProvider(Protocol):
     def complete(self, item_id: str, *, claimed_by: str, claim_token: str) -> None: ...
     def fail(
         self, item_id: str, *, retry: bool = True, claimed_by: str, claim_token: str
-    ) -> None: ...
+    ) -> QueueAttemptOutcome | None: ...
 
 
 _DEFAULT_DB_PATH = "queue.db"
@@ -774,8 +774,8 @@ class SqliteQueue:
         retry: bool = True,
         claimed_by: str,
         claim_token: str,
-    ) -> None:
-        """Increment retry_count and mark the item retriable or terminally failed."""
+    ) -> QueueAttemptOutcome:
+        """Close the current attempt and return its actual durable disposition."""
         conn = _connect(self.db_path)
         try:
             with conn:
@@ -804,17 +804,19 @@ class SqliteQueue:
                     raise QueueLeaseLostError(
                         f"Queue item {item_id!r} is no longer claimed by {claimed_by!r}"
                     )
+                outcome = (
+                    QueueAttemptOutcome.RETRY_SCHEDULED
+                    if new_status == "pending"
+                    else QueueAttemptOutcome.FAILED
+                )
                 _close_attempt(
                     conn,
                     item_id=item_id,
                     claim_token=claim_token,
-                    outcome=(
-                        QueueAttemptOutcome.RETRY_SCHEDULED
-                        if new_status == "pending"
-                        else QueueAttemptOutcome.FAILED
-                    ),
+                    outcome=outcome,
                     finished_at=datetime.now(timezone.utc),
                 )
+                return outcome
         finally:
             conn.close()
 

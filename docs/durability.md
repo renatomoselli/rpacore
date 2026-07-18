@@ -641,6 +641,15 @@ it increments `Transaction.retry_count`. The queue owns item delivery retry:
 interchangeable, and a queue retry may resume an already persisted transaction
 when `transaction_db_path` is configured.
 
+`QueueRunSummary.processed` counts claims handed to the runner, and its legacy
+`failed` counter includes every non-completed claim, including a requeue or
+lease loss. Use `retry_scheduled`, `terminal_failed`, and `lease_lost` for the
+separate known dispositions. `SqliteQueue.fail()` returns the durable attempt
+outcome it just wrote, so those counters describe the transition that happened,
+not merely the retry request. A custom `QueueProvider` may return `None`; the
+runner records that as `transition_unknown` rather than guessing from its retry
+argument.
+
 The runner retries only short-lived SQLite `OperationalError` messages that
 contain `locked` or `busy`. This bounded retry policy uses 3 attempts with
 0.05s then 0.10s sleeps before the final attempt, and each sleep is logged with
