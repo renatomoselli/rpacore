@@ -244,6 +244,25 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
                         "type": type(exc).__name__,
                     }
                 ],
+                "transaction": {
+                    "id": report.transaction_id,
+                    "reference": report.reference,
+                    "status": str(report.status),
+                    "retry_count": report.retry_count,
+                    "created_at": _format_dt(report.created_at),
+                    "started_at": _format_dt(report.started_at),
+                    "finished_at": _format_dt(report.finished_at),
+                    "metadata": {},
+                    "outcome": {
+                        "category": str(report.outcome.category),
+                        "retry_disposition": str(report.outcome.retry_disposition),
+                        "failure_code": report.outcome.failure_code,
+                    },
+                },
+                "skills": [],
+                "artifacts": [],
+                "history": [],
+                "transaction_record": None,
             },
             allow_nan=False,
             sort_keys=True,
@@ -257,6 +276,11 @@ def render_json(report: TransactionReport) -> str:
     if report.record is None:
         return _build_report_record(report).payload_json
     return report.record.payload_json
+
+
+def _record_payload(report: TransactionReport) -> dict[str, object]:
+    """Return the immutable report-v1 payload used by renderers."""
+    return json.loads(render_json(report))
 
 
 def _project_transaction_outcome(transaction: Transaction) -> OutcomeReport:
@@ -334,56 +358,96 @@ def _format_json_value(value: object) -> str:
 
 def render_text(report: TransactionReport) -> str:
     """Render a TransactionReport as a plain-text string."""
+    payload = _record_payload(report)
+    transaction = payload["transaction"]
+    assert isinstance(transaction, dict)
+    outcome = transaction["outcome"]
+    assert isinstance(outcome, dict)
     lines = [
-        f"Transaction: {report.reference} ({report.transaction_id})",
-        f"Status:      {report.status}  Retries: {report.retry_count}",
+        f"Transaction: {transaction['reference']} ({transaction['id']})",
+        f"Status:      {transaction['status']}  Retries: {transaction['retry_count']}",
         "Outcome:     "
-        f"{report.outcome.category}  Retry disposition: {report.outcome.retry_disposition}",
+        f"{outcome['category']}  Retry disposition: {outcome['retry_disposition']}",
     ]
-    if report.outcome.failure_code:
-        lines.append(f"Failure code: {report.outcome.failure_code}")
+    if outcome["failure_code"]:
+        lines.append(f"Failure code: {outcome['failure_code']}")
+    if not payload["complete"]:
+        errors = payload["errors"]
+        assert isinstance(errors, list)
+        error_codes = [
+            str(error["code"])
+            for error in errors
+            if isinstance(error, dict) and error.get("code")
+        ]
+        lines.append(
+            "Report record incomplete: " + ", ".join(error_codes or ["unknown"])
+        )
     lines.extend([
-        f"Created:     {_format_dt(report.created_at)}",
-        f"Started:     {_format_dt(report.started_at)}",
-        f"Finished:    {_format_dt(report.finished_at)}",
-        f"Generated:   {report.generated_at.isoformat()}",
+        f"Created:     {transaction['created_at']}",
+        f"Started:     {transaction['started_at']}",
+        f"Finished:    {transaction['finished_at']}",
+        f"Generated:   {payload['generated_at']}",
         "",
     ])
-    for sr in report.skills:
+    skills = payload["skills"]
+    assert isinstance(skills, list)
+    for skill in skills:
+        assert isinstance(skill, dict)
+        status = str(skill["status"])
+        try:
+            icon = _ICONS.get(Status(status), "?")
+        except ValueError:
+            icon = "?"
         lines.append(
-            f"  [{sr.icon}] {sr.name} (order {sr.execution_order}) — {sr.status}"
+            f"  [{icon}] {skill['name']} (order {skill['execution_order']}) — {status}"
         )
-        for exc in sr.exceptions:
-            kind = "BIZ" if isinstance(exc, BusinessException) else "SYS"
-            stop_text = " stop=true" if exc.stops_execution else ""
-            lines.append(f"      [{kind}] retry={exc.retry_number}{stop_text}: {exc}")
-            if exc.action:
-                lines.append(f"             action: {exc.action}")
-            if exc.screenshot_path:
-                lines.append(f"             screenshot: {exc.screenshot_path}")
-    if report.metadata:
-        lines.extend(["", "Metadata:"])
-        for key in sorted(report.metadata):
-            lines.append(f"  {key}: {_format_json_value(report.metadata[key])}")
-    if report.artifacts:
-        lines.extend(["", "Artifacts:"])
-        for artifact in report.artifacts:
-            kind = f" kind={artifact.kind}" if artifact.kind else ""
+        exceptions = skill["exceptions"]
+        assert isinstance(exceptions, list)
+        for exc in exceptions:
+            assert isinstance(exc, dict)
+            kind = "BIZ" if exc["type"] == "BusinessException" else "SYS"
+            stop_text = " stop=true" if exc["stops_execution"] else ""
             lines.append(
-                f"  {artifact.name}{kind} path={artifact.path} "
-                f"created={artifact.created_at.isoformat()}"
+                f"      [{kind}] retry={exc['retry_number']}{stop_text}: {exc['message']}"
             )
-            for key in sorted(artifact.metadata):
-                lines.append(f"    {key}: {_format_json_value(artifact.metadata[key])}")
-    if report.history:
-        lines.extend(["", "History:"])
-        for entry in report.history:
-            skill = ""
-            if entry.skill_name:
-                skill = f" skill={entry.skill_name} order={entry.skill_execution_order}"
+            if exc["action"]:
+                lines.append(f"             action: {exc['action']}")
+            screenshot_path = exc.get("screenshot_path")
+            if isinstance(screenshot_path, str) and screenshot_path:
+                lines.append(f"             screenshot: {screenshot_path}")
+    metadata = transaction["metadata"]
+    assert isinstance(metadata, dict)
+    if metadata:
+        lines.extend(["", "Metadata:"])
+        for key in sorted(metadata):
+            lines.append(f"  {key}: {_format_json_value(metadata[key])}")
+    artifacts = payload["artifacts"]
+    assert isinstance(artifacts, list)
+    if artifacts:
+        lines.extend(["", "Artifacts:"])
+        for artifact in artifacts:
+            assert isinstance(artifact, dict)
+            kind = f" kind={artifact['kind']}" if artifact["kind"] else ""
             lines.append(
-                f"  #{entry.sequence} {entry.timestamp.isoformat()} "
-                f"{entry.event} status={entry.status} retry={entry.retry_number}{skill}"
+                f"  {artifact['name']}{kind} path={artifact['path']} "
+                f"created={artifact['created_at']}"
+            )
+            artifact_metadata = artifact["metadata"]
+            assert isinstance(artifact_metadata, dict)
+            for key in sorted(artifact_metadata):
+                lines.append(f"    {key}: {_format_json_value(artifact_metadata[key])}")
+    history = payload["history"]
+    assert isinstance(history, list)
+    if history:
+        lines.extend(["", "History:"])
+        for entry in history:
+            assert isinstance(entry, dict)
+            skill = ""
+            if entry["skill_name"]:
+                skill = f" skill={entry['skill_name']} order={entry['skill_execution_order']}"
+            lines.append(
+                f"  #{entry['sequence']} {entry['timestamp']} "
+                f"{entry['event']} status={entry['status']} retry={entry['retry_number']}{skill}"
             )
     return "\n".join(lines)
 
@@ -412,7 +476,7 @@ h2{margin-bottom:.25rem}
 <body>
 <h2>$reference</h2>
 <p>Status: <strong>$status</strong> &nbsp; Retries: $retry_count &nbsp; Generated: $generated_at</p>
-<p>Outcome: <strong>$outcome_category</strong> &nbsp; Retry disposition: $retry_disposition</p>$failure_code_html
+<p>Outcome: <strong>$outcome_category</strong> &nbsp; Retry disposition: $retry_disposition</p>$failure_code_html$report_error_html
 <p>Created: $created_at &nbsp; Started: $started_at &nbsp; Finished: $finished_at</p>
 <p>ID: <code>$transaction_id</code></p>
 $skills_html
@@ -499,109 +563,152 @@ def _esc(text: str) -> str:
 
 def render_html(report: TransactionReport) -> str:
     """Render a TransactionReport as an HTML string."""
+    payload = _record_payload(report)
+    transaction = payload["transaction"]
+    assert isinstance(transaction, dict)
+    outcome = transaction["outcome"]
+    assert isinstance(outcome, dict)
+    errors = payload["errors"]
+    assert isinstance(errors, list)
+    error_codes = [
+        str(error["code"])
+        for error in errors
+        if isinstance(error, dict) and error.get("code")
+    ]
     skills_parts: list[str] = []
-    for sr in report.skills:
+    skills = payload["skills"]
+    assert isinstance(skills, list)
+    for skill in skills:
+        assert isinstance(skill, dict)
         exc_parts: list[str] = []
-        for exc in sr.exceptions:
-            kind = "BIZ" if isinstance(exc, BusinessException) else "SYS"
-            exc_class = "biz" if isinstance(exc, BusinessException) else "sys"
-            stop_html = " stop=true" if exc.stops_execution else ""
-            action_html = f" &mdash; action: {_esc(exc.action)}" if exc.action else ""
+        exceptions = skill["exceptions"]
+        assert isinstance(exceptions, list)
+        for exc in exceptions:
+            assert isinstance(exc, dict)
+            kind = "BIZ" if exc["type"] == "BusinessException" else "SYS"
+            exc_class = "biz" if kind == "BIZ" else "sys"
+            stop_html = " stop=true" if exc["stops_execution"] else ""
+            action_html = (
+                f" &mdash; action: {_esc(str(exc['action']))}" if exc["action"] else ""
+            )
+            screenshot_path = exc.get("screenshot_path")
             screenshot_html = (
-                f'<br><a href="{_esc(exc.screenshot_path)}">screenshot</a>'
-                if exc.screenshot_path
+                f'<br><a href="{_esc(screenshot_path)}">screenshot</a>'
+                if isinstance(screenshot_path, str) and screenshot_path
                 else ""
             )
             exc_parts.append(
                 _EXC_TEMPLATE.substitute(
                     exc_class=exc_class,
                     kind=kind,
-                    retry_number=f"{exc.retry_number}{stop_html}",
-                    message=_esc(str(exc)),
+                    retry_number=f"{exc['retry_number']}{stop_html}",
+                    message=_esc(str(exc["message"])),
                     action_html=action_html,
                     screenshot_html=screenshot_html,
                 )
             )
-        css_class = sr.status.replace("_", "-")
+        status = str(skill["status"])
+        try:
+            icon = _ICONS.get(Status(status), "?")
+        except ValueError:
+            icon = "?"
+        css_class = status.replace("_", "-")
         skills_parts.append(
             _SKILL_TEMPLATE.substitute(
                 css_class=css_class,
-                icon=sr.icon,
-                name=_esc(sr.name),
-                execution_order=sr.execution_order,
-                status=sr.status,
+                icon=icon,
+                name=_esc(str(skill["name"])),
+                execution_order=skill["execution_order"],
+                status=status,
                 exceptions_html="\n  ".join(exc_parts),
             )
         )
     history_html = ""
-    if report.history:
+    history = payload["history"]
+    assert isinstance(history, list)
+    if history:
         items: list[str] = []
-        for entry in report.history:
+        for entry in history:
+            assert isinstance(entry, dict)
             skill = ""
-            if entry.skill_name:
+            if entry["skill_name"]:
                 skill = (
-                    f" skill={_esc(entry.skill_name)}"
-                    f" order={entry.skill_execution_order}"
+                    f" skill={_esc(str(entry['skill_name']))}"
+                    f" order={entry['skill_execution_order']}"
                 )
             items.append(
                 _HISTORY_ITEM_TEMPLATE.substitute(
-                    sequence=entry.sequence,
-                    timestamp=_esc(entry.timestamp.isoformat()),
-                    event=_esc(str(entry.event)),
-                    status=_esc(str(entry.status)),
-                    retry_number=entry.retry_number,
+                    sequence=entry["sequence"],
+                    timestamp=_esc(str(entry["timestamp"])),
+                    event=_esc(str(entry["event"])),
+                    status=_esc(str(entry["status"])),
+                    retry_number=entry["retry_number"],
                     skill=skill,
                 )
             )
         history_html = _HISTORY_TEMPLATE.substitute(history_items="\n".join(items))
     metadata_html = ""
-    if report.metadata:
+    metadata = transaction["metadata"]
+    assert isinstance(metadata, dict)
+    if metadata:
         items = [
             _METADATA_ITEM_TEMPLATE.substitute(
                 key=_esc(key),
-                value=_esc(_format_json_value(report.metadata[key])),
+                value=_esc(_format_json_value(metadata[key])),
             )
-            for key in sorted(report.metadata)
+            for key in sorted(metadata)
         ]
         metadata_html = _METADATA_TEMPLATE.substitute(metadata_items="\n".join(items))
     artifacts_html = ""
-    if report.artifacts:
+    artifacts = payload["artifacts"]
+    assert isinstance(artifacts, list)
+    if artifacts:
         items = []
-        for artifact in report.artifacts:
-            kind = f" kind={_esc(artifact.kind)}" if artifact.kind else ""
+        for artifact in artifacts:
+            assert isinstance(artifact, dict)
+            kind = f" kind={_esc(str(artifact['kind']))}" if artifact["kind"] else ""
             metadata = ""
-            if artifact.metadata:
+            artifact_metadata = artifact["metadata"]
+            assert isinstance(artifact_metadata, dict)
+            if artifact_metadata:
                 metadata_items = [
-                    f"{_esc(key)}={_esc(_format_json_value(artifact.metadata[key]))}"
-                    for key in sorted(artifact.metadata)
+                    f"{_esc(key)}={_esc(_format_json_value(artifact_metadata[key]))}"
+                    for key in sorted(artifact_metadata)
                 ]
                 metadata = f" metadata={'; '.join(metadata_items)}"
             items.append(
                 _ARTIFACT_ITEM_TEMPLATE.substitute(
-                    name=_esc(artifact.name),
+                    name=_esc(str(artifact["name"])),
                     kind=kind,
-                    path=_esc(artifact.path),
-                    created_at=_esc(artifact.created_at.isoformat()),
+                    path=_esc(str(artifact["path"])),
+                    created_at=_esc(str(artifact["created_at"])),
                     metadata=metadata,
                 )
             )
         artifacts_html = _ARTIFACTS_TEMPLATE.substitute(artifact_items="\n".join(items))
     return _HTML_TEMPLATE.substitute(
-        reference=_esc(report.reference),
-        status=report.status,
-        retry_count=report.retry_count,
-        outcome_category=_esc(str(report.outcome.category)),
-        retry_disposition=_esc(str(report.outcome.retry_disposition)),
+        reference=_esc(str(transaction["reference"])),
+        status=transaction["status"],
+        retry_count=transaction["retry_count"],
+        outcome_category=_esc(str(outcome["category"])),
+        retry_disposition=_esc(str(outcome["retry_disposition"])),
         failure_code_html=(
-            f"\n<p>Failure code: <code>{_esc(report.outcome.failure_code)}</code></p>"
-            if report.outcome.failure_code
+            f"\n<p>Failure code: <code>{_esc(str(outcome['failure_code']))}</code></p>"
+            if outcome["failure_code"]
             else ""
         ),
-        generated_at=_esc(report.generated_at.isoformat()),
-        created_at=_esc(_format_dt(report.created_at)),
-        started_at=_esc(_format_dt(report.started_at)),
-        finished_at=_esc(_format_dt(report.finished_at)),
-        transaction_id=_esc(report.transaction_id),
+        report_error_html=(
+            "\n<p>Report record incomplete: <code>"
+            + _esc(", ".join(error_codes or ["unknown"]))
+            + "</code></p>"
+            if not payload["complete"]
+            else ""
+        ),
+        generated_at=_esc(str(payload["generated_at"])),
+        created_at=_esc(str(transaction["created_at"])),
+        started_at=_esc(str(transaction["started_at"])),
+        finished_at=_esc(str(transaction["finished_at"])),
+        transaction_id=_esc(str(transaction["id"])),
         skills_html="\n".join(skills_parts),
         metadata_html=metadata_html,
         artifacts_html=artifacts_html,

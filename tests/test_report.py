@@ -225,6 +225,66 @@ class TestGenerateReport:
         assert payload["report_format_version"] == 1
         assert payload["transaction"]["id"] == "manual-001"
 
+    def test_text_renderer_uses_recorded_transaction_truth(self):
+        tx = make_transaction(status=Status.SUCCESSFUL)
+        report = generate_report(tx)
+        report.reference = "mutated-after-generation"
+        report.status = Status.FAILED
+
+        text = render_text(report)
+
+        assert f"Transaction: {tx.reference} ({tx.id})" in text
+        assert "Status:      successful" in text
+
+    def test_html_renderer_uses_recorded_transaction_truth(self):
+        tx = make_transaction(status=Status.SUCCESSFUL)
+        report = generate_report(tx)
+        report.reference = "mutated-after-generation"
+        report.status = Status.FAILED
+
+        html = render_html(report)
+
+        assert tx.reference in html
+        assert "mutated-after-generation" not in html
+
+    def test_renderers_use_recorded_detail_truth(self):
+        skill = make_skill("validate", 1, Status.FAILED)
+        skill.exceptions = [biz("original failure", action="correct input")]
+        tx = make_transaction(status=Status.FAILED, skills=[skill])
+        tx.metadata = {"customer": "original"}
+        tx.artifacts = [Artifact(name="audit", path="original.json")]
+        tx.append_history(HistoryEvent.TRANSACTION_STARTED)
+        report = generate_report(tx)
+
+        report.skills.clear()
+        report.metadata["customer"] = "mutated"
+        report.artifacts.clear()
+        report.history.clear()
+
+        text = render_text(report)
+        html = render_html(report)
+
+        for rendered in (text, html):
+            assert "validate" in rendered
+            assert "original failure" in rendered
+            assert "original" in rendered
+            assert "original.json" in rendered
+            assert "mutated" not in rendered
+
+    def test_incomplete_record_remains_renderable(self):
+        tx = make_transaction()
+        tx.metadata = {"ratio": float("nan")}
+
+        report = generate_report(tx)
+
+        text = render_text(report)
+        html = render_html(report)
+
+        assert "Transaction:" in text
+        assert "rpacore.report.record_serialization_failed" in text
+        assert tx.reference in html
+        assert "rpacore.report.record_serialization_failed" in html
+
     def test_report_projects_captured_outcome_without_reclassifying_history(self):
         skill = make_skill("save", 1, Status.FAILED)
         skill.exceptions = [sys_("transport failure")]

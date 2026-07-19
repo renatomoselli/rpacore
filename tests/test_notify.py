@@ -21,8 +21,16 @@ from rpacore.notify import (
     build_notifiers,
     dispatch,
 )
-from rpacore.report import ArtifactReport, SkillReport, TransactionReport
+from rpacore.report import (
+    ArtifactReport,
+    ReportRecord,
+    SkillReport,
+    TransactionReport,
+    generate_report,
+    render_json,
+)
 from rpacore.status import Status
+from rpacore.transaction import Transaction
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +355,16 @@ class TestEmailNotifierSend:
         assert "failed" in raw_msg.lower()
         assert "inv-99" in raw_msg
 
+    def test_incomplete_record_keeps_subject_transaction_header(self):
+        transaction = Transaction(reference="incomplete-email")
+        transaction.state = {"runtime": object()}
+
+        smtp = self._send(generate_report(transaction))
+
+        _, _, raw_msg = smtp.sendmail.call_args.args
+        assert "pending" in raw_msg.lower()
+        assert "incomplete-email" in raw_msg
+
     def test_credentials_get_called_for_password(self):
         creds = _creds("pw")
         notifier = EmailNotifier(_email_config(), creds)
@@ -421,6 +439,36 @@ class TestEmailNotifierSend:
             mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
             mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
             notifier.send(report)  # must not raise
+        mock_smtp.sendmail.assert_called_once()
+
+    def test_missing_record_screenshot_field_skips_attachment(self):
+        report = _make_report()
+        payload = json.loads(render_json(report))
+        payload["skills"] = [
+            {
+                "name": "s",
+                "execution_order": 1,
+                "status": "failed",
+                "exceptions": [
+                    {
+                        "type": "SystemException",
+                        "message": "err",
+                        "retry_number": 0,
+                        "action": "",
+                        "stops_execution": False,
+                    }
+                ],
+            }
+        ]
+        report.record = ReportRecord(1, json.dumps(payload))
+        notifier = EmailNotifier(_email_config(), _creds())
+
+        with patch("rpacore.notify.smtplib.SMTP") as mock_smtp_cls:
+            mock_smtp = MagicMock()
+            mock_smtp_cls.return_value.__enter__ = MagicMock(return_value=mock_smtp)
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+            notifier.send(report)
+
         mock_smtp.sendmail.assert_called_once()
 
     def test_screenshot_attachment_can_be_disabled(self, tmp_path):
@@ -646,6 +694,40 @@ class TestWebhookNotifierSend:
 
         assert payload["report"]["report_format_version"] == 1
         assert payload["report"]["transaction"]["id"] == "tx-001"
+
+    def test_incomplete_record_is_disclosed_only_in_opt_in_report(self):
+        transaction = Transaction(reference="incomplete-webhook")
+        transaction.state = {"runtime": object()}
+
+        body = self._send(
+            generate_report(transaction),
+            include_transaction=True,
+            include_report=True,
+        )
+        payload = json.loads(body)
+
+        assert "transaction" not in payload
+        assert payload["report"]["complete"] is False
+        assert payload["report"]["errors"] == [
+            {
+                "code": "rpacore.report.transaction_serialization_failed",
+                "scope": "transaction_record",
+            }
+        ]
+
+    def test_json_uses_existing_report_record(self):
+        report = _make_report()
+        report.record = ReportRecord(1, render_json(report))
+        report.reference = "mutated-after-record"
+        report.metadata["customer"] = "mutated"
+        report.artifacts.clear()
+
+        body = self._send(report)
+        payload = json.loads(body)
+
+        assert payload["reference"] == "ref-test"
+        assert payload["metadata"] == {"customer": "acme"}
+        assert payload["artifacts"][0]["name"] == "invoice"
 
     def test_posts_to_correct_url(self):
         notifier = WebhookNotifier(_webhook_config("https://custom.url/hook"))

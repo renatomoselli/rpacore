@@ -83,4 +83,8 @@ verification.
 
 Webhook URLs must use `http` or `https`. Local and private hosts are allowed
 because webhook endpoints are trusted operator configuration. Treat webhook
-targets as sensitive.
+targets as sensitive. `include_transaction` adds the existing canonical
+transaction JSON v1 payload. `include_report` separately adds report JSON v1;
+it is disabled by default because it includes diagnostic metadata, artifact
+paths, and exception details. Enabling either option does not alter the default
+webhook fields.

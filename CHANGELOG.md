@@ -32,6 +32,11 @@ All notable user-facing changes are recorded here.
   scoped scalar correlation context, corrected application logger hierarchy,
   and a terminal queue-run summary event. JSON log format v1 remains the
   default compatibility format.
+- Added immutable report format v1 via `ReportRecord` and `render_json()`.
+  Text and HTML reports derive from the same record, whose explicit incomplete
+  state preserves visible report-generation errors without changing transaction
+  outcome. Webhooks can opt in to a `report` v1 member with
+  `include_report = true`; their existing default payload is unchanged.
 
 ### Changed
 

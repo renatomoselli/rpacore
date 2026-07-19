@@ -128,12 +128,17 @@ class EmailNotifier:
     def send(self, report: TransactionReport) -> None:
         """Build and send an HTML email with optional screenshot attachments."""
         password = self._credentials.get("smtp_password")
+        report_payload = json.loads(render_json(report))
+        transaction = report_payload["transaction"]
+        assert isinstance(transaction, dict)
 
         html_body = render_html(report)
         text_body = render_text(report)
 
         msg = MIMEMultipart("mixed")
-        msg["Subject"] = f"rpacore [{report.status}] {report.reference}"
+        msg["Subject"] = (
+            f"rpacore [{transaction['status']}] {transaction['reference']}"
+        )
         msg["From"] = self.from_addr
         msg["To"] = ", ".join(self.to_addrs)
 
@@ -144,9 +149,17 @@ class EmailNotifier:
 
         if self.attach_screenshots:
             seen: set[str] = set()
-            for sr in report.skills:
-                for exc in sr.exceptions:
-                    path = exc.screenshot_path
+            skills = report_payload["skills"]
+            assert isinstance(skills, list)
+            for skill in skills:
+                assert isinstance(skill, dict)
+                exceptions = skill["exceptions"]
+                assert isinstance(exceptions, list)
+                for exc in exceptions:
+                    assert isinstance(exc, dict)
+                    path = exc.get("screenshot_path")
+                    if not isinstance(path, str):
+                        continue
                     if path and path not in seen:
                         seen.add(path)
                         try:
@@ -234,30 +247,26 @@ class WebhookNotifier:
 
     def send(self, report: TransactionReport) -> None:
         """POST a JSON payload to the configured webhook URL."""
+        report_payload = json.loads(render_json(report))
+        transaction = report_payload["transaction"]
+        assert isinstance(transaction, dict)
+        artifacts = report_payload["artifacts"]
+        assert isinstance(artifacts, list)
         payload = {
-            "transaction_id": report.transaction_id,
-            "reference": report.reference,
-            "status": str(report.status),
-            "retry_count": report.retry_count,
-            "generated_at": report.generated_at.isoformat(),
-            "metadata": report.metadata,
-            "artifacts": [
-                {
-                    "id": artifact.id,
-                    "name": artifact.name,
-                    "path": artifact.path,
-                    "kind": artifact.kind,
-                    "metadata": artifact.metadata,
-                    "created_at": artifact.created_at.isoformat(),
-                }
-                for artifact in report.artifacts
-            ],
+            "transaction_id": transaction["id"],
+            "reference": transaction["reference"],
+            "status": transaction["status"],
+            "retry_count": transaction["retry_count"],
+            "generated_at": report_payload["generated_at"],
+            "metadata": transaction["metadata"],
+            "artifacts": artifacts,
             "text": render_text(report),
         }
-        if self.include_transaction and report.transaction_record:
-            payload["transaction"] = report.transaction_record
+        transaction_record = report_payload["transaction_record"]
+        if self.include_transaction and transaction_record:
+            payload["transaction"] = transaction_record
         if self.include_report:
-            payload["report"] = json.loads(render_json(report))
+            payload["report"] = report_payload
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             self.url,

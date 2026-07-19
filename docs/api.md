@@ -114,6 +114,20 @@ environment variables, or enforce cross-field rules.
 | `ArtifactReport`, `OutcomeReport`, `ReportRecord`, `SkillReport`, `TransactionReport`, `generate_report`, `render_json`, `render_html`, `render_text` | Build and render transaction reports. | `TransactionReport.outcome` directly projects captured terminal category, retry disposition, and optional failure code; it does not infer them from status, history, or queue attempts. `TransactionReport.record` is an immutable, JSON-safe report-v1 record; `render_json()` returns its canonical JSON. Report generation snapshots JSON-safe nested data and exceptions; rendering has no file I/O. |
 | `Notifier`, `EmailNotifier`, `WebhookNotifier`, `build_notifiers`, `dispatch` | Send notifications. | Dispatch gives each notifier an isolated report snapshot. SMTP or HTTP requests occur when configured. Payloads can contain sensitive transaction data. |
 
+`ReportRecord` is report format v1: a frozen JSON-safe record formed once by
+`generate_report()`. `render_json()`, `render_text()`, and `render_html()` all
+derive their output from that record, so later mutation of the legacy
+`TransactionReport` convenience fields cannot change rendered operator truth.
+The decoded record has `complete` and `errors` fields. If canonical transaction
+serialization or record encoding cannot complete, it remains renderable with
+`complete: false`, a stable `rpacore.report.*` error code, and only the
+available transaction header; it never changes the transaction outcome.
+
+`WebhookNotifier` preserves its existing payload by default. Set
+`notification.webhook.include_report = true` to add a `report` member
+containing report format v1. This is opt-in because reports include existing
+diagnostic metadata, artifact paths, and exception details.
+
 ### Logging format contract
 
 `TextFormatter` emits human-readable sections separated by ` | `. Exception
