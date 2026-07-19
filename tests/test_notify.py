@@ -85,12 +85,14 @@ def _webhook_config(
     url: str = "https://hooks.example.com/notify",
     *,
     include_transaction: bool = False,
+    include_report: bool = False,
 ) -> dict:
     return {
         "notification": {
             "webhook": {
                 "url": url,
                 "include_transaction": include_transaction,
+                "include_report": include_report,
             }
         }
     }
@@ -455,6 +457,7 @@ class TestWebhookNotifierConfig:
         n = WebhookNotifier(_webhook_config())
         assert n.url == "https://hooks.example.com/notify"
         assert n.include_transaction is False
+        assert n.include_report is False
 
     def test_missing_url_raises(self):
         with pytest.raises(ValueError) as exc_info:
@@ -524,6 +527,17 @@ class TestWebhookNotifierConfig:
             "got str value='yes'"
         )
 
+    def test_include_report_bad_type_rejected(self):
+        cfg = _webhook_config()
+        cfg["notification"]["webhook"]["include_report"] = "yes"
+
+        with pytest.raises(TypeError) as exc_info:
+            WebhookNotifier(cfg)
+
+        assert str(exc_info.value) == (
+            "notification.webhook.include_report expected bool; got str value='yes'"
+        )
+
     def test_timeout_bool_rejected(self):
         cfg = _webhook_config()
         cfg["notification"]["webhook"]["timeout"] = True
@@ -557,12 +571,16 @@ class TestWebhookNotifierSend:
         report: TransactionReport | None = None,
         *,
         include_transaction: bool = False,
+        include_report: bool = False,
     ) -> bytes:
         """Call send() with a mocked urlopen, return the posted body."""
         if report is None:
             report = _make_report()
         notifier = WebhookNotifier(
-            _webhook_config(include_transaction=include_transaction)
+            _webhook_config(
+                include_transaction=include_transaction,
+                include_report=include_report,
+            )
         )
         posted: list[bytes] = []
 
@@ -600,6 +618,7 @@ class TestWebhookNotifierSend:
         body = self._send()
         payload = json.loads(body)
         assert "transaction" not in payload
+        assert "report" not in payload
         assert payload["metadata"] == {"customer": "acme"}
         assert payload["artifacts"][0]["metadata"] == {"invoice_id": 42}
 
@@ -620,6 +639,13 @@ class TestWebhookNotifierSend:
 
         payload = json.loads(body)
         assert "transaction" not in payload
+
+    def test_json_contains_opt_in_report_v1(self):
+        body = self._send(include_report=True)
+        payload = json.loads(body)
+
+        assert payload["report"]["report_format_version"] == 1
+        assert payload["report"]["transaction"]["id"] == "tx-001"
 
     def test_posts_to_correct_url(self):
         notifier = WebhookNotifier(_webhook_config("https://custom.url/hook"))

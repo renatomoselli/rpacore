@@ -71,6 +71,7 @@ attach_screenshots = true
 [notification.webhook]
 url = "https://hooks.example.com/rpacore"
 include_transaction = false
+include_report = false
 timeout = 10
 ```
 

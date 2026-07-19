@@ -107,6 +107,7 @@ from rpacore import (
     OutcomeCategory,
     OutcomeReport,
     ProcessContext,
+    ReportRecord,
     RetryDisposition,
     Skill,
     Status,
@@ -114,6 +115,7 @@ from rpacore import (
     generate_report,
     query_transactions,
     save_transaction,
+    render_json,
     validate_config,
 )
 
@@ -138,6 +140,10 @@ assert tx.skills[0].status is Status.SUCCESSFUL
 assert ctx.state == {{"ran": True}}
 report = generate_report(tx)
 assert isinstance(report.outcome, OutcomeReport)
+assert isinstance(report.record, ReportRecord)
+report_payload = json.loads(render_json(report))
+assert report_payload["report_format_version"] == 1
+assert report_payload["complete"] is True
 assert report.outcome.category is OutcomeCategory.SUCCESSFUL
 assert report.outcome.retry_disposition is RetryDisposition.NOT_APPLICABLE
 default_report = generate_report(Transaction(reference="default-outcome-smoke"))

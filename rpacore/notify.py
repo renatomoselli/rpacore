@@ -22,6 +22,7 @@ from rpacore.report import (
     TransactionReport,
     _snapshot_report,
     render_html,
+    render_json,
     render_text,
 )
 
@@ -172,6 +173,7 @@ class WebhookNotifier:
     Config section: [notification.webhook]
       url                 (str, required)
       include_transaction (bool, default false)
+      include_report      (bool, default false)
 
     Only http and https URLs are accepted. Private, loopback, and link-local
     hosts are allowed because webhook URLs are trusted operator configuration.
@@ -217,10 +219,18 @@ class WebhookNotifier:
                 "bool",
                 include_transaction,
             )
+        include_report = cfg.get("include_report", False)
+        if not isinstance(include_report, bool):
+            raise type_error(
+                "notification.webhook.include_report",
+                "bool",
+                include_report,
+            )
 
         self.url: str = url
         self.timeout: int = timeout
         self.include_transaction: bool = include_transaction
+        self.include_report: bool = include_report
 
     def send(self, report: TransactionReport) -> None:
         """POST a JSON payload to the configured webhook URL."""
@@ -246,6 +256,8 @@ class WebhookNotifier:
         }
         if self.include_transaction and report.transaction_record:
             payload["transaction"] = report.transaction_record
+        if self.include_report:
+            payload["report"] = json.loads(render_json(report))
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             self.url,
