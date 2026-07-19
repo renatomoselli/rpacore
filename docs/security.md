@@ -118,6 +118,13 @@ and includes the existing report diagnostic surfaces: metadata, artifact paths,
 and exception messages/actions/screenshot paths. It is disabled by default;
 enable it only for a trusted endpoint with an appropriate retention policy.
 
+`rpacore doctor` is local and read-only. Its results intentionally omit
+credentials, configuration values, raw paths, transaction state/arguments,
+exception text, queue payloads, artifact contents, and endpoint checks. It does
+not import a project entrypoint. Treat its bounded runtime and database-health
+output as operational metadata and keep it within the same trusted support
+boundary as the project.
+
 ## Security Review Checklist
 
 Use this checklist for changes that touch security-sensitive surfaces:

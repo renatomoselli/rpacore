@@ -37,6 +37,9 @@ All notable user-facing changes are recorded here.
   state preserves visible report-generation errors without changing transaction
   outcome. Webhooks can opt in to a `report` v1 member with
   `include_report = true`; their existing default payload is unchanged.
+- Added `rpacore doctor`, a versioned, privacy-bounded read-only diagnostic
+  command for runtime, project, transaction, and queue storage checks. It never
+  creates, migrates, repairs, imports project code, or contacts endpoints.
 
 ### Changed
 

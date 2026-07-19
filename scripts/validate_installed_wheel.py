@@ -216,6 +216,7 @@ def validate_installed_wheel(
         _run([str(rpacore_cli), "run"], cwd=generated_project, allowed_roots=allowed_run_roots)
         _run([str(rpacore_cli), "transaction", "list"], cwd=generated_project, allowed_roots=allowed_run_roots)
         _run([str(rpacore_cli), "transaction", "list", "--json"], cwd=generated_project, allowed_roots=allowed_run_roots)
+        _run([str(rpacore_cli), "doctor", "--json"], cwd=generated_project, allowed_roots=allowed_run_roots)
 
         if examples_pytest:
             _run([str(python), "-m", "pip", "install", "pytest"], cwd=outside_dir, allowed_roots=allowed_run_roots)

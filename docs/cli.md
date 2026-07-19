@@ -51,6 +51,51 @@ Exit codes:
 
 Prints the installed package version.
 
+## `rpacore doctor`
+
+Runs privacy-bounded, read-only diagnostics for the local Python/SQLite runtime,
+the nearest project manifest, an optional `config.toml`, and selected existing
+transaction or queue databases. It never imports the project entrypoint,
+creates or migrates a database, changes journal mode, contacts an endpoint, or
+reads credentials, transaction state/arguments, exception messages, queue
+payloads, artifact contents, or file paths from those records.
+
+```bash
+rpacore doctor
+rpacore doctor --json
+rpacore doctor --transaction-db path/to/rpacore.db
+rpacore doctor --queue-db path/to/queue.db
+rpacore doctor --config path/to/config.toml --json
+```
+
+The default command discovers `rpacore.toml` from the current directory and,
+when present, uses its transaction database path and sibling `config.toml`.
+`--transaction-db`, `--queue-db`, and `--config` select explicit inputs.
+Missing default inputs are reported as `not_applicable`; unavailable, malformed,
+or incompatible explicit inputs are `fail` checks. Database checks cover current
+schema compatibility, journal mode, SQLite `quick_check`, foreign-key integrity,
+and bounded queue counts/claim-binding facts. The JSON result is doctor format
+v1 with `pass`, `warning`, `fail`, or `not_applicable` check statuses. JSON
+stdout contains one document only.
+
+Doctor format v1 always emits these check IDs: `runtime.python`,
+`runtime.sqlite`, `project.manifest`, `project.config`,
+`transactions.schema`, `transactions.journal`, `transactions.quick_check`,
+`transactions.foreign_keys`, `queue.schema`, `queue.journal`,
+`queue.quick_check`, `queue.foreign_keys`, and `queue.health`. Database schema
+details contain `version`; journal details contain `mode`; queue-health details
+contain scalar `pending_items`, `in_progress_items`, `successful_items`,
+`failed_items`, `unknown_status_items`, `bound_items`, and, when available,
+`oldest_age_seconds`. When a SQLite header reports WAL, Doctor does not open the
+database at all: it reports a journal warning and marks deeper checks
+`not_applicable` to preserve WAL sidecars.
+
+Exit codes:
+
+- `0`: no failing checks (warnings are operator action items, not failures)
+- `1`: one or more checks failed
+- `2`: invalid command syntax
+
 ## Transaction Commands
 
 Transaction commands inspect the SQLite database at `[storage].transaction_db_path`

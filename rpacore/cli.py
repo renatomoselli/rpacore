@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from rpacore import __version__
+from rpacore.doctor import collect_doctor_result
 from rpacore.exceptions import BusinessException
 from rpacore.manifest import load_project_manifest, resolve_project_entrypoint
 from rpacore.persistence import load_transaction, query_transactions
@@ -83,6 +84,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export format.",
     )
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Inspect local runtime and storage without modifying them.",
+    )
+    doctor_parser.add_argument(
+        "--transaction-db", dest="transaction_db_path", help="Transaction database path."
+    )
+    doctor_parser.add_argument("--queue-db", dest="queue_db_path", help="Queue database path.")
+    doctor_parser.add_argument("--config", dest="config_path", help="Configuration file path.")
+    doctor_parser.add_argument("--json", action="store_true", help="Write JSON to stdout.")
+
     subparsers.add_parser("version", help="Print the installed RPA Core version.")
     return parser
 
@@ -101,6 +113,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_project()
     if args.command == "transaction":
         return _inspect_transactions(args)
+    if args.command == "doctor":
+        return _run_doctor(args)
     parser.error(f"unknown command: {args.command}")
 
 
@@ -224,6 +238,26 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
     except Exception as exc:
         _print_error(f"Could not inspect transactions in {db_path}: {exc}")
         return EXECUTION_ERROR
+
+
+def _run_doctor(args: argparse.Namespace) -> int:
+    """Run bounded readonly diagnostics without importing project entrypoints."""
+    try:
+        result = collect_doctor_result(
+            transaction_db_path=args.transaction_db_path,
+            queue_db_path=args.queue_db_path,
+            config_path=args.config_path,
+        )
+    except Exception:
+        _print_error("Could not complete doctor diagnostics")
+        return EXECUTION_ERROR
+    if args.json:
+        _write_json(result.to_dict())
+    else:
+        print("RPA Core Doctor (format v1)")
+        for check in result.checks:
+            print(f"{check.status.upper():<14} {check.id} - {check.summary}")
+    return result.exit_code
 
 
 def _iter_queried_transactions(

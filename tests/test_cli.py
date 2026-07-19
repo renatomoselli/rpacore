@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rpacore.cli as cli_module
+from rpacore.doctor import collect_doctor_result
 from rpacore import (
     Artifact,
     BusinessException,
@@ -21,6 +22,8 @@ from rpacore import (
     Transaction,
     TransactionPage,
     TransactionSummary,
+    QueueItem,
+    SqliteQueue,
     list_transactions,
     save_transaction,
 )
@@ -291,6 +294,266 @@ class TestCliInit:
         assert "Could not create project" in captured.err
         assert "disk full" in captured.err
         assert not (tmp_path / "demo_project").exists()
+
+
+class TestCliDoctor:
+    def test_unexpected_collection_error_is_bounded(self, monkeypatch, capsys) -> None:
+        def raise_unexpected_error(**_kwargs: object) -> object:
+            raise RuntimeError("unexpected diagnostic failure")
+
+        monkeypatch.setattr(cli_module, "collect_doctor_result", raise_unexpected_error)
+
+        result = cli_module.main(["doctor", "--json"])
+
+        captured = capsys.readouterr()
+        assert result == 1
+        assert captured.out == ""
+        assert captured.err == "rpacore: Could not complete doctor diagnostics\n"
+
+    def test_json_without_project_is_parseable_and_clean(self, tmp_path: Path) -> None:
+        result = run_cli("doctor", "--json", cwd=tmp_path)
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        payload = json.loads(result.stdout)
+        assert payload["doctor_format_version"] == 1
+        checks = {check["id"]: check for check in payload["checks"]}
+        assert checks["runtime.python"]["status"] == "pass"
+        assert checks["project.manifest"]["status"] == "not_applicable"
+
+    def test_transaction_database_is_inspected_without_mutation(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "transactions.db"
+        save_transaction(Transaction(reference="doctor"), str(db_path))
+        before = db_path.read_bytes()
+
+        result = run_cli("doctor", "--transaction-db", str(db_path), "--json", cwd=tmp_path)
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        assert db_path.read_bytes() == before
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["transactions.schema"]["status"] == "pass"
+        assert checks["transactions.quick_check"]["status"] == "pass"
+        assert checks["transactions.foreign_keys"]["status"] == "pass"
+
+    def test_missing_explicit_database_is_structured_failure_without_creation(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "missing.db"
+
+        result = run_cli("doctor", "--transaction-db", str(db_path), "--json", cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stderr == ""
+        assert not db_path.exists()
+        payload = json.loads(result.stdout)
+        checks = {check["id"]: check for check in payload["checks"]}
+        assert checks["transactions.schema"]["status"] == "fail"
+        assert str(db_path) not in result.stdout
+
+    def test_non_sqlite_database_is_a_structured_failure(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "not-a-database.db"
+        db_path.write_bytes(b"not a SQLite database")
+
+        result = run_cli("doctor", "--transaction-db", str(db_path), "--json", cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stderr == ""
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["transactions.schema"] == {
+            "id": "transactions.schema",
+            "status": "fail",
+            "summary": "Transaction database is not an SQLite database",
+            "details": {},
+        }
+
+    def test_future_database_is_structured_failure_without_mutation(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "future.db"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "CREATE TABLE rpacore_schema_versions "
+                "(component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+            )
+            conn.execute("INSERT INTO rpacore_schema_versions VALUES ('transactions', 99)")
+            conn.commit()
+        finally:
+            conn.close()
+        before = db_path.read_bytes()
+
+        result = run_cli("doctor", "--transaction-db", str(db_path), "--json", cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert db_path.read_bytes() == before
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["transactions.schema"]["status"] == "fail"
+
+    def test_queue_health_reports_counts_without_reading_payloads(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "queue.db"
+        queue = SqliteQueue({"db_path": str(db_path)})
+        queue.add(QueueItem(reference="private-reference", payload={"secret": "value"}))
+        before = db_path.read_bytes()
+
+        result = run_cli("doctor", "--queue-db", str(db_path), "--json", cwd=tmp_path)
+
+        assert result.returncode == 0
+        assert db_path.read_bytes() == before
+        assert "private-reference" not in result.stdout
+        assert "secret" not in result.stdout
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["queue.health"] == {
+            "id": "queue.health",
+            "status": "pass",
+            "summary": "Queue items have complete claim bindings",
+            "details": {
+                "bound_items": 0,
+                "pending_items": 1,
+                "in_progress_items": 0,
+                "successful_items": 0,
+                "failed_items": 0,
+                "unknown_status_items": 0,
+                "oldest_age_seconds": 0,
+            },
+        }
+
+    def test_project_discovery_never_imports_entrypoint(self, tmp_path: Path) -> None:
+        project = write_project(
+            tmp_path,
+            """\
+            from pathlib import Path
+            Path('entrypoint-imported.txt').write_text('unexpected', encoding='utf-8')
+
+            def main():
+                return 0
+            """,
+        )
+        db_path = project / "rpacore.db"
+        save_transaction(Transaction(reference="doctor"), str(db_path))
+
+        result = run_cli("doctor", "--json", cwd=project)
+
+        assert result.returncode == 0
+        assert not (project / "entrypoint-imported.txt").exists()
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["project.manifest"]["status"] == "pass"
+        assert checks["transactions.schema"]["status"] == "pass"
+
+    def test_configured_queue_database_is_discovered_readonly(self, tmp_path: Path) -> None:
+        project = write_project(tmp_path, "def main():\n    return 0\n")
+        (project / "config.toml").write_text(
+            "[queue]\ndb_path = 'queue.db'\n",
+            encoding="utf-8",
+        )
+        save_transaction(Transaction(reference="doctor"), str(project / "rpacore.db"))
+        queue_path = project / "queue.db"
+        SqliteQueue({"db_path": str(queue_path)}).add(
+            QueueItem(reference="doctor", payload={})
+        )
+        before = queue_path.read_bytes()
+
+        result = run_cli("doctor", "--json", cwd=project)
+
+        assert result.returncode == 0
+        assert queue_path.read_bytes() == before
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["project.config"]["status"] == "pass"
+        assert checks["queue.schema"]["status"] == "pass"
+        assert checks["queue.health"]["details"]["pending_items"] == 1
+
+    def test_wal_database_sidecars_are_not_changed(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "wal.db"
+        save_transaction(Transaction(reference="doctor"), str(db_path))
+        connection = sqlite3.connect(db_path)
+        try:
+            assert connection.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+            connection.execute("CREATE TABLE wal_probe (id INTEGER)")
+            connection.commit()
+            sidecars = [db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")]
+            assert all(path.exists() for path in sidecars)
+            before = {path: path.read_bytes() for path in sidecars}
+
+            result = collect_doctor_result(transaction_db_path=str(db_path))
+
+            assert {path: path.read_bytes() for path in sidecars} == before
+        finally:
+            connection.close()
+        checks = {check.id: check for check in result.checks}
+        assert checks["transactions.journal"].status == "warning"
+        assert checks["transactions.schema"].status == "not_applicable"
+        assert checks["transactions.quick_check"].status == "not_applicable"
+
+    def test_malformed_foreign_key_is_a_structured_json_failure(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "foreign-key-mismatch.db"
+        save_transaction(Transaction(reference="doctor"), str(db_path))
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute("CREATE TABLE parent (id INTEGER)")
+            connection.execute(
+                "CREATE TABLE child (parent_id INTEGER REFERENCES parent(id))"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = run_cli("doctor", "--transaction-db", str(db_path), "--json", cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stderr == ""
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["transactions.foreign_keys"]["status"] == "fail"
+
+    def test_malformed_queue_config_is_a_structured_failure(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.toml"
+        config_path.write_text("queue = 42\n", encoding="utf-8")
+
+        result = run_cli("doctor", "--config", str(config_path), "--json", cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stderr == ""
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["project.config"]["status"] == "fail"
+
+    def test_queue_item_without_claimed_at_is_unhealthy(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "queue.db"
+        queue = SqliteQueue({"db_path": str(db_path)})
+        item = QueueItem(reference="doctor", payload={})
+        queue.add(item)
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                "UPDATE queue_items SET status = 'in_progress', claimed_by = 'worker', "
+                "claim_token = 'claim-token', claimed_at = NULL WHERE id = ?",
+                (item.id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = run_cli("doctor", "--queue-db", str(db_path), "--json", cwd=tmp_path)
+
+        assert result.returncode == 1
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["queue.health"]["status"] == "fail"
+
+    def test_queue_health_counts_unknown_statuses_without_disclosure(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "queue.db"
+        queue = SqliteQueue({"db_path": str(db_path)})
+        item = QueueItem(reference="doctor", payload={})
+        queue.add(item)
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                "UPDATE queue_items SET status = 'unknown-internal-state' WHERE id = ?",
+                (item.id,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        result = run_cli("doctor", "--queue-db", str(db_path), "--json", cwd=tmp_path)
+
+        assert result.returncode == 0
+        assert "unknown-internal-state" not in result.stdout
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["queue.health"]["details"]["unknown_status_items"] == 1
 
 
 class TestCliTransaction:
