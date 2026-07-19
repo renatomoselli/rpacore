@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -12,10 +13,12 @@ from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.report import (
     ArtifactReport,
+    ReportRecord,
     SkillReport,
     TransactionReport,
     generate_report,
     render_html,
+    render_json,
     render_text,
 )
 from rpacore.skill import Skill
@@ -159,6 +162,68 @@ class TestGenerateReport:
 
         assert report.transaction_record["transaction_format_version"] == 1
         assert report.transaction_record["id"] == tx.id
+
+    def test_report_v1_record_is_immutable_and_json_safe(self):
+        tx = make_transaction()
+        tx.metadata = {"nested": {"values": ["original"]}}
+
+        report = generate_report(tx)
+
+        assert isinstance(report.record, ReportRecord)
+        payload = report.record.to_dict()
+        assert payload["report_format_version"] == 1
+        assert payload["complete"] is True
+        payload["transaction"]["metadata"]["nested"]["values"].append("view")
+        assert report.record.to_dict()["transaction"]["metadata"] == {
+            "nested": {"values": ["original"]}
+        }
+        assert render_json(report) == report.record.payload_json
+
+    def test_report_v1_record_exposes_transaction_serialization_failure(self):
+        tx = make_transaction()
+        tx.state = {"runtime": object()}
+
+        report = generate_report(tx)
+        payload = report.record.to_dict()
+
+        assert report.transaction_record == {}
+        assert payload["complete"] is False
+        assert payload["errors"] == [
+            {
+                "code": "rpacore.report.transaction_serialization_failed",
+                "scope": "transaction_record",
+            }
+        ]
+        assert payload["transaction_record"] is None
+        assert json.loads(render_json(report))["complete"] is False
+
+    def test_report_v1_record_exposes_json_encoding_failure(self):
+        tx = make_transaction()
+        tx.metadata = {"ratio": float("nan")}
+
+        payload = generate_report(tx).record.to_dict()
+
+        assert payload["complete"] is False
+        assert payload["errors"] == [
+            {
+                "code": "rpacore.report.record_serialization_failed",
+                "type": "ValueError",
+            }
+        ]
+
+    def test_render_json_builds_record_for_manually_constructed_report(self):
+        report = TransactionReport(
+            transaction_id="manual-001",
+            reference="manual",
+            status=Status.SUCCESSFUL,
+            retry_count=0,
+            skills=[],
+        )
+
+        payload = json.loads(render_json(report))
+
+        assert payload["report_format_version"] == 1
+        assert payload["transaction"]["id"] == "manual-001"
 
     def test_report_projects_captured_outcome_without_reclassifying_history(self):
         skill = make_skill("save", 1, Status.FAILED)

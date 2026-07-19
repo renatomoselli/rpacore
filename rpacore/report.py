@@ -26,6 +26,7 @@ _ICONS: dict[Status, str] = {
     Status.PENDING: "⏸",
     Status.IN_PROGRESS: "⏸",
 }
+REPORT_FORMAT_VERSION = 1
 
 
 @dataclass
@@ -65,6 +66,22 @@ class OutcomeReport:
     failure_code: str = ""
 
 
+@dataclass(frozen=True)
+class ReportRecord:
+    """Immutable JSON-safe report record.
+
+    ``payload_json`` is the canonical v1 representation. ``to_dict()`` returns
+    a fresh mutable view for consumers that need to inspect it.
+    """
+
+    format_version: int
+    payload_json: str
+
+    def to_dict(self) -> dict[str, object]:
+        """Return an isolated decoded view of the record."""
+        return json.loads(self.payload_json)
+
+
 @dataclass
 class TransactionReport:
     """Reporting view of a completed transaction."""
@@ -83,6 +100,7 @@ class TransactionReport:
     history: list[HistoryEntry] = field(default_factory=list)
     transaction_record: dict[str, object] = field(default_factory=dict)
     generated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    record: ReportRecord | None = None
 
 
 def generate_report(transaction: Transaction) -> TransactionReport:
@@ -115,10 +133,10 @@ def generate_report(transaction: Transaction) -> TransactionReport:
     ]
     try:
         transaction_record = serialize_transaction(transaction)
-    except TypeError:
+    except (TypeError, ValueError):
         transaction_record = {}
 
-    return TransactionReport(
+    report = TransactionReport(
         transaction_id=transaction.id,
         reference=transaction.reference,
         status=transaction.status,
@@ -133,6 +151,112 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         history=list(transaction.history),
         transaction_record=transaction_record,
     )
+    report.record = _build_report_record(report)
+    return report
+
+
+def _build_report_record(report: TransactionReport) -> ReportRecord:
+    """Build the immutable report-v1 record without changing work truth."""
+    serialization_error = ""
+    transaction_record: dict[str, object] | None = report.transaction_record
+    if not transaction_record:
+        serialization_error = "rpacore.report.transaction_serialization_failed"
+        transaction_record = None
+    payload: dict[str, object] = {
+        "report_format_version": REPORT_FORMAT_VERSION,
+        "generated_at": report.generated_at.isoformat(),
+        "complete": serialization_error == "",
+        "errors": (
+            []
+            if not serialization_error
+            else [{"code": serialization_error, "scope": "transaction_record"}]
+        ),
+        "transaction": {
+            "id": report.transaction_id,
+            "reference": report.reference,
+            "status": str(report.status),
+            "retry_count": report.retry_count,
+            "created_at": _format_dt(report.created_at),
+            "started_at": _format_dt(report.started_at),
+            "finished_at": _format_dt(report.finished_at),
+            "metadata": _snapshot_json_mapping(report.metadata),
+            "outcome": {
+                "category": str(report.outcome.category),
+                "retry_disposition": str(report.outcome.retry_disposition),
+                "failure_code": report.outcome.failure_code,
+            },
+        },
+        "skills": [
+            {
+                "name": skill.name,
+                "execution_order": skill.execution_order,
+                "status": str(skill.status),
+                "exceptions": [
+                    {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                        "retry_number": exc.retry_number,
+                        "action": exc.action,
+                        "screenshot_path": exc.screenshot_path,
+                        "stops_execution": exc.stops_execution,
+                    }
+                    for exc in skill.exceptions
+                ],
+            }
+            for skill in report.skills
+        ],
+        "artifacts": [
+            {
+                "id": artifact.id,
+                "name": artifact.name,
+                "path": artifact.path,
+                "kind": artifact.kind,
+                "created_at": artifact.created_at.isoformat(),
+                "metadata": _snapshot_json_mapping(artifact.metadata),
+            }
+            for artifact in report.artifacts
+        ],
+        "history": [
+            {
+                "sequence": entry.sequence,
+                "timestamp": entry.timestamp.isoformat(),
+                "event": str(entry.event),
+                "status": str(entry.status),
+                "retry_number": entry.retry_number,
+                "skill_name": entry.skill_name,
+                "skill_execution_order": entry.skill_execution_order,
+            }
+            for entry in report.history
+        ],
+        "transaction_record": transaction_record,
+    }
+    try:
+        payload_json = json.dumps(payload, allow_nan=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        payload_json = json.dumps(
+            {
+                "report_format_version": REPORT_FORMAT_VERSION,
+                "generated_at": report.generated_at.isoformat(),
+                "complete": False,
+                "errors": [
+                    {
+                        "code": "rpacore.report.record_serialization_failed",
+                        "type": type(exc).__name__,
+                    }
+                ],
+            },
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return ReportRecord(REPORT_FORMAT_VERSION, payload_json)
+
+
+def render_json(report: TransactionReport) -> str:
+    """Render the immutable report-v1 record as canonical JSON."""
+    if report.record is None:
+        return _build_report_record(report).payload_json
+    return report.record.payload_json
 
 
 def _project_transaction_outcome(transaction: Transaction) -> OutcomeReport:
@@ -180,6 +304,7 @@ def _snapshot_report(report: TransactionReport) -> TransactionReport:
         history=list(report.history),
         transaction_record=_snapshot_json_mapping(report.transaction_record),
         generated_at=report.generated_at,
+        record=report.record,
     )
 
 
