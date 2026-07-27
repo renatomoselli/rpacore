@@ -44,7 +44,10 @@ are never globally purged by RPA Core.
 `storage.transaction_db_path` is resolved relative to the directory containing
 `rpacore.toml` unless it is already absolute. It must name a non-blank durable
 SQLite file path; `:memory:` with or without surrounding whitespace is rejected.
-This manifest-relative authority is independent from config-file-relative paths.
+For generated and CLI-managed projects, this manifest-relative path is the
+transaction-storage authority for generated execution, default transaction
+commands, and default doctor inspection. Direct library code may explicitly
+use another path.
 
 ## Discovery
 

@@ -43,6 +43,8 @@ All notable user-facing changes are recorded here.
 
 ### Changed
 
+- New generated projects declare their transaction path only in `rpacore.toml`;
+  generated `main.py` reads that manifest path for checkpoint persistence.
 - Transaction CLI list and export now select membership through normalized-UTC
   query pages, avoiding export's unbounded identifier snapshot while preserving
   JSON and NDJSON export format version 1.

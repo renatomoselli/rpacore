@@ -4,7 +4,9 @@ RPA Core uses two small TOML files.
 
 ## `rpacore.toml`
 
-`rpacore.toml` is the project manifest consumed by the CLI:
+`rpacore.toml` is the project manifest consumed by the CLI. For a generated or
+CLI-managed project, its transaction path is the storage authority for the
+generated entrypoint, default transaction commands, and default doctor checks:
 
 ```toml
 [project]
@@ -17,7 +19,6 @@ transaction_db_path = "rpacore.db"
 `[project].entrypoint` is a `module:callable` string. The callable is invoked by
 `rpacore run`.
 
-`[storage].transaction_db_path` is used by CLI transaction inspection commands.
 Relative paths are resolved relative to the manifest file.
 
 ## `config.toml`
@@ -48,9 +49,9 @@ values and the SQLite `:memory:` sentinel, with or without surrounding
 whitespace, are invalid screenshot directories.
 Absolute paths and parent-directory components remain supported operator-owned
 filesystem paths; config path resolution is not a filesystem sandbox.
-Config paths and manifest paths have independent authorities: values in
-`rpacore.toml` resolve from the manifest's directory, even when a key has the
-same name.
+Direct library calls may use `config.toml`'s `transaction_db_path`; RPA Core
+does not infer that an arbitrary entrypoint uses its config. New generated
+projects instead keep their declared transaction path only in `rpacore.toml`.
 
 Transaction and queue database paths must name non-empty filesystem paths.
 Blank paths and `:memory:` with or without surrounding whitespace are rejected

@@ -233,6 +233,9 @@ class TestCliInit:
         assert (project / ".gitignore").exists()
         assert not (project / "LICENSE").exists()
         assert not (project / "NOTICE").exists()
+        assert "transaction_db_path" not in (project / "config.toml").read_text(
+            encoding="utf-8"
+        )
 
         run_result = run_cli("run", cwd=project)
 
@@ -243,6 +246,7 @@ class TestCliInit:
         assert "execute_transaction(" in (
             project / "main.py"
         ).read_text(encoding="utf-8")
+        assert "load_project_manifest" in (project / "main.py").read_text(encoding="utf-8")
         transactions = list_transactions(str(project / "rpacore.db"))
         assert len(transactions) == 1
         assert transactions[0].status is Status.SUCCESSFUL

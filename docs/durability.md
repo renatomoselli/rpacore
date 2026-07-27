@@ -433,6 +433,10 @@ When loaded from `config.toml`, relative `transaction_db_path` and
 This keeps both storage files stable when a process runs from a different
 current working directory.
 
+For generated and CLI-managed projects, place the declared transaction path in
+`rpacore.toml`; the generated entrypoint uses that manifest path. A direct
+library application can still pass a config-derived path explicitly.
+
 Durable database paths cannot be blank or `:memory:`. An empty path creates a
 temporary database, whitespace-only paths do not identify an intentional
 durable target, and `:memory:` creates connection-local state. RPA Core uses

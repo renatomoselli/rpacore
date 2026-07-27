@@ -469,7 +469,6 @@ def _config_toml() -> str:
         retry_backoff = 1.0
         log_level = "INFO"
         log_format = "text"
-        transaction_db_path = "rpacore.db"
         screenshot_dir = ""
         credential_provider = "env"
         """)
@@ -479,12 +478,23 @@ def _main_py() -> str:
     return textwrap.dedent("""\
         from __future__ import annotations
 
-        from rpacore import Engine, Status, Transaction, execute_transaction, load_config
+        from pathlib import Path
+
+        from rpacore import (
+            Engine,
+            Status,
+            Transaction,
+            execute_transaction,
+            load_config,
+            load_project_manifest,
+        )
         from skills.greeting import WriteGreeting
 
 
         def main() -> int:
-            config = load_config("config.toml")
+            project_dir = Path(__file__).resolve().parent
+            config = load_config(project_dir / "config.toml")
+            manifest = load_project_manifest(project_dir)
             transaction = Transaction(
                 reference="generated-greeting",
                 skills=[
@@ -505,7 +515,7 @@ def _main_py() -> str:
                 transaction,
                 config=config,
                 engine=engine,
-                transaction_db_path=str(config["transaction_db_path"]),
+                transaction_db_path=manifest.transaction_db_path,
             )
             return 0 if transaction.status is Status.SUCCESSFUL else 1
 
