@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Iterable, Protocol, runtime_checkable
 
+from rpacore._clock import _Clock, _SYSTEM_CLOCK
 from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore._sqlite import (
     SCHEMA_VERSION_TABLE,
@@ -460,6 +461,7 @@ class SqliteQueue:
         self.db_path: str = db_path
         self.lease_timeout: int = lease_timeout
         self.max_retries: int = max_retries
+        self._clock: _Clock = _SYSTEM_CLOCK
 
         conn = _connect(self.db_path)
         try:
@@ -590,7 +592,7 @@ class SqliteQueue:
         if not worker_id:
             worker_id = socket.gethostname()
 
-        now = datetime.now(timezone.utc)
+        now = self._clock.now_utc()
         conn = _connect(self.db_path)
         transaction_started = False
         try:
@@ -653,12 +655,12 @@ class SqliteQueue:
                             conn,
                             item_id=row["id"],
                             error_type=type(exc).__name__,
-                            created_at=datetime.now(timezone.utc),
+                            created_at=self._clock.now_utc(),
                         )
                     conn.execute("COMMIT")
                     transaction_started = False
                     continue
-                now = datetime.now(timezone.utc)
+                now = self._clock.now_utc()
                 claim_token = uuid.uuid4().hex
 
                 conn.execute("BEGIN IMMEDIATE")
@@ -722,7 +724,7 @@ class SqliteQueue:
 
     def renew_lease(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
         """Extend the currently claimed queue item lease for its owner."""
-        now = datetime.now(timezone.utc)
+        now = self._clock.now_utc()
         conn = _connect(self.db_path)
         try:
             with conn:
@@ -762,7 +764,7 @@ class SqliteQueue:
                     item_id=item_id,
                     claim_token=claim_token,
                     outcome=QueueAttemptOutcome.SUCCESSFUL,
-                    finished_at=datetime.now(timezone.utc),
+                    finished_at=self._clock.now_utc(),
                 )
         finally:
             conn.close()
@@ -814,7 +816,7 @@ class SqliteQueue:
                     item_id=item_id,
                     claim_token=claim_token,
                     outcome=outcome,
-                    finished_at=datetime.now(timezone.utc),
+                    finished_at=self._clock.now_utc(),
                 )
                 return outcome
         finally:
@@ -838,7 +840,7 @@ class SqliteQueue:
     ) -> None:
         if not isinstance(reason, str) or not reason.strip():
             raise value_error("queue.admin.reason", "non-empty str", reason)
-        now = datetime.now(timezone.utc)
+        now = self._clock.now_utc()
         conn = _connect(self.db_path)
         try:
             with conn:

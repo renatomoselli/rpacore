@@ -38,6 +38,7 @@ class _FakeQueue:
     def __init__(self, items: list[QueueItem]) -> None:
         self._items = list(items)
         self._claim_sequence = 0
+        self._clock = _RecordingClock()
         self.completed: list[str] = []
         self.failed: list[str] = []
         self.fail_retries: list[bool] = []
@@ -102,6 +103,7 @@ class _RecordingSqliteQueue(SqliteQueue):
         self.fail_retries: list[bool] = []
         self.bindings: list[tuple[str, str, str]] = []
         self.renewals: list[tuple[str, str]] = []
+        self._clock = _RecordingClock()
         for item in items:
             self.add(item)
 
@@ -179,6 +181,17 @@ def _make_engine_with(skill_cls: type[Skill]) -> tuple[Engine, Transaction]:
 
 
 _CREDS = EnvCredentialProvider()
+
+
+class _RecordingClock:
+    def __init__(self) -> None:
+        self.sleeps: list[float] = []
+
+    def now_utc(self) -> datetime:
+        return datetime(2026, 7, 27, tzinfo=timezone.utc)
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
 
 
 def _run(
@@ -861,7 +874,6 @@ class TestRunnerManagedTransactionPersistence:
 
     def test_transient_sqlite_persistence_failure_is_retried(self, monkeypatch, caplog) -> None:
         attempts: list[str] = []
-        sleeps: list[float] = []
         logger = logging.getLogger("test.runner.sqlite.retry")
 
         def _save_after_two_failures(
@@ -877,8 +889,6 @@ class TestRunnerManagedTransactionPersistence:
             "_save_queue_transaction_fenced",
             _save_after_two_failures,
         )
-        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
-
         with caplog.at_level(logging.WARNING, logger=logger.name):
             summary, queue = _run(
                 [_item("ok")],
@@ -889,7 +899,7 @@ class TestRunnerManagedTransactionPersistence:
         assert summary.persistence_errors == 0
         assert queue.completed == ["ok"]
         assert attempts == ["ok", "ok", "ok", "ok", "ok", "ok", "ok"]
-        assert sleeps == [0.05, 0.1]
+        assert queue._clock.sleeps == [0.05, 0.1]
         assert [
             record.__dict__.get("retry_delay_seconds")
             for record in caplog.records
@@ -898,7 +908,6 @@ class TestRunnerManagedTransactionPersistence:
 
     def test_non_transient_sqlite_persistence_failure_is_not_retried(self, monkeypatch) -> None:
         attempts: list[str] = []
-        sleeps: list[float] = []
 
         def _fail_with_non_transient_operational_error(
             transaction: Transaction,
@@ -912,19 +921,15 @@ class TestRunnerManagedTransactionPersistence:
             "_save_queue_transaction_fenced",
             _fail_with_non_transient_operational_error,
         )
-        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
-
         summary, queue = _run([_item("ok")], transaction_db_path="transactions.db")
 
         assert summary.persistence_errors == 1
         assert queue.failed == ["ok"]
         assert queue.fail_retries == [True]
         assert attempts == ["ok"]
-        assert sleeps == []
+        assert queue._clock.sleeps == []
 
     def test_complete_transition_retries_transient_sqlite_lock(self, monkeypatch) -> None:
-        sleeps: list[float] = []
-
         class LockedCompleteQueue(_FakeQueue):
             def __init__(self, items: list[QueueItem]) -> None:
                 super().__init__(items)
@@ -936,7 +941,6 @@ class TestRunnerManagedTransactionPersistence:
                     raise sqlite3.OperationalError("database is locked")
                 super().complete(item_id, claimed_by=claimed_by, claim_token=claim_token)
 
-        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
         queue = LockedCompleteQueue([_item("ok")])
 
         summary = run_queue_loop(
@@ -954,11 +958,9 @@ class TestRunnerManagedTransactionPersistence:
         assert summary.completed == 1
         assert queue.complete_attempts == 3
         assert queue.completed == ["ok"]
-        assert sleeps == [0.05, 0.1]
+        assert queue._clock.sleeps == [0.05, 0.1]
 
     def test_fail_transition_retries_transient_sqlite_lock(self, monkeypatch) -> None:
-        sleeps: list[float] = []
-
         class LockedFailQueue(_FakeQueue):
             def __init__(self, items: list[QueueItem]) -> None:
                 super().__init__(items)
@@ -977,7 +979,6 @@ class TestRunnerManagedTransactionPersistence:
                     claim_token=claim_token,
                 )
 
-        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
         queue = LockedFailQueue([_item("bad")])
 
         summary = run_queue_loop(
@@ -996,16 +997,13 @@ class TestRunnerManagedTransactionPersistence:
         assert queue.fail_attempts == 3
         assert queue.failed == ["bad"]
         assert queue.fail_retries == [True]
-        assert sleeps == [0.05, 0.1]
+        assert queue._clock.sleeps == [0.05, 0.1]
 
     def test_non_transient_complete_transition_failure_is_loud(self, monkeypatch) -> None:
-        sleeps: list[float] = []
-
         class BrokenCompleteQueue(_FakeQueue):
             def complete(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
                 raise sqlite3.OperationalError("disk I/O error")
 
-        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
         queue = BrokenCompleteQueue([_item("ok")])
 
         with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
@@ -1022,7 +1020,7 @@ class TestRunnerManagedTransactionPersistence:
             )
 
         assert queue.completed == []
-        assert sleeps == []
+        assert queue._clock.sleeps == []
 
     def test_heartbeat_memory_error_propagates_to_main_thread(self, monkeypatch) -> None:
         class MemoryErrorRenewQueue(_FakeQueue):
@@ -1041,6 +1039,40 @@ class TestRunnerManagedTransactionPersistence:
                     time.sleep(0.01)
 
         with pytest.raises(MemoryError, match="heartbeat exhausted memory"):
+            run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[_WaitSkill("wait", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="test-worker",
+            )
+
+    def test_heartbeat_clock_sleep_memory_error_propagates_to_main_thread(self, monkeypatch) -> None:
+        class LockedRenewQueue(_FakeQueue):
+            lease_timeout = 1
+
+            def renew_lease(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
+                raise sqlite3.OperationalError("database is locked")
+
+        class _FatalSleepClock(_RecordingClock):
+            def sleep(self, seconds: float) -> None:
+                raise MemoryError("clock sleep exhausted memory")
+
+        monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 0.01)
+        queue = LockedRenewQueue([_item("memory")])
+        queue._clock = _FatalSleepClock()
+
+        class _WaitSkill(Skill):
+            def execute(self, ctx: ProcessContext) -> None:
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+        with pytest.raises(MemoryError, match="clock sleep exhausted memory"):
             run_queue_loop(
                 queue=queue,
                 engine=Engine(),
@@ -1637,7 +1669,6 @@ class TestRunnerManagedTransactionPersistence:
         caplog,
     ) -> None:
         db_path = str(tmp_path / "transactions.db")
-        sleeps: list[float] = []
         logger = logging.getLogger("test.runner.bind.retry")
 
         class LockedThenBindingQueue(_RecordingSqliteQueue):
@@ -1663,7 +1694,6 @@ class TestRunnerManagedTransactionPersistence:
                     claim_token=claim_token,
                 )
 
-        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
         queue = LockedThenBindingQueue(
             [_item("bind-lock")],
             str(tmp_path / "queue.db"),
@@ -1688,7 +1718,7 @@ class TestRunnerManagedTransactionPersistence:
         assert summary.failed == 0
         assert queue.attempts == 3
         assert queue.bindings
-        assert sleeps == [0.05, 0.1]
+        assert queue._clock.sleeps == [0.05, 0.1]
         bind_retries = [
             record for record in caplog.records
             if record.__dict__.get("event") == "queue_bind_transaction_retry"
@@ -1703,7 +1733,6 @@ class TestRunnerManagedTransactionPersistence:
     ) -> None:
         db_path = str(tmp_path / "transactions.db")
         cleanup_attempts: list[str] = []
-        sleeps: list[float] = []
 
         class FailingBindQueue(_RecordingSqliteQueue):
             def bind_transaction(
@@ -1725,13 +1754,12 @@ class TestRunnerManagedTransactionPersistence:
             "_delete_unbound_pending_transaction",
             _fail_delete,
         )
-        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
-
-        summary = run_queue_loop(
-            queue=FailingBindQueue(
+        queue = FailingBindQueue(
                 [_item("cleanup")],
                 str(tmp_path / "queue.db"),
-            ),
+            )
+        summary = run_queue_loop(
+            queue=queue,
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
@@ -1746,17 +1774,17 @@ class TestRunnerManagedTransactionPersistence:
         assert summary.failed == 1
         assert summary.persistence_errors == 1
         assert len(cleanup_attempts) == 1
-        assert sleeps == []
+        assert queue._clock.sleeps == []
 
     def test_sqlite_retry_helper_logs_shape_and_delay(self, monkeypatch, caplog) -> None:
-        sleeps: list[float] = []
+        clock = _RecordingClock()
         logger = logging.getLogger("test.runner.retry.helper")
         error = sqlite3.OperationalError("database is locked")
-        monkeypatch.setattr(runner_module.time, "sleep", lambda delay: sleeps.append(delay))
 
         with caplog.at_level(logging.WARNING, logger=logger.name):
             runner_module._sleep_before_sqlite_retry(
                 2,
+                clock=clock,
                 delay_seconds=0.25,
                 log=logger,
                 event="retry_event",
@@ -1767,7 +1795,7 @@ class TestRunnerManagedTransactionPersistence:
                 max_attempts=7,
             )
 
-        assert sleeps == [1.0]
+        assert clock.sleeps == [1.0]
         record = caplog.records[0]
         assert record.__dict__.get("event") == "retry_event"
         assert record.__dict__.get("operation") == "retry_operation"

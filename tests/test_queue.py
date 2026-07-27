@@ -42,6 +42,21 @@ def make_item(reference: str = "ref", payload: dict | None = None) -> QueueItem:
     return QueueItem(reference=reference, payload=payload or {})
 
 
+class _ManualClock:
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+        self.sleeps: list[float] = []
+
+    def now_utc(self) -> datetime:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+
+    def advance(self, seconds: int) -> None:
+        self.now += timedelta(seconds=seconds)
+
+
 def claim_from_spawned_process(db_path: str, worker_id: str, results) -> None:
     """Claim once in a Windows-spawn-compatible child process."""
     queue = SqliteQueue({"db_path": db_path})
@@ -165,10 +180,12 @@ class TestSqliteQueueCRUD:
         assert "queue item payload expected JSON object" in str(exc_info.value)
 
     def test_next_item_quarantines_pre_existing_non_object_payload(self, tmp_path):
+        clock = _ManualClock(datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc))
         q = make_queue(tmp_path)
+        q._clock = clock
         conn = sqlite3.connect(q.db_path)
         try:
-            now = datetime.now(timezone.utc).isoformat()
+            now = clock.now.isoformat()
             conn.execute(
                 "INSERT INTO queue_items "
                 "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at) "
@@ -183,6 +200,7 @@ class TestSqliteQueueCRUD:
         events = q.list_poison_events("bad-payload")
         assert len(events) == 1
         assert events[0].error_type == "JsonStateError"
+        assert events[0].created_at == clock.now
         conn = sqlite3.connect(q.db_path)
         try:
             status = conn.execute(
@@ -849,6 +867,69 @@ class TestSqliteQueueAtomicClaim:
 # ---------------------------------------------------------------------------
 
 class TestSqliteQueueStaleReclaim:
+    def test_private_clock_controls_lease_expiry_and_attempt_timestamps(self, tmp_path):
+        start = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+        clock = _ManualClock(start)
+        q = make_queue(tmp_path, lease_timeout=10, max_retries=1)
+        q._clock = clock
+        item = QueueItem(reference="clocked", payload={}, created_at=start)
+        q.add(item)
+
+        first = q.next_item("worker-a")
+        assert first is not None
+        assert first.claimed_at == start
+        assert q.list_attempts(item.id)[0].started_at == start
+
+        clock.advance(10)
+        assert q.next_item("worker-b") is None
+
+        clock.advance(1)
+        second = q.next_item("worker-b")
+        assert second is not None
+        assert second.id == item.id
+        assert second.retry_count == 1
+        assert second.claimed_at == clock.now
+        first_attempt = q.list_attempts(item.id)[0]
+        assert first_attempt.outcome is QueueAttemptOutcome.LEASE_EXPIRED
+        assert first_attempt.finished_at == clock.now
+
+        clock.advance(1)
+        q.renew_lease(second.id, claimed_by=second.claimed_by, claim_token=second.claim_token)
+        renewed = q.get_item(second.id)
+        assert renewed is not None
+        assert renewed.claimed_at == clock.now
+
+        clock.advance(1)
+        q.complete(second.id, claimed_by=second.claimed_by, claim_token=second.claim_token)
+        second_attempt = q.list_attempts(item.id)[1]
+        assert second_attempt.outcome is QueueAttemptOutcome.SUCCESSFUL
+        assert second_attempt.finished_at == clock.now
+
+    def test_private_clock_timestamps_failed_and_admin_closed_attempts(self, tmp_path):
+        clock = _ManualClock(datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc))
+        q = make_queue(tmp_path, max_retries=1)
+        q._clock = clock
+        item = QueueItem(reference="clocked-admin", payload={}, created_at=clock.now)
+        q.add(item)
+
+        first = q.next_item("worker-a")
+        assert first is not None
+        clock.advance(5)
+        q.fail(first.id, claimed_by=first.claimed_by, claim_token=first.claim_token)
+        failed_attempt = q.list_attempts(item.id)[0]
+        assert failed_attempt.outcome is QueueAttemptOutcome.RETRY_SCHEDULED
+        assert failed_attempt.finished_at == clock.now
+
+        second = q.next_item("worker-b")
+        assert second is not None
+        clock.advance(5)
+        q.force_complete(second.id, reason="operator verified completion")
+        admin_event = q.list_admin_events(item.id)[0]
+        assert admin_event.created_at == clock.now
+        admin_attempt = q.list_attempts(item.id)[1]
+        assert admin_attempt.outcome is QueueAttemptOutcome.ADMIN_OVERRIDE
+        assert admin_attempt.finished_at == clock.now
+
     def test_stale_item_is_reclaimed(self, tmp_path):
         q = make_queue(tmp_path, lease_timeout=1)
         q.add(make_item("stale"))

@@ -7,11 +7,11 @@ import socket
 import sqlite3
 import sys
 import threading
-import time
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Callable
 
+from rpacore._clock import _Clock, _SYSTEM_CLOCK
 from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore._sqlite_retry import is_transient_sqlite_lock, sqlite_retry_delay
 from rpacore._validation import type_error
@@ -465,6 +465,7 @@ def _run_claimed_item_with_context(
                     worker_id=worker_id,
                     log=log,
                     summary=summary,
+                    clock=_clock_for_queue(queue),
                 ),
             )
         else:
@@ -668,14 +669,18 @@ def _start_lease_heartbeat(
 
     def run() -> None:
         while not stop_event.is_set():
-            error = _renew_lease_with_retries(
-                queue,
-                item.id,
-                claimed_by=item.claimed_by,
-                claim_token=item.claim_token,
-                log=log,
-                worker_id=worker_id,
-            )
+            try:
+                error = _renew_lease_with_retries(
+                    queue,
+                    item.id,
+                    claimed_by=item.claimed_by,
+                    claim_token=item.claim_token,
+                    log=log,
+                    worker_id=worker_id,
+                )
+            except _FATAL_SIGNALS as error:
+                heartbeat.error = error
+                return
             if error is not None:
                 if isinstance(error, (QueueLeaseLostError, MemoryError)):
                     heartbeat.error = error
@@ -748,6 +753,7 @@ def _renew_lease_with_retries(
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,
+                clock=_clock_for_queue(queue),
                 delay_seconds=_LEASE_RETRY_DELAY_SECONDS,
                 log=log,
                 event="queue_lease_renewal_retry",
@@ -785,6 +791,7 @@ def _complete_queue_item_with_retries(
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,
+                clock=_clock_for_queue(queue),
                 delay_seconds=_LEASE_RETRY_DELAY_SECONDS,
                 log=log,
                 event="queue_transition_retry",
@@ -833,6 +840,7 @@ def _fail_queue_item_with_retries(
                 return None, exc
             _sleep_before_sqlite_retry(
                 attempt,
+                clock=_clock_for_queue(queue),
                 delay_seconds=_LEASE_RETRY_DELAY_SECONDS,
                 log=log,
                 event="queue_transition_retry",
@@ -852,6 +860,7 @@ def _fail_queue_item_with_retries(
 def _sleep_before_sqlite_retry(
     attempt: int,
     *,
+    clock: _Clock,
     delay_seconds: float,
     log: logging.Logger,
     event: str,
@@ -875,7 +884,7 @@ def _sleep_before_sqlite_retry(
         },
         exc_info=(type(error), error, error.__traceback__),
     )
-    time.sleep(delay)
+    clock.sleep(delay)
 
 
 def _log_lease_lost(
@@ -905,6 +914,14 @@ def _require_sqlite_queue(queue: QueueProvider) -> SqliteQueue:
             "transaction checkpoints can be fenced atomically"
         )
     return queue
+
+
+def _clock_for_queue(queue: QueueProvider) -> _Clock:
+    """Return a private queue clock, defaulting custom providers to system time."""
+    if isinstance(queue, SqliteQueue):
+        return queue._clock
+    clock = getattr(queue, "_clock", None)
+    return clock if isinstance(clock, _Clock) else _SYSTEM_CLOCK
 
 
 def _transaction_for_queue_item(
@@ -963,6 +980,7 @@ def _transaction_for_queue_item(
         event="transaction_initial_persistence_retry",
         queue_item_id=item.id,
         worker_id=worker_id,
+        clock=_clock_for_queue(queue),
     )
     if error is not None:
         if isinstance(error, TransactionFenceError):
@@ -1004,6 +1022,7 @@ def _transaction_for_queue_item(
                 log=log,
                 queue_item_id=item.id,
                 worker_id=worker_id,
+                clock=_clock_for_queue(queue),
             )
         except BaseException as raised_cleanup_error:
             cleanup_error = raised_cleanup_error
@@ -1063,6 +1082,7 @@ def _bind_transaction_with_retries(
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,
+                clock=_clock_for_queue(queue),
                 delay_seconds=_LEASE_RETRY_DELAY_SECONDS,
                 log=log,
                 event="queue_bind_transaction_retry",
@@ -1136,6 +1156,7 @@ def _strict_transaction_checkpoint(
     worker_id: str,
     log: logging.Logger,
     summary: QueueRunSummary,
+    clock: _Clock,
 ) -> Callable[[Transaction], None]:
     """Return a checkpoint that raises when transaction persistence fails."""
 
@@ -1153,6 +1174,7 @@ def _strict_transaction_checkpoint(
             event="transaction_checkpoint_retry",
             queue_item_id=item.id,
             worker_id=worker_id,
+            clock=clock,
         )
         if error is None:
             if new_revision is None:
@@ -1240,6 +1262,7 @@ def _save_queue_transaction_with_retries(
     event: str,
     queue_item_id: str,
     worker_id: str,
+    clock: _Clock,
 ) -> tuple[int | None, Exception | None]:
     """Save a fenced queue transaction, retrying short-lived SQLite locks."""
     for attempt in range(_PERSISTENCE_SAVE_ATTEMPTS):
@@ -1262,6 +1285,7 @@ def _save_queue_transaction_with_retries(
                 return None, exc
             _sleep_before_sqlite_retry(
                 attempt,
+                clock=clock,
                 delay_seconds=_PERSISTENCE_RETRY_DELAY_SECONDS,
                 log=log,
                 event=event,
@@ -1285,6 +1309,7 @@ def _delete_transaction_with_retries(
     log: logging.Logger,
     queue_item_id: str,
     worker_id: str,
+    clock: _Clock,
 ) -> Exception | None:
     """Delete a not-yet-bound transaction, retrying short-lived SQLite lock failures."""
     for attempt in range(_PERSISTENCE_SAVE_ATTEMPTS):
@@ -1299,6 +1324,7 @@ def _delete_transaction_with_retries(
                 return exc
             _sleep_before_sqlite_retry(
                 attempt,
+                clock=clock,
                 delay_seconds=_PERSISTENCE_RETRY_DELAY_SECONDS,
                 log=log,
                 event="transaction_initial_cleanup_retry",
