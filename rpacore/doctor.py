@@ -147,7 +147,11 @@ def _discover_config(
     manifest_dir: Path | None,
 ) -> tuple[dict[str, object] | None, list[DoctorCheck]]:
     explicit = config_path is not None
-    candidate = Path(config_path) if explicit else None if manifest_dir is None else manifest_dir / "config.toml"
+    candidate: Path | None = None
+    if config_path is not None:
+        candidate = Path(config_path)
+    elif manifest_dir is not None:
+        candidate = manifest_dir / "config.toml"
     if candidate is None or not candidate.is_file():
         status = FAIL if explicit else NOT_APPLICABLE
         summary = "Configuration file is unavailable" if explicit else "No configuration file selected"

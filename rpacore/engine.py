@@ -315,6 +315,8 @@ class Engine:
         for entry in reversed(transaction.history):
             if entry.event is not HistoryEvent.SKILL_FAILED:
                 continue
+            if entry.skill_execution_order is None:
+                continue
             skill = skills.get((entry.skill_name, entry.skill_execution_order))
             if skill is None:
                 continue

@@ -241,6 +241,12 @@ class TestEngineBusinessException:
 
 
 class TestEngineSystemException:
+    def test_last_failed_exception_ignores_history_without_skill_identity(self) -> None:
+        tx = Transaction(reference="missing-skill-history")
+        tx.append_history(HistoryEvent.SKILL_FAILED)
+
+        assert Engine()._last_failed_exception(tx) is None
+
     def test_skill_marked_failed(self) -> None:
         tx = Transaction(
             reference="T1",

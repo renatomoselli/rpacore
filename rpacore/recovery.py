@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import copy
+from collections.abc import Sequence
 
 from rpacore.exceptions import BusinessException
 from rpacore.persistence import load_transaction
@@ -104,7 +105,7 @@ def _is_interrupted(transaction: Transaction) -> bool:
 
 def _resumed_skill_status(
     status: Status,
-    exceptions: list[BaseException],
+    exceptions: Sequence[BaseException],
     *,
     preserve_skipped: bool,
     retry_business_failures: bool,

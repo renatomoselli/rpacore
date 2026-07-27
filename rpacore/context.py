@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TypeVar, overload
 
 from rpacore.config_validation import ExpectedType, require_config as validate_required
 from rpacore.credentials import CredentialProvider, EnvCredentialProvider
 from rpacore.exceptions import SystemException
 from rpacore.transaction import Artifact, Transaction
+
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -50,6 +54,25 @@ class ProcessContext:
         self.transaction.artifacts.append(artifact)
         return artifact
 
+    @overload
+    def require_state(
+        self,
+        key: str,
+        expected_type: type[T],
+        *,
+        action: str = "",
+    ) -> T: ...
+
+
+    @overload
+    def require_state(
+        self,
+        key: str,
+        expected_type: tuple[type, ...] | None = None,
+        *,
+        action: str = "",
+    ) -> object: ...
+
     def require_state(
         self,
         key: str,
@@ -65,6 +88,27 @@ class ProcessContext:
             source="state",
             action=action,
         )
+
+    @overload
+    def optional_state(
+        self,
+        key: str,
+        expected_type: type[T],
+        default: T,
+        *,
+        action: str = "",
+    ) -> T: ...
+
+
+    @overload
+    def optional_state(
+        self,
+        key: str,
+        expected_type: tuple[type, ...],
+        default: object,
+        *,
+        action: str = "",
+    ) -> object: ...
 
     def optional_state(
         self,
@@ -84,6 +128,25 @@ class ProcessContext:
             source="state",
             action=action,
         )
+
+    @overload
+    def require_config(
+        self,
+        key: str,
+        expected_type: type[T],
+        *,
+        action: str = "",
+    ) -> T: ...
+
+
+    @overload
+    def require_config(
+        self,
+        key: str,
+        expected_type: tuple[type, ...] | None = None,
+        *,
+        action: str = "",
+    ) -> object: ...
 
     def require_config(
         self,
@@ -118,6 +181,8 @@ class ProcessContext:
         if expected_type is None:
             return values[key]
         try:
+            if isinstance(expected_type, tuple):
+                return validate_required(values, key, expected_type)
             return validate_required(values, key, expected_type)
         except KeyError as exc:
             raise SystemException(

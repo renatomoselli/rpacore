@@ -12,12 +12,13 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 import math
-from typing import TypeAlias
+from typing import TypeAlias, TypeVar, cast, overload
 
 from rpacore._validation import type_error, value_error
 
 
 ExpectedType: TypeAlias = type | tuple[type, ...]
+T = TypeVar("T")
 _MISSING_DEFAULT = object()
 
 
@@ -115,6 +116,32 @@ def validate_config(
     return validated
 
 
+@overload
+def require_config(
+    config: dict[str, object],
+    key: str,
+    expected_type: type[T],
+    *,
+    choices: Iterable[object] | None = None,
+    min_value: object | None = None,
+    max_value: object | None = None,
+    allow_empty: bool = True,
+) -> T: ...
+
+
+@overload
+def require_config(
+    config: dict[str, object],
+    key: str,
+    expected_type: tuple[type, ...],
+    *,
+    choices: Iterable[object] | None = None,
+    min_value: object | None = None,
+    max_value: object | None = None,
+    allow_empty: bool = True,
+) -> object: ...
+
+
 def require_config(
     config: dict[str, object],
     key: str,
@@ -137,6 +164,34 @@ def require_config(
         max_value=max_value,
         allow_empty=allow_empty,
     )
+
+
+@overload
+def optional_config(
+    config: dict[str, object],
+    key: str,
+    expected_type: type[T],
+    default: T,
+    *,
+    choices: Iterable[object] | None = None,
+    min_value: object | None = None,
+    max_value: object | None = None,
+    allow_empty: bool = True,
+) -> T: ...
+
+
+@overload
+def optional_config(
+    config: dict[str, object],
+    key: str,
+    expected_type: tuple[type, ...],
+    default: object,
+    *,
+    choices: Iterable[object] | None = None,
+    min_value: object | None = None,
+    max_value: object | None = None,
+    allow_empty: bool = True,
+) -> object: ...
 
 
 def optional_config(
@@ -175,7 +230,7 @@ def optional_config(
 def require_section(config: dict[str, object], key: str) -> dict[str, object]:
     """Return a required nested config section."""
     value = require_config(config, key, dict)
-    return value  # type: ignore[return-value]
+    return cast(dict[str, object], value)
 
 
 def _lookup_dotted_value(config: dict[str, object], key: str) -> tuple[bool, object]:

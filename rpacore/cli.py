@@ -226,9 +226,10 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
                 _write_transaction_detail(transaction)
             return SUCCESS
         if args.transaction_command == "export":
-            transactions = _iter_queried_transactions(db_path)
-            _write_transaction_export(transactions, export_format=args.format)
+            export_transactions = _iter_queried_transactions(db_path)
+            _write_transaction_export(export_transactions, export_format=args.format)
             return SUCCESS
+        raise ValueError(f"Unsupported transaction command: {args.transaction_command}")
     except KeyError as exc:
         _print_error(str(exc.args[0] if exc.args else exc))
         return EXECUTION_ERROR
@@ -322,10 +323,10 @@ def _write_transaction_detail(transaction: Transaction) -> None:
             print(f"     - {_exception_kind(exc)}: {exc}")
     print(f"History:     {len(transaction.history)}")
     for entry in transaction.history:
-        skill = "" if not entry.skill_name else f" skill={entry.skill_name}"
+        skill_label = "" if not entry.skill_name else f" skill={entry.skill_name}"
         print(
             f"  {entry.sequence}. {entry.event} status={entry.status} "
-            f"retry={entry.retry_number}{skill}"
+            f"retry={entry.retry_number}{skill_label}"
         )
     print(f"Artifacts:   {len(transaction.artifacts)}")
     for artifact in transaction.artifacts:

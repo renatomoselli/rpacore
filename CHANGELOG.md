@@ -6,6 +6,8 @@ All notable user-facing changes are recorded here.
 
 ### Added
 
+- Added PEP 561 type information and a pinned development-only Mypy check for
+  the supported top-level public API.
 - Added a read-only, cursor-paginated `query_transactions()` API with compact
   transaction summaries, deterministic UTC ordering, exact filters, and
   query-specific SQLite indexes.

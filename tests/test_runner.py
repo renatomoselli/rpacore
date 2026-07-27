@@ -766,6 +766,17 @@ class TestAfterItem:
 # ---------------------------------------------------------------------------
 
 class TestRunnerManagedTransactionPersistence:
+    def test_transaction_database_requires_sqlite_queue(self, tmp_path) -> None:
+        with pytest.raises(TypeError, match="transaction_db_path requires SqliteQueue"):
+            run_queue_loop(
+                queue=_FakeQueue([_item("plain-provider")]),
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(reference=item.reference),
+                config={},
+                credentials=_CREDS,
+                transaction_db_path=str(tmp_path / "transactions.db"),
+            )
+
     def test_successful_transaction_saved_without_after_item(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
 

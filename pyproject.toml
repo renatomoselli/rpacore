@@ -34,6 +34,7 @@ Security = "https://github.com/renatomoselli/rpacore/security/advisories/new"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.1.1",
+    "mypy==2.1.0",
     "build>=1.0",
     "twine>=5.1.0",
     "wheel>=0.46.2",
@@ -53,3 +54,8 @@ include = ["rpacore*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+files = ["rpacore"]
+follow_imports = "skip"
+ignore_missing_imports = true

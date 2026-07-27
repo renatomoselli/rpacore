@@ -10,6 +10,7 @@ import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 from rpacore._sqlite import validate_durable_sqlite_path
 from rpacore._validation import type_error, value_error
@@ -247,10 +248,10 @@ def _conflicting_module_root(
 def _evict_conflicting_modules(
     conflicting_root: str | None,
     project_dir: Path,
-) -> dict[str, object]:
+) -> dict[str, ModuleType]:
     if conflicting_root is None:
         return {}
-    evicted: dict[str, object] = {}
+    evicted: dict[str, ModuleType] = {}
     for name, module in list(sys.modules.items()):
         if not _module_is_at_or_below(name, conflicting_root):
             continue
@@ -264,9 +265,9 @@ def _restore_modules_after_failure(
     cleanup_root: str,
     *,
     modules_before: set[str],
-    evicted_modules: dict[str, object],
+    evicted_modules: dict[str, ModuleType],
 ) -> None:
-    removed_modules: dict[str, object] = {}
+    removed_modules: dict[str, ModuleType] = {}
     for name in list(sys.modules):
         if not _module_is_at_or_below(name, cleanup_root):
             continue

@@ -206,11 +206,7 @@ def run_queue_loop(
 
     try:
         if transaction_db_path is not None:
-            if not isinstance(queue, SqliteQueue):
-                raise TypeError(
-                    "transaction_db_path requires SqliteQueue so queue claims and "
-                    "transaction checkpoints can be fenced atomically"
-                )
+            queue = _require_sqlite_queue(queue)
             _prepare_transaction_database(transaction_db_path)
         shared_resources: dict[str, object] = {}
         if resource_scope is None:
@@ -463,7 +459,7 @@ def _run_claimed_item_with_context(
                 heartbeat,
                 _strict_transaction_checkpoint(
                     db_path=transaction_db_path,
-                    queue_db_path=queue.db_path,
+                    queue_db_path=_require_sqlite_queue(queue).db_path,
                     item=item,
                     initial_revision=transaction_revision,
                     worker_id=worker_id,
@@ -901,6 +897,16 @@ def _log_lease_lost(
     )
 
 
+def _require_sqlite_queue(queue: QueueProvider) -> SqliteQueue:
+    """Return the provider required for transaction checkpoint fencing."""
+    if not isinstance(queue, SqliteQueue):
+        raise TypeError(
+            "transaction_db_path requires SqliteQueue so queue claims and "
+            "transaction checkpoints can be fenced atomically"
+        )
+    return queue
+
+
 def _transaction_for_queue_item(
     queue: QueueProvider,
     item: QueueItem,
@@ -950,7 +956,7 @@ def _transaction_for_queue_item(
     revision, error = _save_queue_transaction_with_retries(
         transaction,
         db_path=transaction_db_path,
-        queue_db_path=queue.db_path,
+        queue_db_path=_require_sqlite_queue(queue).db_path,
         item=item,
         expected_revision=0,
         log=log,

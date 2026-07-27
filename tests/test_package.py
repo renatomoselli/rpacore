@@ -39,12 +39,18 @@ class TestPackageVersion:
         assert pyproject["project"]["license-files"] == ["LICENSE", "NOTICE"]
         assert "license-files" not in pyproject.get("tool", {}).get("setuptools", {})
         assert "pytest>=8.1.1" in pyproject["project"]["optional-dependencies"]["dev"]
+        assert "mypy==2.1.0" in pyproject["project"]["optional-dependencies"]["dev"]
         assert "twine>=5.1.0" in pyproject["project"]["optional-dependencies"]["dev"]
         assert "wheel>=0.46.2" in pyproject["project"]["optional-dependencies"]["dev"]
         assert pyproject["project"]["urls"]["Homepage"] == "https://rpacore.dev"
         assert pyproject["project"]["urls"]["Documentation"].endswith("/tree/main/docs")
         for license_file in pyproject["project"]["license-files"]:
             assert (pyproject_path.parent / license_file).is_file()
+
+    def test_package_includes_a_pep_561_type_marker(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+
+        assert (repo_root / "rpacore" / "py.typed").is_file()
 
     def test_public_repository_readiness_files_exist(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

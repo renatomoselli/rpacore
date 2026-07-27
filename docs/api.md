@@ -11,6 +11,13 @@ Only symbols exported by `rpacore.__all__` are covered by the public compatibili
 contract. Public submodules remain implementation locations; see
 [Public Submodule Policy](public-submodules.md).
 
+The package includes PEP 561 type information. Mypy is the supported static
+checker for this release line. When `require_config`, `optional_config`, or the
+matching `ProcessContext` accessors receive one concrete runtime type such as
+`str` or `int`, their result is typed as that type. Tuple-type and untyped
+lookups remain `object`; durable JSON-safe data does not have a public recursive
+type alias.
+
 ## Execution
 
 | Symbol | Purpose | Durable mutations and side effects |

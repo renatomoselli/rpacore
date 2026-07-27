@@ -124,6 +124,8 @@ checkout_package = repo_root / "rpacore"
 module_path = Path(rpacore.__file__).resolve()
 if module_path.parent == checkout_package:
     raise SystemExit(f"imported rpacore from checkout: {{module_path}}")
+if not module_path.with_name("py.typed").is_file():
+    raise SystemExit(f"installed package missing py.typed: {{module_path}}")
 
 class OkSkill(Skill):
     def execute(self, ctx: ProcessContext) -> None:
@@ -171,6 +173,26 @@ print(f"Python {{platform.python_version()}}; SQLite {{sqlite3.sqlite_version}}"
 """
 
 
+def _typing_consumer_code() -> str:
+    return """\
+from rpacore import ProcessContext, Transaction, optional_config, require_config
+
+config: dict[str, object] = {"retries": 2, "label": "ready"}
+retries: int = require_config(config, "retries", int)
+label: str = optional_config(config, "label", str, "")
+
+transaction = Transaction(reference="typed-consumer")
+context = ProcessContext(transaction=transaction, config=config)
+config_retries: int = context.require_config("retries", int)
+context.state["label"] = label
+state_label: str = context.require_state("label", str)
+state_retries: int = context.optional_state("retries", int, retries)
+
+assert config_retries == state_retries
+assert state_label == label
+"""
+
+
 def validate_installed_wheel(
     *,
     repo_root: Path,
@@ -207,6 +229,14 @@ def validate_installed_wheel(
         python = _venv_python(venv_dir)
         _run([str(python), "-m", "pip", "install", str(wheel)], cwd=outside_dir, allowed_roots=allowed_run_roots)
         _run([str(python), "-c", _smoke_code(repo_root)], cwd=outside_dir, allowed_roots=allowed_run_roots)
+        _run([str(python), "-m", "pip", "install", "mypy==2.1.0"], cwd=outside_dir, allowed_roots=allowed_run_roots)
+        typing_consumer = outside_dir / "typing_consumer.py"
+        typing_consumer.write_text(_typing_consumer_code(), encoding="utf-8")
+        _run(
+            [str(python), "-m", "mypy", "--no-incremental", typing_consumer.name],
+            cwd=outside_dir,
+            allowed_roots=allowed_run_roots,
+        )
         rpacore_cli = _venv_script(venv_dir, "rpacore")
         _run([str(rpacore_cli), "version"], cwd=outside_dir, allowed_roots=allowed_run_roots)
         generated_project = outside_dir / "installed_project"
