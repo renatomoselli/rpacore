@@ -119,6 +119,15 @@ rpacore transaction export --format ndjson
 `transaction list` returns the latest 100 transactions by default. Use
 `--limit N` to choose a different cap.
 
+### Machine-readable compatibility
+
+The `--json` list and show envelopes are independently versioned by their
+`command` and `schema_version` fields. Their version-1 framework-owned fields
+are closed: a field cannot be added, removed, renamed, retyped, or given a new
+meaning without a new schema version. The nested transaction is separately
+versioned by `transaction_format_version`. Export follows the corresponding
+version rules in the [Export Format Reference](export-format.md).
+
 Human output is for operators. `--json` and `export` output are parseable on
 stdout; diagnostics go to stderr. List and export select records through the
 same normalized-UTC cursor pages as `query_transactions()`. Export keeps only

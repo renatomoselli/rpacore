@@ -23,6 +23,15 @@ JSON export writes one envelope:
 Each entry in `transactions` is the canonical serialized transaction record and
 contains `transaction_format_version`.
 
+## Compatibility
+
+The JSON export envelope, each NDJSON line, and the nested transaction record
+are independently versioned. Consumers must check both the export and
+transaction version before interpreting a record. Version 1 has a closed set
+of framework-owned fields: changing, removing, renaming, retyping, or changing
+the meaning of one requires a new format version. RPA Core does not add new
+framework-owned fields to an existing export version.
+
 ## Iteration Consistency
 
 Export snapshots matching transaction identifiers in `created_at DESC, id ASC`

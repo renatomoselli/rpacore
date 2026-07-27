@@ -1,0 +1,19 @@
+{
+  "doctor_format_version": 1,
+  "framework_version": "fixture-framework",
+  "checks": [
+    {"id": "runtime.python", "status": "pass", "summary": "Python runtime is available", "details": {"version": "fixture"}},
+    {"id": "runtime.sqlite", "status": "pass", "summary": "SQLite runtime is available", "details": {"version": "fixture"}},
+    {"id": "project.manifest", "status": "not_applicable", "summary": "No project manifest found", "details": {}},
+    {"id": "project.config", "status": "not_applicable", "summary": "No configuration file selected", "details": {}},
+    {"id": "transactions.schema", "status": "not_applicable", "summary": "No transaction database selected", "details": {}},
+    {"id": "transactions.journal", "status": "not_applicable", "summary": "No transaction database selected", "details": {}},
+    {"id": "transactions.quick_check", "status": "not_applicable", "summary": "No transaction database selected", "details": {}},
+    {"id": "transactions.foreign_keys", "status": "not_applicable", "summary": "No transaction database selected", "details": {}},
+    {"id": "queue.schema", "status": "not_applicable", "summary": "No queue database selected", "details": {}},
+    {"id": "queue.journal", "status": "not_applicable", "summary": "No queue database selected", "details": {}},
+    {"id": "queue.quick_check", "status": "not_applicable", "summary": "No queue database selected", "details": {}},
+    {"id": "queue.foreign_keys", "status": "not_applicable", "summary": "No queue database selected", "details": {}},
+    {"id": "queue.health", "status": "not_applicable", "summary": "No queue database selected", "details": {}}
+  ]
+}

@@ -168,6 +168,22 @@ the identifiers it needs in that thread. `get_logger("my_automation")` returns
 an `rpacore.application.my_automation` child, so a configured `rpacore` root
 captures both framework and application events without duplicate handlers.
 
+### Versioned record compatibility
+
+Canonical transaction, query-page/cursor, report, doctor, CLI, export, and log
+records are framework-owned contracts. For a given version, their documented
+framework fields are closed: adding, removing, renaming, retyping, or changing
+the meaning of one requires a new version. Existing conditional fields retain
+their documented conditions; they do not create a general extension point.
+
+Query cursors are opaque. Pass a cursor only back to the matching
+`query_transactions()` call; the framework accepts its supported cursor version
+and rejects unsupported versions. JSON log v1 keeps its documented conditional
+exception and stack fields plus existing flat event extras. JSON log v2 keeps a
+protected envelope and confines event attributes to `attributes`. Doctor
+consumers should use check `id`, `status`, and documented scalar detail fields;
+summary prose is for people rather than semantic parsing.
+
 ## Queue Processing
 
 | Symbol | Purpose | Side effects |

@@ -303,6 +303,13 @@ snapshot, so one notifier cannot mutate the transaction, the source report, or
 a later notifier's view. Unsupported arbitrary runtime objects are not
 recursively cloned; they do not belong in durable report data.
 
+Canonical transaction format v1 is closed. A framework-owned field may not be
+added, removed, renamed, retyped, or given a new meaning without a new
+transaction format version. Query-page fields follow the same rule. Query
+cursors are opaque, remain bound to their filters, and must be accepted only by
+the version that emitted them; applications should never decode or construct
+them.
+
 These mechanisms cover the demonstrated extension needs without adding an
 in-process handler chain inside `Engine.run()`. A generic event bus would require
 new decisions about handler timing, handler failure disposition, transaction

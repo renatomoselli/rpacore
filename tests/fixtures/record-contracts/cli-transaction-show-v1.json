@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "command": "transaction:show",
+  "transaction": {
+    "transaction_format_version": 1,
+    "id": "transaction-v1",
+    "reference": "fixture",
+    "status": "successful",
+    "retry_count": 0,
+    "created_at": "2026-07-27T12:00:00+00:00",
+    "started_at": null,
+    "finished_at": null,
+    "state": {"invoice": "001"},
+    "metadata": {"customer": "acme"},
+    "skills": [],
+    "history": [],
+    "artifacts": []
+  }
+}

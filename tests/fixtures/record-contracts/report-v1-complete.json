@@ -1,0 +1,18 @@
+{
+  "report_format_version": 1,
+  "generated_at": "fixture-generated-at",
+  "complete": true,
+  "errors": [],
+  "transaction": {
+    "id": "transaction-v1", "reference": "fixture", "status": "successful", "retry_count": 0,
+    "created_at": "2026-07-27T12:00:00+00:00", "started_at": "unknown", "finished_at": "unknown",
+    "metadata": {"customer": "acme"},
+    "outcome": {"category": "unknown", "retry_disposition": "unknown", "failure_code": ""}
+  },
+  "skills": [], "artifacts": [], "history": [],
+  "transaction_record": {
+    "transaction_format_version": 1, "id": "transaction-v1", "reference": "fixture", "status": "successful", "retry_count": 0,
+    "created_at": "2026-07-27T12:00:00+00:00", "started_at": null, "finished_at": null,
+    "state": {"invoice": "001"}, "metadata": {"customer": "acme"}, "skills": [], "history": [], "artifacts": []
+  }
+}
