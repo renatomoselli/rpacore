@@ -289,6 +289,19 @@ def _build_wheel(repo_root: Path, wheelhouse: Path, *, timeout_seconds: int) -> 
     return wheels[0], command_record
 
 
+def _prebuilt_wheel(path: Path, *, repo_root: Path) -> tuple[Path, CommandRecord]:
+    wheel = path.resolve()
+    if not wheel.is_file():
+        raise ValidationError(f"prebuilt wheel does not exist: {wheel}")
+    if wheel.suffix != ".whl" or not wheel.name.startswith("rpacore-"):
+        raise ValidationError(f"prebuilt wheel must be an rpacore wheel: {wheel}")
+    return wheel, _skipped(
+        "build_wheel",
+        cwd=repo_root,
+        reason="prebuilt wheel supplied",
+    )
+
+
 def _example_dirs(examples_repo: Path) -> list[Path]:
     examples_dir = examples_repo / "examples"
     if not examples_dir.is_dir():
@@ -877,8 +890,9 @@ def validate_examples_against_wheel(
     include_examples: set[str] | None = None,
     exclude_examples: set[str] | None = None,
     timeout_seconds: int,
+    prebuilt_wheel: Path | None = None,
 ) -> dict[str, Any]:
-    """Build the current wheel and validate every example against it."""
+    """Validate every example against a built or supplied RPA Core wheel."""
 
     repo_root = repo_root.resolve()
     examples_repo = _validated_examples_repo(examples_repo)
@@ -887,11 +901,16 @@ def validate_examples_against_wheel(
     wheelhouse = work_dir / "wheelhouse"
     venv_root = work_dir / "venvs"
     build_started = _utc_now()
-    try:
-        wheel, build_command = _build_wheel(repo_root, wheelhouse, timeout_seconds=timeout_seconds)
-    except BuildValidationError as exc:
-        build_command = exc.command_record
-        wheel = wheelhouse / ".rpacore-build-failed"
+    if prebuilt_wheel is not None:
+        wheel, build_command = _prebuilt_wheel(prebuilt_wheel, repo_root=repo_root)
+        wheel_source = "prebuilt"
+    else:
+        try:
+            wheel, build_command = _build_wheel(repo_root, wheelhouse, timeout_seconds=timeout_seconds)
+        except BuildValidationError as exc:
+            build_command = exc.command_record
+            wheel = wheelhouse / ".rpacore-build-failed"
+        wheel_source = "built"
     build_failed = not build_command.passed
 
     results: list[ExampleResult] = []
@@ -935,6 +954,7 @@ def validate_examples_against_wheel(
         },
         "wheel": {
             "build_failed": build_failed,
+            "source": wheel_source,
             "name": None if build_failed else wheel.name,
             "path": None if build_failed else str(wheel),
             "sha256": _sha256(wheel) if wheel.exists() else None,
@@ -946,6 +966,7 @@ def validate_examples_against_wheel(
             "install_playwright_browsers": install_playwright_browsers,
             "include_examples": sorted(include_examples or []),
             "exclude_examples": sorted(exclude_examples or []),
+            "prebuilt_wheel": str(prebuilt_wheel.resolve()) if prebuilt_wheel else None,
             "timeout_seconds": timeout_seconds,
         },
         "result": {
@@ -970,6 +991,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--examples-repo", type=Path, default=Path.cwd().parent / "rpacore-examples")
+    parser.add_argument(
+        "--prebuilt-wheel",
+        type=Path,
+        help="Validate this exact RPA Core wheel instead of building from the checkout.",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -1044,6 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
         include_examples=set(args.examples),
         exclude_examples=set(args.excluded_examples),
         timeout_seconds=args.timeout_seconds,
+        prebuilt_wheel=args.prebuilt_wheel,
     )
     print(f"Wrote examples wheel validation to {args.output_dir.resolve()}")
     if manifest["result"]["status"] == "fail" and not args.allow_failures:

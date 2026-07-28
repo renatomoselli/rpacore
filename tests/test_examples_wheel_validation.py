@@ -479,10 +479,77 @@ class TestExamplesWheelValidationScript:
         assert manifest["build"]["stderr"] == "build stderr"
         assert manifest["wheel"] == {
             "build_failed": True,
+            "source": "built",
             "name": None,
             "path": None,
             "sha256": None,
         }
+
+    def test_prebuilt_wheel_is_used_without_rebuilding(self, tmp_path: Path) -> None:
+        script = _load_script()
+        repo_root = tmp_path / "rpacore"
+        examples_repo = tmp_path / "rpacore-examples"
+        example_dir = examples_repo / "examples" / "json_event_log_processor"
+        wheel = tmp_path / "rpacore-0.1.1-py3-none-any.whl"
+        repo_root.mkdir()
+        example_dir.mkdir(parents=True)
+        wheel.write_bytes(b"candidate-wheel")
+
+        def fake_validate_example(example_dir_arg, **kwargs):
+            return script.ExampleResult(
+                name=example_dir_arg.name,
+                path=str(example_dir_arg),
+                venv_path=str(kwargs["venv_path"]),
+                category="deterministic",
+            )
+
+        with patch.object(script, "_build_wheel") as build_wheel:
+            with patch.object(script, "_validate_example", side_effect=fake_validate_example):
+                manifest = script.validate_examples_against_wheel(
+                    repo_root=repo_root,
+                    examples_repo=examples_repo,
+                    output_dir=tmp_path / "out",
+                    work_dir=tmp_path / "work",
+                    venv_mode="work-dir",
+                    recreate_venvs=True,
+                    run_main="deterministic",
+                    install_playwright_browsers=False,
+                    include_examples={"json_event_log_processor"},
+                    timeout_seconds=300,
+                    prebuilt_wheel=wheel,
+                )
+
+        build_wheel.assert_not_called()
+        assert manifest["wheel"] == {
+            "build_failed": False,
+            "source": "prebuilt",
+            "name": wheel.name,
+            "path": str(wheel.resolve()),
+            "sha256": script._sha256(wheel),
+        }
+        assert manifest["build"]["skipped"] is True
+        assert manifest["build"]["skip_reason"] == "prebuilt wheel supplied"
+
+    def test_prebuilt_wheel_rejects_missing_or_non_rpacore_wheels(self, tmp_path: Path) -> None:
+        script = _load_script()
+        repo_root = tmp_path / "rpacore"
+        repo_root.mkdir()
+
+        try:
+            script._prebuilt_wheel(tmp_path / "missing.whl", repo_root=repo_root)
+        except script.ValidationError as exc:
+            assert "prebuilt wheel does not exist" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
+        other_wheel = tmp_path / "other-1.0.0-py3-none-any.whl"
+        other_wheel.write_bytes(b"not-rpacore")
+        try:
+            script._prebuilt_wheel(other_wheel, repo_root=repo_root)
+        except script.ValidationError as exc:
+            assert "prebuilt wheel must be an rpacore wheel" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
         assert not (tmp_path / "work" / "wheelhouse" / ".rpacore-build-failed").match("rpacore-*.whl")
 
     def test_upgrade_pip_failure_skips_remaining_setup(self, tmp_path: Path) -> None:

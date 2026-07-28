@@ -23,6 +23,10 @@ Both repositories should be clean before rehearsal starts. Any framework code,
 schema, API, CLI, storage, export, or generated-project behavior change after
 this point invalidates the candidate and requires a new rehearsal.
 
+The rehearsal uses the isolated PEP 517 build environment declared by the
+project. It may need access to the declared build requirements; it does not
+silently substitute host build tooling.
+
 ## Manifest Contents
 
 The release manifest should contain:
@@ -51,14 +55,15 @@ Run the framework release-candidate validation from a clean repository state:
 python scripts/validate_release_candidate.py \
   --repo-root . \
   --examples-repo ../rpacore-examples \
+  --examples-wheel-matrix \
   --output-dir validation-artifacts/release-candidate-validation
 ```
 
-Run external examples validation against the built wheel:
-
-```bash
-python scripts/validate_examples_against_wheel.py --repo-root . --examples-repo ../rpacore-examples --venv-mode work-dir
-```
+With `--examples-wheel-matrix`, the candidate validator runs the frozen,
+deterministic external examples against its exact candidate wheel and records
+their evidence alongside the candidate result. Do not run a second checkout
+build for the same rehearsal. A standalone examples rerun must use
+`--prebuilt-wheel` with the recorded candidate wheel.
 
 Then verify:
 
@@ -74,15 +79,15 @@ Then verify:
 - deterministic representative examples pass from the built wheel
 - repository settings match [Repository Settings](repository-settings.md)
 
-Prepare the release manifest and approval draft from the two validation result
-files:
+Prepare the release manifest and approval draft from the candidate result and
+the linked external-examples evidence:
 
 ```bash
 python scripts/prepare_release_manifest.py \
   --repo-root . \
   --examples-repo ../rpacore-examples \
   --release-candidate-validation-results validation-artifacts/release-candidate-validation/release-candidate-validation-results.json \
-  --examples-wheel-validation-results validation-artifacts/examples-wheel-validation/examples-wheel-validation.json \
+  --examples-wheel-validation-results validation-artifacts/release-candidate-validation/examples-wheel-validation/examples-wheel-validation.json \
   --owner "<release owner>" \
   --approver "<release approver>" \
   --docs-verification passed \

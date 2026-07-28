@@ -75,6 +75,11 @@ ARCHIVE_PRIVATE_PATTERNS = ("*.pyc", "*.pyo")
 PYTEST_COUNT_PATTERN = re.compile(
     r"\b(?P<count>\d+)\s+(?P<status>passed|failed|skipped|xfailed|xpassed|errors?)\b"
 )
+FROZEN_EXAMPLE_WHEEL_MATRIX = (
+    "database_reconciliation",
+    "excel_reorganization",
+    "json_event_log_processor",
+)
 PYTEST_COUNT_STATUSES = frozenset(
     {"passed", "failed", "skipped", "xfailed", "xpassed", "errors"}
 )
@@ -714,6 +719,70 @@ def _append_cli_transaction_inspection(
     commands.extend(inspection_commands)
 
 
+def _run_examples_wheel_matrix(
+    *,
+    framework_copy: Path,
+    examples_copy: Path,
+    wheel: Path,
+    expected_wheel_sha256: str,
+    work_dir: Path,
+    output_dir: Path,
+    allowed_roots: tuple[Path, ...],
+    env: dict[str, str],
+) -> tuple[CommandRecord, dict[str, Any]]:
+    if _sha256(wheel) != expected_wheel_sha256:
+        raise ValidationError("candidate wheel changed before the examples wheel matrix started")
+    evidence_dir = output_dir / "examples-wheel-validation"
+    command = [
+        sys.executable,
+        str(framework_copy / "scripts" / "validate_examples_against_wheel.py"),
+        "--repo-root",
+        str(framework_copy),
+        "--examples-repo",
+        str(examples_copy),
+        "--prebuilt-wheel",
+        str(wheel),
+        "--output-dir",
+        str(evidence_dir),
+        "--work-dir",
+        str(work_dir),
+        "--venv-mode",
+        "work-dir",
+        "--run-main",
+        "deterministic",
+    ]
+    for example_name in FROZEN_EXAMPLE_WHEEL_MATRIX:
+        command.extend(("--example", example_name))
+    command_record = _run(
+        "examples_wheel_matrix",
+        command,
+        cwd=framework_copy,
+        allowed_roots=allowed_roots,
+        env=env,
+    )
+    manifest_path = evidence_dir / "examples-wheel-validation.json"
+    try:
+        evidence = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValidationError(f"examples wheel matrix did not write evidence: {manifest_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"examples wheel matrix wrote invalid JSON: {manifest_path}") from exc
+    if not isinstance(evidence, dict):
+        raise ValidationError("examples wheel matrix did not write a JSON object")
+    wheel_evidence = evidence.get("wheel")
+    if not isinstance(wheel_evidence, dict) or wheel_evidence.get("sha256") != expected_wheel_sha256:
+        raise ValidationError("examples wheel matrix did not validate the candidate wheel hash")
+    result = evidence.get("result")
+    if not isinstance(result, dict) or result.get("status") != "pass":
+        raise ValidationError("examples wheel matrix did not pass")
+    return command_record, {
+        "status": result["status"],
+        "evidence_path": str(manifest_path),
+        "wheel_sha256": wheel_evidence["sha256"],
+        "examples": list(FROZEN_EXAMPLE_WHEEL_MATRIX),
+    }
+
+
 def validate_release_candidate(
     *,
     repo_root: Path,
@@ -723,6 +792,7 @@ def validate_release_candidate(
     examples_pytest: list[str],
     example_cli_project: str | None,
     example_cli_db: str,
+    examples_wheel_matrix: bool = False,
 ) -> dict[str, Any]:
     """Run release-candidate validation and return the validation manifest."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -733,15 +803,18 @@ def validate_release_candidate(
     wheelhouse = work_dir / "wheelhouse"
     outside_dir = work_dir / "outside"
     venv_dir = work_dir / "venv"
-    generated_dirs = (source_dir, wheelhouse, outside_dir, venv_dir)
+    examples_matrix_work_dir = work_dir / "examples-wheel-validation"
+    generated_dirs = (source_dir, wheelhouse, outside_dir, venv_dir, examples_matrix_work_dir)
 
     for generated_dir in generated_dirs:
         if generated_dir.exists():
             _remove_tree(generated_dir)
-    if examples_repo is not None and not examples_pytest and example_cli_project is None:
-        raise ValidationError("--examples-pytest or --example-cli-project is required when --examples-repo is provided")
+    if examples_repo is not None and not examples_pytest and example_cli_project is None and not examples_wheel_matrix:
+        raise ValidationError("--examples-pytest, --example-cli-project, or --examples-wheel-matrix is required when --examples-repo is provided")
     if example_cli_project is not None and examples_repo is None:
         raise ValidationError("--examples-repo is required when --example-cli-project is used")
+    if examples_wheel_matrix and examples_repo is None:
+        raise ValidationError("--examples-repo is required when --examples-wheel-matrix is used")
     cleanup_failures: list[Path] = []
     try:
         source_dir.mkdir(parents=True)
@@ -765,7 +838,7 @@ def validate_release_candidate(
         commands.append(
             _run(
                 "build_artifacts",
-                [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(wheelhouse)],
+                [sys.executable, "-m", "build", "--outdir", str(wheelhouse)],
                 cwd=framework_copy,
                 allowed_roots=allowed_run_roots,
                 env=env,
@@ -787,6 +860,13 @@ def validate_release_candidate(
         )
 
         wheel = _latest_wheel(wheelhouse)
+        wheel_record = next(
+            (record for record in artifacts if record["path"] == str(wheel)),
+            None,
+        )
+        if wheel_record is None:
+            raise ValidationError(f"candidate wheel was not recorded as an artifact: {wheel}")
+        wheel_sha256 = str(wheel_record["sha256"])
         commands.append(_run("create_venv", [sys.executable, "-m", "venv", str(venv_dir)], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
         python = _venv_python(venv_dir)
         commands.append(_run("install_wheel", [str(python), "-m", "pip", "install", str(wheel)], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
@@ -878,6 +958,20 @@ def validate_release_candidate(
                 command_record.parsed = _pytest_counts(command_record.stdout + "\n" + command_record.stderr)
                 commands.append(command_record)
 
+        examples_wheel_evidence = None
+        if examples_wheel_matrix:
+            matrix_command, examples_wheel_evidence = _run_examples_wheel_matrix(
+                framework_copy=framework_copy,
+                examples_copy=examples_copy,
+                wheel=wheel,
+                expected_wheel_sha256=wheel_sha256,
+                work_dir=examples_matrix_work_dir,
+                output_dir=output_dir,
+                allowed_roots=allowed_run_roots,
+                env=env,
+            )
+            commands.append(matrix_command)
+
         manifest = {
             "schema_version": 1,
             "generated_at": _utc_now().isoformat(),
@@ -898,6 +992,8 @@ def validate_release_candidate(
             "commands": [_command_record(command) for command in commands],
             "work_dir": str(work_dir),
         }
+        if examples_wheel_evidence is not None:
+            manifest["examples_wheel_validation"] = examples_wheel_evidence
         _write_manifest(manifest, output_dir)
         return manifest
     except BaseException:
@@ -968,6 +1064,16 @@ def _write_manifest(manifest: dict[str, Any], output_dir: Path) -> None:
         for extra, dependencies in inventory.get("optional_dependencies", {}).items():
             listed = ", ".join(f"`{dependency}`" for dependency in dependencies) or "(none)"
             lines.append(f"- `{extra}` extra: {listed}")
+    examples_wheel_evidence = manifest.get("examples_wheel_validation")
+    if examples_wheel_evidence is not None:
+        lines.extend([
+            "",
+            "## Examples Wheel Matrix",
+            "",
+            f"- Status: `{examples_wheel_evidence['status']}`",
+            f"- Wheel SHA-256: `{examples_wheel_evidence['wheel_sha256']}`",
+            f"- Evidence: `{examples_wheel_evidence['evidence_path']}`",
+        ])
     manifest_replaced = False
     summary_replaced = False
     try:
@@ -1013,6 +1119,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--examples-pytest", action="append", default=[])
     parser.add_argument(
+        "--examples-wheel-matrix",
+        action="store_true",
+        help="Run the frozen deterministic external examples matrix against the candidate wheel.",
+    )
+    parser.add_argument(
         "--example-cli-project",
         default=None,
         help="Optional relative example project path to run with the installed wheel.",
@@ -1040,6 +1151,7 @@ def main(argv: list[str] | None = None) -> int:
             examples_pytest=list(args.examples_pytest),
             example_cli_project=args.example_cli_project,
             example_cli_db=args.example_cli_db,
+            examples_wheel_matrix=args.examples_wheel_matrix,
         )
         print(f"Wrote release-candidate validation results to {output_dir.resolve()}")
     finally:

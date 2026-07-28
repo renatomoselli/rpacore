@@ -29,6 +29,89 @@ def _load_script():
     return module
 
 
+def test_examples_wheel_matrix_uses_the_candidate_wheel_and_records_matching_hash(tmp_path: Path) -> None:
+    module = _load_script()
+    framework_copy = tmp_path / "source" / "rpacore"
+    examples_copy = tmp_path / "source" / "rpacore-examples"
+    wheel = tmp_path / "wheelhouse" / "rpacore-0.1.1-py3-none-any.whl"
+    output_dir = tmp_path / "out"
+    framework_copy.mkdir(parents=True)
+    examples_copy.mkdir(parents=True)
+    wheel.parent.mkdir()
+    wheel.write_bytes(b"candidate-wheel")
+
+    def fake_run(name, command, *, cwd, allowed_roots, env):
+        evidence_path = output_dir / "examples-wheel-validation" / "examples-wheel-validation.json"
+        evidence_path.parent.mkdir(parents=True)
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "wheel": {"sha256": module._sha256(wheel)},
+                    "result": {"status": "pass"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return module.CommandRecord(
+            name=name,
+            command=command,
+            cwd=str(cwd),
+            exit_code=0,
+            duration_seconds=0.0,
+        )
+
+    with patch.object(module, "_run", side_effect=fake_run):
+        command, evidence = module._run_examples_wheel_matrix(
+            framework_copy=framework_copy,
+            examples_copy=examples_copy,
+            wheel=wheel,
+            expected_wheel_sha256=module._sha256(wheel),
+            work_dir=tmp_path / "work",
+            output_dir=output_dir,
+            allowed_roots=(tmp_path,),
+            env={},
+        )
+
+    assert command.name == "examples_wheel_matrix"
+    assert "--prebuilt-wheel" in command.command
+    assert str(wheel) in command.command
+    assert evidence == {
+        "status": "pass",
+        "evidence_path": str(
+            output_dir / "examples-wheel-validation" / "examples-wheel-validation.json"
+        ),
+        "wheel_sha256": module._sha256(wheel),
+        "examples": list(module.FROZEN_EXAMPLE_WHEEL_MATRIX),
+    }
+
+
+def test_examples_wheel_matrix_rejects_a_wheel_changed_after_artifact_hash(tmp_path: Path) -> None:
+    module = _load_script()
+    framework_copy = tmp_path / "source" / "rpacore"
+    examples_copy = tmp_path / "source" / "rpacore-examples"
+    wheel = tmp_path / "wheelhouse" / "rpacore-0.1.1-py3-none-any.whl"
+    framework_copy.mkdir(parents=True)
+    examples_copy.mkdir(parents=True)
+    wheel.parent.mkdir()
+    wheel.write_bytes(b"changed-wheel")
+
+    try:
+        module._run_examples_wheel_matrix(
+            framework_copy=framework_copy,
+            examples_copy=examples_copy,
+            wheel=wheel,
+            expected_wheel_sha256="different-hash",
+            work_dir=tmp_path / "work",
+            output_dir=tmp_path / "out",
+            allowed_roots=(tmp_path,),
+            env={},
+        )
+    except module.ValidationError as exc:
+        assert str(exc) == "candidate wheel changed before the examples wheel matrix started"
+    else:
+        raise AssertionError("Expected ValidationError")
+
+
 class TestReleaseCandidateValidationScript:
     def test_copy_ignore_excludes_generated_and_vcs_files(self) -> None:
         module = _load_script()
@@ -1359,6 +1442,14 @@ dev = ["pytest"]
         assert manifest["artifacts"][0]["contains_examples"] is False
         assert manifest["dependency_inventory"]["runtime_dependencies"] == []
         assert "dev" in manifest["dependency_inventory"]["optional_dependencies"]
+        assert command_details["build_artifacts"][0] == [
+            sys.executable,
+            "-m",
+            "build",
+            "--outdir",
+            str(work_dir / "wheelhouse"),
+        ]
+        assert "--no-isolation" not in command_details["build_artifacts"][0]
         assert "--db" not in command_details["cli_transaction_export_json"][0]
         example_cli_command, example_cli_cwd = command_details["example_cli_transaction_export_json"]
         assert example_cli_command[-2:] == ["--db", str(example_cli_cwd / "rpacore.db")]
@@ -1500,7 +1591,10 @@ name = "rpacore"
                 example_cli_db="rpacore.db",
             )
         except module.ValidationError as exc:
-            assert str(exc) == "--examples-pytest or --example-cli-project is required when --examples-repo is provided"
+            assert str(exc) == (
+                "--examples-pytest, --example-cli-project, or --examples-wheel-matrix "
+                "is required when --examples-repo is provided"
+            )
         else:
             raise AssertionError("Expected ValidationError")
 
