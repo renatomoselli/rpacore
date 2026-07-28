@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import rpacore
+
 from rpacore._validation import ValidationError as SharedValidationError
 from rpacore._validation import ValidationFailure
 
@@ -33,6 +35,19 @@ def test_smoke_code_exercises_public_configuration_and_query_apis(tmp_path: Path
     assert "query_transactions" in smoke_code
     assert '"query-smoke"' in smoke_code
     assert "missing py.typed" in smoke_code
+    assert "expected_public_exports" in smoke_code
+    assert "v011_public_exports" in smoke_code
+    assert "frozen v0.2 contract" in smoke_code
+    compile(smoke_code, "<installed-wheel-smoke>", "exec")
+
+
+def test_frozen_wheel_export_inventories_match_the_checkout_contract() -> None:
+    module = _load_script()
+
+    assert module._FROZEN_PUBLIC_EXPORTS == tuple(rpacore.__all__)
+    assert set(module._V011_PUBLIC_EXPORTS).issubset(rpacore.__all__)
+    for public_name in module._V011_PUBLIC_EXPORTS:
+        getattr(rpacore, public_name)
 
 
 def test_typing_consumer_uses_scalar_accessor_types() -> None:

@@ -23,6 +23,43 @@ from rpacore._validation import (
     validate_contained_path as _validate_contained_path,
 )
 
+_FROZEN_PUBLIC_EXPORTS = (
+    "Artifact", "ArtifactReport", "BusinessException", "ConfigField",
+    "CredentialNotFoundError", "CredentialProvider", "EmailNotifier", "Engine",
+    "EnvCredentialProvider", "ExecutionValidationError", "HistoryEntry", "HistoryEvent",
+    "KeyringCredentialProvider", "Notifier", "OutcomeCategory", "OutcomeReport",
+    "ProcessContext", "ProjectManifest", "QueueAdminEvent", "QueueAttempt",
+    "QueueAttemptOutcome", "QueueItem", "QueueLeaseLostError", "QueuePoisonEvent",
+    "QueueProvider", "QueueRunSummary", "QueueStatus", "ReportRecord",
+    "RetryDisposition", "Skill", "SkillReport", "SqliteQueue", "Status",
+    "SystemException", "TRANSACTION_FORMAT_VERSION", "Transaction", "TransactionFenceError",
+    "TransactionPage", "TransactionReport", "TransactionSummary", "WebhookNotifier",
+    "atomic_output_path", "bind_log_context", "build_credential_provider", "build_notifiers",
+    "configure_logger", "dispatch", "execute_transaction", "find_project_manifest",
+    "generate_report", "get_logger", "list_transactions", "load_config",
+    "load_project_manifest", "load_transaction", "optional_config", "query_transactions",
+    "render_html", "render_json", "render_text", "require_config", "require_section",
+    "resolve_config_path", "resolve_config_paths", "resolve_project_entrypoint",
+    "resume_transaction", "run_queue_loop", "save_transaction", "serialize_transaction",
+    "validate_config",
+)
+
+_V011_PUBLIC_EXPORTS = (
+    "Artifact", "ArtifactReport", "BusinessException", "CredentialNotFoundError",
+    "CredentialProvider", "EmailNotifier", "Engine", "EnvCredentialProvider",
+    "ExecutionValidationError", "HistoryEntry", "HistoryEvent", "KeyringCredentialProvider",
+    "Notifier", "ProcessContext", "ProjectManifest", "QueueItem", "QueueLeaseLostError",
+    "QueueProvider", "QueueRunSummary", "QueueStatus", "Skill", "SkillReport",
+    "SqliteQueue", "Status", "SystemException", "TRANSACTION_FORMAT_VERSION",
+    "Transaction", "TransactionReport", "WebhookNotifier", "build_credential_provider",
+    "build_notifiers", "configure_logger", "dispatch", "find_project_manifest",
+    "generate_report", "get_logger", "list_transactions", "load_config",
+    "load_project_manifest", "load_transaction", "optional_config", "render_html",
+    "render_text", "require_config", "require_section", "resolve_config_path",
+    "resolve_config_paths", "resolve_project_entrypoint", "resume_transaction",
+    "run_queue_loop", "save_transaction", "serialize_transaction",
+)
+
 
 def _run(
     command: list[str],
@@ -126,6 +163,15 @@ if module_path.parent == checkout_package:
     raise SystemExit(f"imported rpacore from checkout: {{module_path}}")
 if not module_path.with_name("py.typed").is_file():
     raise SystemExit(f"installed package missing py.typed: {{module_path}}")
+expected_public_exports = {tuple(_FROZEN_PUBLIC_EXPORTS)!r}
+v011_public_exports = {tuple(_V011_PUBLIC_EXPORTS)!r}
+if tuple(rpacore.__all__) != expected_public_exports:
+    raise SystemExit(
+        "installed package public exports differ from the frozen v0.2 contract: "
+        f"{{rpacore.__all__!r}}"
+    )
+for public_name in v011_public_exports:
+    getattr(rpacore, public_name)
 
 class OkSkill(Skill):
     def execute(self, ctx: ProcessContext) -> None:
