@@ -92,7 +92,6 @@ jobs:
           python scripts/validate_release_candidate.py
           --repo-root .
           --prebuilt-artifacts-dir artifact-set
-          --work-dir .release-candidate-work
           --output-dir validation-artifacts/release-candidate/${{ matrix.os }}-py${{ matrix.python-version }}
 
       - name: Record runner metadata
@@ -119,12 +118,27 @@ jobs:
           ref: ${{ inputs.core_commit }}
           fetch-depth: 1
 
+          persist-credentials: false
+
+      - name: Validate private checkout inputs
+        shell: bash
+        env:
+          EXAMPLES_COMMIT: ${{ inputs.examples_commit }}
+          EXAMPLES_TOKEN: ${{ secrets.RPACORE_EXAMPLES_TOKEN }}
+        run: |
+          [[ "$EXAMPLES_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] ||
+            { echo "::error::examples_commit must be a full SHA"; exit 1; }
+          test -n "$EXAMPLES_TOKEN" ||
+            { echo "::error::RPACORE_EXAMPLES_TOKEN is unavailable"; exit 1; }
+
       - uses: actions/checkout@v7
         with:
           repository: renatomoselli/rpacore-examples
           ref: ${{ inputs.examples_commit }}
           path: rpacore-examples
           fetch-depth: 1
+          token: ${{ secrets.RPACORE_EXAMPLES_TOKEN }}
+          persist-credentials: false
 
       - uses: actions/setup-python@v6
         with:
@@ -150,7 +164,6 @@ jobs:
           --examples-repo rpacore-examples
           --prebuilt-wheel "$(find artifact-set -maxdepth 1 -name 'rpacore-*.whl' -print -quit)"
           --output-dir validation-artifacts/release-candidate/examples-wheel
-          --work-dir .release-candidate-examples-work
           --venv-mode work-dir
           --run-main deterministic
           --example database_reconciliation
