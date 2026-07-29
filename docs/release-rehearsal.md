@@ -70,6 +70,15 @@ their evidence alongside the candidate result. Do not run a second checkout
 build for the same rehearsal. A standalone examples rerun must use
 `--prebuilt-wheel` with the recorded candidate wheel.
 
+For the full supported Windows and Linux matrix, use the manually dispatched
+**Release candidate** workflow with the exact framework and examples commits.
+It builds one locked wheel/source-distribution set, and every platform cell
+validates that downloaded set rather than rebuilding it. Preserve the uploaded
+artifact set, eight platform-cell evidence artifacts, examples-wheel evidence,
+and aggregate evidence with the release decision. The aggregate result is the
+definitive matrix verdict and fails closed when any required evidence is
+missing. Workflow-artifact retention is not permanent release storage.
+
 Then verify:
 
 - required CI jobs are green

@@ -1,0 +1,260 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_commit:
+        description: Full 40-character RPA Core commit selected for this run.
+        required: true
+        type: string
+      examples_commit:
+        description: Full 40-character rpacore-examples commit for the wheel matrix.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  freeze-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.core_commit }}
+          fetch-depth: 1
+
+      - name: Verify frozen framework commit
+        env:
+          EXPECTED_COMMIT: ${{ inputs.core_commit }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build one artifact set
+        run: |
+          python -m pip install build twine
+          python -m build --outdir artifact-set
+          python -m twine check artifact-set/*
+
+      - name: Lock artifact and source identity
+        env:
+          CORE_COMMIT: ${{ inputs.core_commit }}
+          EXAMPLES_COMMIT: ${{ inputs.examples_commit }}
+        run: |
+          python -c "import hashlib,json,os,pathlib; root=pathlib.Path('artifact-set'); artifacts=[{'name': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size_bytes': path.stat().st_size} for path in sorted(root.glob('rpacore-*'))]; assert len(artifacts) == 2, f'expected wheel and source distribution, found {len(artifacts)}'; (root/'artifact-lock.json').write_text(json.dumps({'core_commit': os.environ['CORE_COMMIT'], 'examples_commit': os.environ['EXAMPLES_COMMIT'], 'artifacts': artifacts}, indent=2, sort_keys=True), encoding='utf-8')"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-candidate-artifacts-${{ github.run_id }}
+          path: artifact-set
+          if-no-files-found: error
+          retention-days: 90
+
+  platform-cell:
+    needs: freeze-artifacts
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.core_commit }}
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-artifacts-${{ github.run_id }}
+          path: artifact-set
+
+      - name: Verify frozen inputs and artifact hashes
+        env:
+          EXPECTED_COMMIT: ${{ inputs.core_commit }}
+          EXPECTED_EXAMPLES_COMMIT: ${{ inputs.examples_commit }}
+        run: |
+          python -c "import hashlib,json,os,pathlib,subprocess; root=pathlib.Path('artifact-set'); lock=json.loads((root/'artifact-lock.json').read_text(encoding='utf-8')); assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == os.environ['EXPECTED_COMMIT']; assert lock['core_commit'] == os.environ['EXPECTED_COMMIT']; assert lock['examples_commit'] == os.environ['EXPECTED_EXAMPLES_COMMIT']; actual=[{'name': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size_bytes': path.stat().st_size} for path in sorted(root.glob('rpacore-*'))]; assert actual == lock['artifacts']"
+
+      - name: Install validation dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Validate the frozen artifact set
+        run: >
+          python scripts/validate_release_candidate.py
+          --repo-root .
+          --prebuilt-artifacts-dir artifact-set
+          --work-dir .release-candidate-work
+          --output-dir validation-artifacts/release-candidate/${{ matrix.os }}-py${{ matrix.python-version }}
+
+      - name: Record runner metadata
+        if: always()
+        env:
+          REQUESTED_PYTHON: ${{ matrix.python-version }}
+        run: |
+          python -c "import json,os,pathlib,platform; output=pathlib.Path('validation-artifacts/release-candidate/${{ matrix.os }}-py${{ matrix.python-version }}'); output.mkdir(parents=True, exist_ok=True); (output/'runner-metadata.json').write_text(json.dumps({'requested_python': os.environ['REQUESTED_PYTHON'], 'runner_os': os.environ.get('RUNNER_OS'), 'image_os': os.environ.get('ImageOS'), 'image_version': os.environ.get('ImageVersion'), 'python': platform.python_version()}, indent=2, sort_keys=True), encoding='utf-8')"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: release-candidate-evidence-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: validation-artifacts/release-candidate/${{ matrix.os }}-py${{ matrix.python-version }}
+          if-no-files-found: warn
+          retention-days: 90
+
+  examples-wheel:
+    needs: freeze-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.core_commit }}
+          fetch-depth: 1
+
+      - uses: actions/checkout@v7
+        with:
+          repository: renatomoselli/rpacore-examples
+          ref: ${{ inputs.examples_commit }}
+          path: rpacore-examples
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-artifacts-${{ github.run_id }}
+          path: artifact-set
+
+      - name: Verify frozen inputs and artifact hashes
+        env:
+          EXPECTED_COMMIT: ${{ inputs.core_commit }}
+          EXPECTED_EXAMPLES_COMMIT: ${{ inputs.examples_commit }}
+        run: |
+          python -c "import hashlib,json,os,pathlib,subprocess; root=pathlib.Path('artifact-set'); lock=json.loads((root/'artifact-lock.json').read_text(encoding='utf-8')); assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == os.environ['EXPECTED_COMMIT']; assert subprocess.check_output(['git','-C','rpacore-examples','rev-parse','HEAD'], text=True).strip() == os.environ['EXPECTED_EXAMPLES_COMMIT']; assert lock['core_commit'] == os.environ['EXPECTED_COMMIT']; assert lock['examples_commit'] == os.environ['EXPECTED_EXAMPLES_COMMIT']; actual=[{'name': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size_bytes': path.stat().st_size} for path in sorted(root.glob('rpacore-*'))]; assert actual == lock['artifacts']"
+
+      - name: Validate deterministic examples against the frozen wheel
+        shell: bash
+        run: >
+          python scripts/validate_examples_against_wheel.py
+          --repo-root .
+          --examples-repo rpacore-examples
+          --prebuilt-wheel "$(find artifact-set -maxdepth 1 -name 'rpacore-*.whl' -print -quit)"
+          --output-dir validation-artifacts/release-candidate/examples-wheel
+          --work-dir .release-candidate-examples-work
+          --venv-mode work-dir
+          --run-main deterministic
+          --example database_reconciliation
+          --example excel_reorganization
+          --example json_event_log_processor
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: release-candidate-evidence-examples-wheel
+          path: validation-artifacts/release-candidate/examples-wheel
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate-gate:
+    if: always()
+    needs: [platform-cell, examples-wheel]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-artifacts-${{ github.run_id }}
+          path: artifact-set
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: release-candidate-evidence-*
+          path: evidence
+
+      - name: Aggregate the required evidence inventory
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+
+          root = Path("evidence")
+          lock_root = Path("artifact-set")
+          lock = json.loads((lock_root / "artifact-lock.json").read_text(encoding="utf-8"))
+          expected = [
+              f"release-candidate-evidence-{os_name}-py{python_version}"
+              for os_name in ("ubuntu-latest", "windows-latest")
+              for python_version in ("3.11", "3.12", "3.13", "3.14")
+          ]
+          expected.append("release-candidate-evidence-examples-wheel")
+          cells = []
+          for name in expected:
+              directory = root / name
+              entry = {"name": name, "execution_status": "not_run"}
+              if name == "release-candidate-evidence-examples-wheel":
+                  result_path = directory / "examples-wheel-validation.json"
+                  if result_path.is_file():
+                      result = json.loads(result_path.read_text(encoding="utf-8"))
+                      wheel = result.get("wheel", {})
+                      expected_wheel = next(item for item in lock["artifacts"] if item["name"].endswith(".whl"))
+                      entry["execution_status"] = (
+                          "pass"
+                          if result.get("result", {}).get("status") == "pass"
+                          and wheel.get("sha256") == expected_wheel["sha256"]
+                          else "fail"
+                      )
+                  else:
+                      entry["reason"] = "examples evidence was not uploaded"
+              else:
+                  result_path = directory / "release-candidate-validation-results.json"
+                  metadata_path = directory / "runner-metadata.json"
+                  if result_path.is_file() and metadata_path.is_file():
+                      result = json.loads(result_path.read_text(encoding="utf-8"))
+                      metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                      expected_python = name.rsplit("py", 1)[1]
+                      expected_artifacts = lock["artifacts"]
+                      actual_artifacts = [
+                          {key: artifact[key] for key in ("name", "sha256", "size_bytes")}
+                          for artifact in result.get("artifacts", [])
+                      ]
+                      entry["execution_status"] = (
+                          "pass"
+                          if result.get("result", {}).get("status") == "pass"
+                          and result.get("artifact_source") == "prebuilt"
+                          and metadata.get("requested_python") == expected_python
+                          and actual_artifacts == expected_artifacts
+                          else "fail"
+                      )
+                  elif not result_path.is_file():
+                      entry["reason"] = "validation did not produce a result file"
+                  else:
+                      entry["reason"] = "runner metadata was not uploaded"
+              cells.append(entry)
+          status = "pass" if all(cell["execution_status"] == "pass" for cell in cells) else "fail"
+          output = {"schema_version": 1, "gate_status": status, "cells": cells, "artifact_lock": lock}
+          output_dir = Path("validation-artifacts/release-candidate/aggregate")
+          output_dir.mkdir(parents=True, exist_ok=True)
+          (output_dir / "release-candidate-aggregate.json").write_text(
+              json.dumps(output, indent=2, sort_keys=True), encoding="utf-8"
+          )
+          if status != "pass":
+              raise SystemExit("release-candidate evidence is incomplete or failed")
+          PY
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: release-candidate-evidence-aggregate
+          path: validation-artifacts/release-candidate/aggregate
+          if-no-files-found: warn
+          retention-days: 90

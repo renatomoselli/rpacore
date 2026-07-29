@@ -906,6 +906,7 @@ def validate_release_candidate(
     example_cli_project: str | None,
     example_cli_db: str,
     examples_wheel_matrix: bool = False,
+    prebuilt_artifacts_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run release-candidate validation and return the validation manifest."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -913,11 +914,17 @@ def validate_release_candidate(
     source_dir = work_dir / "source"
     framework_copy = source_dir / "rpacore"
     examples_copy = source_dir / "rpacore-examples"
-    wheelhouse = work_dir / "wheelhouse"
+    wheelhouse = (
+        prebuilt_artifacts_dir.resolve()
+        if prebuilt_artifacts_dir is not None
+        else work_dir / "wheelhouse"
+    )
     outside_dir = work_dir / "outside"
     venv_dir = work_dir / "venv"
     examples_matrix_work_dir = work_dir / "examples-wheel-validation"
-    generated_dirs = (source_dir, wheelhouse, outside_dir, venv_dir, examples_matrix_work_dir)
+    generated_dirs = (source_dir, outside_dir, venv_dir, examples_matrix_work_dir)
+    if prebuilt_artifacts_dir is None:
+        generated_dirs = (source_dir, wheelhouse, outside_dir, venv_dir, examples_matrix_work_dir)
 
     for generated_dir in generated_dirs:
         if generated_dir.exists():
@@ -931,7 +938,10 @@ def validate_release_candidate(
     cleanup_failures: list[Path] = []
     try:
         source_dir.mkdir(parents=True)
-        wheelhouse.mkdir(parents=True)
+        if prebuilt_artifacts_dir is None:
+            wheelhouse.mkdir(parents=True)
+        elif not wheelhouse.is_dir():
+            raise ValidationError(f"prebuilt artifact directory does not exist: {wheelhouse}")
         outside_dir.mkdir(parents=True)
 
         repos = [_repo_state("rpacore", repo_root)]
@@ -948,15 +958,16 @@ def validate_release_candidate(
         commands.append(_run("framework_tests", [sys.executable, "-m", "pytest", "-q"], cwd=framework_copy, allowed_roots=allowed_run_roots, env=env))
         commands[-1].parsed = _pytest_counts(commands[-1].stdout + "\n" + commands[-1].stderr)
 
-        commands.append(
-            _run(
-                "build_artifacts",
-                [sys.executable, "-m", "build", "--outdir", str(wheelhouse)],
-                cwd=framework_copy,
-                allowed_roots=allowed_run_roots,
-                env=env,
+        if prebuilt_artifacts_dir is None:
+            commands.append(
+                _run(
+                    "build_artifacts",
+                    [sys.executable, "-m", "build", "--outdir", str(wheelhouse)],
+                    cwd=framework_copy,
+                    allowed_roots=allowed_run_roots,
+                    env=env,
+                )
             )
-        )
         artifacts = _artifact_records(wheelhouse)
         _validate_artifact_records(artifacts)
         # Read dependency metadata from the isolated source copy used for builds.
@@ -1117,6 +1128,7 @@ def validate_release_candidate(
             "tools": _tool_versions(),
             "repositories": [asdict(repo) for repo in repos],
             "artifacts": artifacts,
+            "artifact_source": "prebuilt" if prebuilt_artifacts_dir is not None else "built",
             "dependency_inventory": dependency_inventory,
             "result": _manifest_result(commands=commands, repos=repos),
             "pytest_totals": _aggregate_pytest_counts(commands),
@@ -1249,6 +1261,12 @@ def build_parser() -> argparse.ArgumentParser:
             "owned temporary work directories are removed after writing validation results."
         ),
     )
+    parser.add_argument(
+        "--prebuilt-artifacts-dir",
+        type=Path,
+        default=None,
+        help="Validate the exact wheel and source distribution already present in this directory.",
+    )
     parser.add_argument("--examples-pytest", action="append", default=[])
     parser.add_argument(
         "--examples-wheel-matrix",
@@ -1284,6 +1302,11 @@ def main(argv: list[str] | None = None) -> int:
             example_cli_project=args.example_cli_project,
             example_cli_db=args.example_cli_db,
             examples_wheel_matrix=args.examples_wheel_matrix,
+            prebuilt_artifacts_dir=(
+                args.prebuilt_artifacts_dir.resolve()
+                if args.prebuilt_artifacts_dir is not None
+                else None
+            ),
         )
         print(f"Wrote release-candidate validation results to {output_dir.resolve()}")
     finally:

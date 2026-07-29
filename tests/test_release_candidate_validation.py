@@ -14,6 +14,8 @@ from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from rpacore._validation import ValidationError as SharedValidationError
 from rpacore._validation import ValidationFailure
 
@@ -155,6 +157,16 @@ class TestReleaseCandidateValidationScript:
         assert args.output_dir == Path("validation-artifacts/release-candidate-validation")
         assert ".rpiv" not in args.output_dir.parts
         assert args.work_dir is None
+        assert args.prebuilt_artifacts_dir is None
+
+    def test_parser_accepts_prebuilt_artifact_directory(self, tmp_path: Path) -> None:
+        module = _load_script()
+
+        args = module.build_parser().parse_args(
+            ["--prebuilt-artifacts-dir", str(tmp_path / "artifacts")]
+        )
+
+        assert args.prebuilt_artifacts_dir == tmp_path / "artifacts"
 
     def test_copy_tree_skips_symlinks(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -1369,14 +1381,22 @@ name = "demo"
 
         assert module._latest_wheel(tmp_path) == stable
 
-    def test_validate_release_candidate_records_core_steps(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("use_prebuilt_artifacts", [False, True])
+    def test_validate_release_candidate_records_core_steps(
+        self,
+        tmp_path: Path,
+        use_prebuilt_artifacts: bool,
+    ) -> None:
         module = _load_script()
         repo_root = tmp_path / "repo"
         examples_repo = tmp_path / "examples"
         work_dir = tmp_path / "work"
         output_dir = tmp_path / "validation-results"
+        prebuilt_artifacts_dir = tmp_path / "prebuilt-artifacts"
         repo_root.mkdir()
         examples_repo.mkdir()
+        if use_prebuilt_artifacts:
+            prebuilt_artifacts_dir.mkdir()
         commands: list[str] = []
         command_details: dict[str, tuple[list[str], Path]] = {}
 
@@ -1498,9 +1518,14 @@ dev = ["pytest"]
                                             examples_pytest=["examples/demo/tests"],
                                             example_cli_project="examples/demo",
                                             example_cli_db="rpacore.db",
+                                            prebuilt_artifacts_dir=(
+                                                prebuilt_artifacts_dir
+                                                if use_prebuilt_artifacts
+                                                else None
+                                            ),
                                         )
 
-        assert commands == [
+        expected_commands = [
             "framework_tests",
             "build_artifacts",
             "twine_check",
@@ -1527,6 +1552,9 @@ dev = ["pytest"]
             "install_pytest_for_examples",
             "example_pytest:examples/demo/tests",
         ]
+        if use_prebuilt_artifacts:
+            expected_commands.remove("build_artifacts")
+        assert commands == expected_commands
         command_records = {command["name"]: command for command in manifest["commands"]}
         assert command_records["cli_transaction_list_json"]["parsed"] == {"transaction_count": 1}
         assert manifest["pytest_totals"] == {"passed": 2}
@@ -1544,19 +1572,26 @@ dev = ["pytest"]
         assert manifest["environment"]["sqlite"]["library_version"] == "3.45.1"
         assert manifest["environment"]["journal"]["queue"]["effective_mode"] == "delete"
         assert manifest["tools"] == {"pip": "25", "build": "1", "twine": "6"}
+        assert manifest["artifact_source"] == (
+            "prebuilt" if use_prebuilt_artifacts else "built"
+        )
         assert command_records["installed_environment_probe"]["parsed"] == manifest["environment"]
         assert Path(manifest["artifacts"][0]["path"]).is_file()
         assert Path(manifest["artifacts"][0]["path"]).parent.parent.parent == output_dir
         assert manifest["dependency_inventory"]["runtime_dependencies"] == []
         assert "dev" in manifest["dependency_inventory"]["optional_dependencies"]
-        assert command_details["build_artifacts"][0] == [
-            sys.executable,
-            "-m",
-            "build",
-            "--outdir",
-            str(work_dir / "wheelhouse"),
-        ]
-        assert "--no-isolation" not in command_details["build_artifacts"][0]
+        if use_prebuilt_artifacts:
+            assert "build_artifacts" not in command_details
+            assert prebuilt_artifacts_dir.is_dir()
+        else:
+            assert command_details["build_artifacts"][0] == [
+                sys.executable,
+                "-m",
+                "build",
+                "--outdir",
+                str(work_dir / "wheelhouse"),
+            ]
+            assert "--no-isolation" not in command_details["build_artifacts"][0]
         assert "--db" not in command_details["cli_transaction_export_json"][0]
         example_cli_command, example_cli_cwd = command_details["example_cli_transaction_export_json"]
         assert example_cli_command[-2:] == ["--db", str(example_cli_cwd / "rpacore.db")]
@@ -1565,6 +1600,25 @@ dev = ["pytest"]
         assert example_command[-2:] == ["tests", "-q"]
         assert example_cwd == work_dir / "source" / "rpacore-examples" / "examples" / "demo"
         assert (output_dir / "release-candidate-validation-results.json").exists()
+
+    def test_validate_release_candidate_rejects_missing_prebuilt_artifacts_dir(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module = _load_script()
+        missing_dir = tmp_path / "missing-artifacts"
+
+        with pytest.raises(module.ValidationError, match="prebuilt artifact directory does not exist"):
+            module.validate_release_candidate(
+                repo_root=tmp_path,
+                examples_repo=None,
+                work_dir=tmp_path / "work",
+                output_dir=tmp_path / "validation-results",
+                examples_pytest=[],
+                example_cli_project=None,
+                example_cli_db="rpacore.db",
+                prebuilt_artifacts_dir=missing_dir,
+            )
 
     def test_validate_release_candidate_rejects_invalid_artifact_records(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -1820,6 +1874,7 @@ name = "rpacore"
         assert result == 0
         validate.assert_called_once()
         assert work_dir.exists()
+        assert validate.call_args.kwargs["prebuilt_artifacts_dir"] is None
 
     def test_main_defaults_output_to_public_validation_artifacts_dir(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -1840,6 +1895,30 @@ name = "rpacore"
         )
         assert ".rpiv" not in validate.call_args.kwargs["output_dir"].parts
         assert not work_dir.exists()
+
+    def test_main_passes_resolved_prebuilt_artifact_directory(self, tmp_path: Path) -> None:
+        module = _load_script()
+        work_dir = tmp_path / "work"
+        output_dir = tmp_path / "output"
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+
+        with patch.object(module, "validate_release_candidate", return_value={"ok": True}) as validate:
+            result = module.main(
+                [
+                    "--repo-root",
+                    str(tmp_path),
+                    "--work-dir",
+                    str(work_dir),
+                    "--output-dir",
+                    str(output_dir),
+                    "--prebuilt-artifacts-dir",
+                    str(artifacts_dir),
+                ]
+            )
+
+        assert result == 0
+        assert validate.call_args.kwargs["prebuilt_artifacts_dir"] == artifacts_dir.resolve()
 
     def test_main_removes_owned_temp_work_dir_when_output_dir_is_external(self, tmp_path: Path) -> None:
         module = _load_script()
