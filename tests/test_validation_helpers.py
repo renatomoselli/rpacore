@@ -7,6 +7,7 @@ from pathlib import Path
 from rpacore._validation import (
     ValidationError,
     ValidationFailure,
+    artifact_set_sha256,
     assert_relative_path,
     example_pytest_target,
     type_error,
@@ -19,6 +20,18 @@ class TestValidationHelpers:
     def test_validation_error_uses_runtime_base(self) -> None:
         assert issubclass(ValidationError, ValidationFailure)
         assert issubclass(ValidationError, ValueError)
+
+    def test_artifact_set_sha256_is_ordered_and_path_independent(self) -> None:
+        first = [
+            {"name": "rpacore.whl", "path": "C:/one/rpacore.whl", "size_bytes": 3, "sha256": "wheel"},
+            {"name": "rpacore.tar.gz", "path": "C:/one/rpacore.tar.gz", "size_bytes": 5, "sha256": "sdist"},
+        ]
+        second = [
+            {"name": "rpacore.tar.gz", "path": "D:/two/rpacore.tar.gz", "size_bytes": 5, "sha256": "sdist"},
+            {"name": "rpacore.whl", "path": "D:/two/rpacore.whl", "size_bytes": 3, "sha256": "wheel"},
+        ]
+
+        assert artifact_set_sha256(first) == artifact_set_sha256(second)
 
     def test_type_error_formats_expected_message(self) -> None:
         error = type_error("retry_count", "int", "bad")

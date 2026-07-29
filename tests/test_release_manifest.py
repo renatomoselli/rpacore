@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -128,9 +129,35 @@ license-files = ["LICENSE", "NOTICE"]
 def _write_validation_results(tmp_path: Path) -> tuple[Path, Path]:
     release_candidate = tmp_path / "release-candidate-validation-results.json"
     examples_wheel = tmp_path / "examples-wheel-validation.json"
+    artifact_root = tmp_path / "artifacts"
+    artifact_payloads = {
+        "rpacore-0.1.0-py3-none-any.whl": b"wheel bytes",
+        "rpacore-0.1.0.tar.gz": b"sdist bytes",
+    }
+    artifact_metadata = [
+        {
+            "name": name,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size_bytes": len(payload),
+        }
+        for name, payload in artifact_payloads.items()
+    ]
+    artifact_set = hashlib.sha256(
+        b"".join(
+            f"{artifact['name']}\0{artifact['size_bytes']}\0{artifact['sha256']}\n".encode("utf-8")
+            for artifact in sorted(artifact_metadata, key=lambda item: item["name"])
+        )
+    ).hexdigest()
+    artifacts_dir = artifact_root / artifact_set
+    artifacts_dir.mkdir(parents=True)
+    for name, payload in artifact_payloads.items():
+        (artifacts_dir / name).write_bytes(payload)
+    wheel = artifacts_dir / "rpacore-0.1.0-py3-none-any.whl"
+    sdist = artifacts_dir / "rpacore-0.1.0.tar.gz"
     release_candidate.write_text(
         json.dumps(
             {
+                "schema_version": 2,
                 "generated_at": "2026-07-03T00:00:00+00:00",
                 "platform": {
                     "system": "Windows",
@@ -146,14 +173,16 @@ def _write_validation_results(tmp_path: Path) -> tuple[Path, Path]:
                 "result": {"status": "pass"},
                 "artifacts": [
                     {
-                        "name": "rpacore-0.1.0-py3-none-any.whl",
-                        "sha256": "wheel-sha",
-                        "size_bytes": 10,
+                        "name": wheel.name,
+                        "path": str(wheel),
+                        "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
+                        "size_bytes": wheel.stat().st_size,
                     },
                     {
-                        "name": "rpacore-0.1.0.tar.gz",
-                        "sha256": "sdist-sha",
-                        "size_bytes": 20,
+                        "name": sdist.name,
+                        "path": str(sdist),
+                        "sha256": hashlib.sha256(sdist.read_bytes()).hexdigest(),
+                        "size_bytes": sdist.stat().st_size,
                     },
                 ],
                 "dependency_inventory": {"runtime_dependencies": []},
@@ -231,7 +260,7 @@ def test_prepare_release_manifest_writes_manifest_and_approval_draft(tmp_path: P
     )
 
     assert manifest["decision"]["status"] == "approved"
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["repositories"]["framework"]["commit"] == framework_commit
     assert manifest["repositories"]["examples"]["commit"] == examples_commit
     assert "path" not in manifest["repositories"]["framework"]
@@ -240,6 +269,7 @@ def test_prepare_release_manifest_writes_manifest_and_approval_draft(tmp_path: P
     assert manifest["documentation_verification"]["status"] == "passed"
     assert manifest["sbom"]["status"] == "not_produced"
     assert manifest["release"] == {"version": "0.1.0", "tag": "v0.1.0"}
+    assert Path(manifest["artifacts"][0]["path"]).parent.parent == tmp_path / "artifacts"
     assert manifest["expected_pypi_metadata"]["license"] == "Apache-2.0"
     assert manifest["expected_pypi_metadata"]["license_files"] == ["LICENSE", "NOTICE"]
     assert (output_dir / "release-manifest.json").is_file()
@@ -293,7 +323,7 @@ def test_prepare_release_manifest_rejects_missing_artifacts(tmp_path: Path) -> N
     _git_init(examples_repo)
     release_candidate = tmp_path / "release-candidate-validation-results.json"
     release_candidate.write_text(
-        json.dumps({"result": {"status": "pass"}, "artifacts": []}),
+            json.dumps({"schema_version": 2, "result": {"status": "pass"}, "artifacts": []}),
         encoding="utf-8",
     )
     examples_wheel = tmp_path / "examples-wheel-validation.json"
@@ -690,30 +720,126 @@ def test_artifact_summary_rejects_non_object_entry() -> None:
     script = _load_script()
 
     with pytest.raises(script.ManifestError, match="artifact entry must be an object"):
-        script._artifact_summary({"artifacts": ["not-an-object"]})
+        script._artifact_summary({"artifacts": ["not-an-object"]}, artifact_root=Path("."))
 
 
 def test_artifact_summary_rejects_missing_sha256() -> None:
     script = _load_script()
 
     with pytest.raises(script.ManifestError, match="artifact missing sha256"):
-        script._artifact_summary({"artifacts": [{"name": "rpacore.whl", "size_bytes": 10}]})
+        script._artifact_summary(
+            {"artifacts": [{"name": "rpacore.whl", "size_bytes": 10}]},
+            artifact_root=Path("."),
+        )
 
 
 def test_artifact_summary_rejects_empty_name_or_sha256() -> None:
     script = _load_script()
 
     with pytest.raises(script.ManifestError, match="artifact missing name"):
-        script._artifact_summary({"artifacts": [{"name": "", "sha256": "abc", "size_bytes": 10}]})
+        script._artifact_summary(
+            {"artifacts": [{"name": "", "sha256": "abc", "size_bytes": 10}]},
+            artifact_root=Path("."),
+        )
     with pytest.raises(script.ManifestError, match="artifact missing sha256"):
-        script._artifact_summary({"artifacts": [{"name": "rpacore.whl", "sha256": "", "size_bytes": 10}]})
+        script._artifact_summary(
+            {"artifacts": [{"name": "rpacore.whl", "sha256": "", "size_bytes": 10}]},
+            artifact_root=Path("."),
+        )
 
 
 def test_artifact_summary_rejects_missing_size_bytes() -> None:
     script = _load_script()
 
     with pytest.raises(script.ManifestError, match="artifact missing size_bytes"):
-        script._artifact_summary({"artifacts": [{"name": "rpacore.whl", "sha256": "abc"}]})
+        script._artifact_summary(
+            {"artifacts": [{"name": "rpacore.whl", "sha256": "abc"}]},
+            artifact_root=Path("."),
+        )
+
+
+def test_artifact_summary_requires_a_verified_artifact_path(tmp_path: Path) -> None:
+    script = _load_script()
+    artifact_root = tmp_path / "artifacts"
+    record = {
+        "name": "rpacore.whl",
+        "sha256": hashlib.sha256(b"artifact").hexdigest(),
+        "size_bytes": len(b"artifact"),
+    }
+    artifact_dir = artifact_root / script._artifact_set_sha256([record])
+    artifact_dir.mkdir(parents=True)
+    artifact = artifact_dir / record["name"]
+    artifact.write_bytes(b"artifact")
+    record["path"] = str(artifact)
+
+    with pytest.raises(script.ManifestError, match="artifact is outside its durable set"):
+        script._artifact_summary(
+            {
+                "artifacts": [
+                    {**record, "path": str(tmp_path / "untrusted" / "other.whl")}
+                ]
+            },
+            artifact_root=artifact_root,
+        )
+
+    with pytest.raises(script.ManifestError, match="artifact missing path"):
+        script._artifact_summary(
+            {"artifacts": [{key: value for key, value in record.items() if key != "path"}]},
+            artifact_root=artifact_root,
+        )
+    wrong_size = {**record, "size_bytes": 1}
+    wrong_size_dir = artifact_root / script._artifact_set_sha256([wrong_size])
+    wrong_size_dir.mkdir()
+    wrong_size["path"] = str(wrong_size_dir / record["name"])
+    Path(wrong_size["path"]).write_bytes(b"artifact")
+    with pytest.raises(script.ManifestError, match="artifact size mismatch"):
+        script._artifact_summary(
+            {"artifacts": [wrong_size]},
+            artifact_root=artifact_root,
+        )
+    wrong_hash = {**record, "sha256": "not-the-digest"}
+    wrong_hash_dir = artifact_root / script._artifact_set_sha256([wrong_hash])
+    wrong_hash_dir.mkdir()
+    wrong_hash["path"] = str(wrong_hash_dir / record["name"])
+    Path(wrong_hash["path"]).write_bytes(b"artifact")
+    with pytest.raises(script.ManifestError, match="artifact hash mismatch"):
+        script._artifact_summary(
+            {"artifacts": [wrong_hash]},
+            artifact_root=artifact_root,
+        )
+    artifact.unlink()
+    artifact.mkdir()
+    with pytest.raises(script.ManifestError, match="artifact is not a regular file"):
+        script._artifact_summary({"artifacts": [record]}, artifact_root=artifact_root)
+
+
+def test_artifact_summary_rejects_a_symlinked_artifact_root(tmp_path: Path) -> None:
+    script = _load_script()
+    target_root = tmp_path / "target" / "artifacts"
+    record = {
+        "name": "rpacore.whl",
+        "sha256": hashlib.sha256(b"artifact").hexdigest(),
+        "size_bytes": len(b"artifact"),
+    }
+    artifact_dir = target_root / script._artifact_set_sha256([record])
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / record["name"]).write_bytes(b"artifact")
+    artifact_root = tmp_path / "linked-artifacts"
+    try:
+        artifact_root.symlink_to(target_root, target_is_directory=True)
+    except OSError:
+        return
+    record["path"] = str(artifact_root / artifact_dir.name / record["name"])
+
+    with pytest.raises(script.ManifestError, match="artifact root must not be a symlink"):
+        script._artifact_summary({"artifacts": [record]}, artifact_root=artifact_root)
+
+
+def test_release_candidate_schema_version_is_required() -> None:
+    script = _load_script()
+
+    with pytest.raises(script.ManifestError, match="schema_version 2"):
+        script._require_schema_version({})
 
 
 def test_prepare_release_manifest_rejects_missing_environment_subkeys(tmp_path: Path) -> None:

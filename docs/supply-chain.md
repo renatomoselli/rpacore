@@ -40,10 +40,12 @@ in [Release Rehearsal](release-rehearsal.md).
 The release-candidate validator accepts wheels and `.tar.gz` source
 distributions, then records artifact hashes, dependency inventory, package
 metadata presence, wheel `RECORD`, wheel entry points, license files, and
-private-path checks in its validation manifest. Validation is fail-fast and
-cleans up its generated working directories on failure, so preserve the terminal
-or CI log for diagnosis because the final validation manifest is written only
-after all validation steps pass.
+private-path checks in its validation manifest. After every validation step
+passes, it preserves the exact artifact set in an immutable content-addressed
+directory beneath the candidate output's `artifacts/` directory. The manifest
+records those durable files; publication must use them without rebuilding.
+Validation is fail-fast and cleans up its generated working directories on
+failure, so preserve the terminal or CI log for diagnosis.
 
 Inspect archive contents so generated examples, private notes, local caches,
 credentials, and review artifacts do not ship in the package. The wheel should

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 PRERELEASE_WHEEL_PATTERN = re.compile(r"(?:a|b|rc)\d", re.IGNORECASE)
 
@@ -24,6 +26,18 @@ class ExamplePytestTarget:
     manifest_path: str
     project_dir: Path
     pytest_path: str
+
+
+def artifact_set_sha256(artifacts: list[dict[str, Any]]) -> str:
+    """Return a stable artifact-set identity independent of local file paths."""
+    digest = hashlib.sha256()
+    for artifact in sorted(artifacts, key=lambda item: str(item["name"])):
+        digest.update(
+            f"{artifact['name']}\0{artifact['size_bytes']}\0{artifact['sha256']}\n".encode(
+                "utf-8"
+            )
+        )
+    return digest.hexdigest()
 
 
 def validate_contained_path(

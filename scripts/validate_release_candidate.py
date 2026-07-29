@@ -18,6 +18,7 @@ import tempfile
 import time
 import tarfile
 import tomllib
+import uuid
 import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -32,6 +33,7 @@ if str(REPO_ROOT_FOR_IMPORTS) not in sys.path:
 from rpacore._validation import (
     PRERELEASE_WHEEL_PATTERN,
     ValidationError,
+    artifact_set_sha256 as _artifact_set_sha256,
     assert_relative_path,
     example_pytest_target as _example_pytest_target,
     validate_contained_path as _validate_contained_path,
@@ -391,6 +393,64 @@ def _validate_artifact_records(records: list[dict[str, Any]]) -> None:
                 raise ValidationError(f"wheel missing RECORD metadata: {name}")
             if not record["contains_entry_points"]:
                 raise ValidationError(f"wheel missing console entry point metadata: {name}")
+
+
+def _verify_published_artifacts(
+    artifacts: list[dict[str, Any]],
+    artifact_dir: Path,
+) -> list[dict[str, Any]]:
+    expected_names = {str(artifact["name"]) for artifact in artifacts}
+    actual_names = {path.name for path in artifact_dir.iterdir()} if artifact_dir.is_dir() else set()
+    if artifact_dir.is_symlink() or actual_names != expected_names:
+        raise ValidationError(f"published candidate artifact set is incomplete: {artifact_dir}")
+    persisted = []
+    for artifact in artifacts:
+        path = artifact_dir / str(artifact["name"])
+        if not path.is_file() or path.is_symlink():
+            raise ValidationError(f"published candidate artifact is not a regular file: {path}")
+        if path.stat().st_size != artifact["size_bytes"]:
+            raise ValidationError(f"published candidate artifact size mismatch: {path.name}")
+        if _sha256(path) != artifact["sha256"]:
+            raise ValidationError(f"published candidate artifact hash mismatch: {path.name}")
+        persisted.append({**artifact, "path": str(path)})
+    return persisted
+
+
+def _publish_artifacts(
+    artifacts: list[dict[str, Any]],
+    *,
+    wheelhouse: Path,
+    output_dir: Path,
+) -> list[dict[str, Any]]:
+    """Atomically preserve validated artifacts outside the disposable work directory."""
+    artifact_root = output_dir / "artifacts"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    artifact_set = _artifact_set_sha256(artifacts)
+    published_dir = artifact_root / artifact_set
+    if published_dir.exists():
+        return _verify_published_artifacts(artifacts, published_dir)
+
+    staging_dir = artifact_root / f".{artifact_set}-{uuid.uuid4().hex}.tmp"
+    wheelhouse = wheelhouse.resolve()
+    try:
+        staging_dir.mkdir()
+        for artifact in artifacts:
+            source = Path(str(artifact["path"])).resolve()
+            name = str(artifact["name"])
+            if source.parent != wheelhouse or source.name != name or not source.is_file():
+                raise ValidationError(f"candidate artifact is not a wheelhouse file: {name}")
+            shutil.copyfile(source, staging_dir / name)
+        _verify_published_artifacts(artifacts, staging_dir)
+        try:
+            staging_dir.replace(published_dir)
+        except FileExistsError:
+            # A concurrent equivalent candidate may have published the same set.
+            _remove_tree(staging_dir)
+            return _verify_published_artifacts(artifacts, published_dir)
+    except BaseException:
+        _remove_tree(staging_dir)
+        raise
+    return _verify_published_artifacts(artifacts, published_dir)
 
 
 def _dependency_inventory(source_root: Path) -> dict[str, Any]:
@@ -972,8 +1032,14 @@ def validate_release_candidate(
             )
             commands.append(matrix_command)
 
+        artifacts = _publish_artifacts(
+            artifacts,
+            wheelhouse=wheelhouse,
+            output_dir=output_dir,
+        )
+
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "generated_at": _utc_now().isoformat(),
             "finding_ids": list(VALIDATION_FINDINGS),
             "platform": {

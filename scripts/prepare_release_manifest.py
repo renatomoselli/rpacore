@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import subprocess
@@ -13,9 +14,17 @@ from pathlib import Path
 from typing import Any
 
 
+REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT_FOR_IMPORTS) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT_FOR_IMPORTS))
+
+from rpacore._validation import artifact_set_sha256 as _artifact_set_sha256
+
+
 MANIFEST_NAME = "release-manifest.json"
 SUMMARY_NAME = "release-approval.md"
 GIT_TIMEOUT_SECONDS = 30
+RELEASE_CANDIDATE_SCHEMA_VERSION = 2
 VALIDATION_STATUSES = frozenset({"pass", "fail"})
 EXPECTED_LICENSE = "Apache-2.0"
 LOGGER = logging.getLogger(__name__)
@@ -100,30 +109,80 @@ def _read_json(path: Path, *, label: str) -> dict[str, Any]:
     return payload
 
 
-def _artifact_summary(release_candidate: dict[str, Any]) -> list[dict[str, Any]]:
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _require_schema_version(release_candidate: dict[str, Any]) -> None:
+    if release_candidate.get("schema_version") != RELEASE_CANDIDATE_SCHEMA_VERSION:
+        raise ManifestError(
+            "release-candidate validation results must use "
+            f"schema_version {RELEASE_CANDIDATE_SCHEMA_VERSION}"
+        )
+
+
+def _artifact_summary(
+    release_candidate: dict[str, Any],
+    *,
+    artifact_root: Path,
+) -> list[dict[str, Any]]:
     artifacts = release_candidate.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise ManifestError("release-candidate validation results have no artifacts")
-    summary = []
+    summary: list[dict[str, Any]] = []
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             raise ManifestError("release-candidate artifact entry must be an object")
         name = artifact.get("name")
+        path_value = artifact.get("path")
         sha256 = artifact.get("sha256")
         size_bytes = artifact.get("size_bytes")
         if not isinstance(name, str) or not name:
             raise ManifestError("release-candidate artifact missing name")
+        name_path = Path(name)
+        if name_path.name != name or name_path.is_absolute() or name in {".", ".."}:
+            raise ManifestError(f"release-candidate artifact name is not a basename: {name}")
         if not isinstance(sha256, str) or not sha256:
             raise ManifestError("release-candidate artifact missing sha256")
         if not isinstance(size_bytes, int):
             raise ManifestError(f"release-candidate artifact missing size_bytes: {name}")
+        if not isinstance(path_value, str) or not path_value:
+            raise ManifestError(f"release-candidate artifact missing path: {name}")
         summary.append(
             {
                 "name": name,
+                "path": path_value,
                 "sha256": sha256,
                 "size_bytes": size_bytes,
             }
         )
+    names = {str(artifact["name"]) for artifact in summary}
+    if len(names) != len(summary):
+        raise ManifestError("release-candidate artifacts must have unique names")
+    if artifact_root.is_symlink():
+        raise ManifestError(f"release-candidate artifact root must not be a symlink: {artifact_root}")
+    artifact_dir = artifact_root.resolve() / _artifact_set_sha256(summary)
+    if not artifact_dir.is_dir() or artifact_dir.is_symlink():
+        raise ManifestError(f"release-candidate artifact set is unavailable: {artifact_dir}")
+    if {path.name for path in artifact_dir.iterdir()} != names:
+        raise ManifestError(f"release-candidate artifact set is incomplete: {artifact_dir}")
+    for artifact in summary:
+        name = str(artifact["name"])
+        raw_path = Path(str(artifact["path"]))
+        path = artifact_dir / name
+        if not raw_path.is_absolute() or raw_path.is_symlink() or raw_path.resolve() != path.resolve():
+            raise ManifestError(f"release-candidate artifact is outside its durable set: {name}")
+        if not path.is_file() or path.is_symlink():
+            raise ManifestError(f"release-candidate artifact is not a regular file: {name}")
+        if path.stat().st_size != artifact["size_bytes"]:
+            raise ManifestError(f"release-candidate artifact size mismatch: {name}")
+        if _sha256(path) != artifact["sha256"]:
+            raise ManifestError(f"release-candidate artifact hash mismatch: {name}")
+        artifact["path"] = str(path)
     return summary
 
 
@@ -307,10 +366,12 @@ def prepare_release_manifest(
     repo_root = repo_root.resolve()
     examples_repo = examples_repo.resolve()
     output_dir = output_dir.resolve()
+    release_candidate_validation_results = release_candidate_validation_results.resolve()
     release_candidate = _read_json(
         release_candidate_validation_results,
         label="release-candidate validation results",
     )
+    _require_schema_version(release_candidate)
     examples_wheel = _read_json(
         examples_wheel_validation_results,
         label="examples wheel validation results",
@@ -326,7 +387,7 @@ def prepare_release_manifest(
     }
     generated_at = _utc_now().isoformat()
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": generated_at,
         "decision": {
             "status": _status_from_validation_results(
@@ -350,7 +411,10 @@ def prepare_release_manifest(
             "framework": _manifest_repo_state(framework_state),
             "examples": _manifest_repo_state(examples_state),
         },
-        "artifacts": _artifact_summary(release_candidate),
+        "artifacts": _artifact_summary(
+            release_candidate,
+            artifact_root=release_candidate_validation_results.parent / "artifacts",
+        ),
         "environment": _release_environment(release_candidate),
         "dependency_inventory": _dependency_inventory(release_candidate),
         "sbom": sbom,

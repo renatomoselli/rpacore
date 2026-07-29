@@ -34,7 +34,7 @@ The release manifest should contain:
 - framework and examples commit IDs
 - tag name
 - Python and operating-system matrix results
-- wheel and source distribution names, sizes, and SHA-256 hashes
+- wheel and source distribution names, durable paths, sizes, and SHA-256 hashes
 - dependency inventory location
 - SBOM location, or a note that no SBOM was produced
 - documentation verification command and result
@@ -45,7 +45,10 @@ The release manifest should contain:
 - TestPyPI result, or a note that TestPyPI was intentionally skipped
 
 Use the prebuilt, hashed artifacts recorded in the manifest for publication. Do
-not rebuild artifacts during upload.
+not rebuild artifacts during upload. Successful candidate artifacts are kept as
+an immutable content-addressed set under the candidate output directory's
+`artifacts/` directory. Manifest preparation verifies those files again before
+it records their upload paths.
 
 ## Required Rehearsal Checks
 

@@ -718,6 +718,98 @@ class TestReleaseCandidateValidationScript:
 
         assert module._sha256(path) == sha256(b"payload").hexdigest()
 
+    def test_publish_artifacts_preserves_and_reuses_a_content_addressed_set(
+        self, tmp_path: Path
+    ) -> None:
+        module = _load_script()
+        wheelhouse = tmp_path / "wheelhouse"
+        wheelhouse.mkdir()
+        wheel = wheelhouse / "rpacore-0.1.0-py3-none-any.whl"
+        sdist = wheelhouse / "rpacore-0.1.0.tar.gz"
+        wheel.write_bytes(b"wheel")
+        sdist.write_bytes(b"sdist")
+        artifacts = [
+            {
+                "name": path.name,
+                "path": str(path),
+                "sha256": module._sha256(path),
+                "size_bytes": path.stat().st_size,
+            }
+            for path in (wheel, sdist)
+        ]
+
+        first = module._publish_artifacts(
+            artifacts,
+            wheelhouse=wheelhouse,
+            output_dir=tmp_path / "output",
+        )
+        module._remove_tree(wheelhouse)
+        second = module._publish_artifacts(
+            first,
+            wheelhouse=tmp_path / "unused-wheelhouse",
+            output_dir=tmp_path / "output",
+        )
+
+        assert all(Path(artifact["path"]).is_file() for artifact in first)
+        assert first == second
+        published_sets = list((tmp_path / "output" / "artifacts").iterdir())
+        assert len(published_sets) == 1
+        assert not published_sets[0].name.startswith(".")
+
+    def test_publish_artifacts_rejects_a_mismatched_existing_set(self, tmp_path: Path) -> None:
+        module = _load_script()
+        wheelhouse = tmp_path / "wheelhouse"
+        wheelhouse.mkdir()
+        wheel = wheelhouse / "rpacore-0.1.0-py3-none-any.whl"
+        wheel.write_bytes(b"wheel")
+        artifacts = [
+            {
+                "name": wheel.name,
+                "path": str(wheel),
+                "sha256": module._sha256(wheel),
+                "size_bytes": wheel.stat().st_size,
+            }
+        ]
+        artifact_set = module._artifact_set_sha256(artifacts)
+        published = tmp_path / "output" / "artifacts" / artifact_set
+        published.mkdir(parents=True)
+        (published / wheel.name).write_bytes(b"other")
+
+        try:
+            module._publish_artifacts(
+                artifacts,
+                wheelhouse=wheelhouse,
+                output_dir=tmp_path / "output",
+            )
+        except module.ValidationError as exc:
+            assert "hash mismatch" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
+    def test_verify_published_artifacts_rejects_an_extra_file(self, tmp_path: Path) -> None:
+        module = _load_script()
+        artifact = tmp_path / "rpacore-0.1.0-py3-none-any.whl"
+        artifact.write_bytes(b"wheel")
+        artifacts = [
+            {
+                "name": artifact.name,
+                "path": str(artifact),
+                "sha256": module._sha256(artifact),
+                "size_bytes": artifact.stat().st_size,
+            }
+        ]
+        published = tmp_path / "published"
+        published.mkdir()
+        (published / artifact.name).write_bytes(b"wheel")
+        (published / "unexpected.txt").write_text("unexpected", encoding="utf-8")
+
+        try:
+            module._verify_published_artifacts(artifacts, published)
+        except module.ValidationError as exc:
+            assert "incomplete" in str(exc)
+        else:
+            raise AssertionError("Expected ValidationError")
+
     def test_artifact_records_include_supply_chain_metadata(self, tmp_path: Path) -> None:
         module = _load_script()
         wheel = tmp_path / "rpacore-0.1.0-py3-none-any.whl"
@@ -1346,7 +1438,7 @@ dev = ["pytest"]
                 {
                     "name": wheel.name,
                     "path": str(wheel),
-                    "sha256": "wheel-sha",
+                    "sha256": module._sha256(wheel),
                     "size_bytes": 5,
                     "contains_license": True,
                     "contains_notice": True,
@@ -1360,7 +1452,7 @@ dev = ["pytest"]
                 {
                     "name": sdist.name,
                     "path": str(sdist),
-                    "sha256": "sdist-sha",
+                    "sha256": module._sha256(sdist),
                     "size_bytes": 5,
                     "contains_license": True,
                     "contains_notice": True,
@@ -1440,6 +1532,9 @@ dev = ["pytest"]
             "example_pytest:examples/demo/tests"
         ]
         assert manifest["artifacts"][0]["contains_examples"] is False
+        assert manifest["schema_version"] == 2
+        assert Path(manifest["artifacts"][0]["path"]).is_file()
+        assert Path(manifest["artifacts"][0]["path"]).parent.parent.parent == output_dir
         assert manifest["dependency_inventory"]["runtime_dependencies"] == []
         assert "dev" in manifest["dependency_inventory"]["optional_dependencies"]
         assert command_details["build_artifacts"][0] == [
@@ -1527,6 +1622,7 @@ name = "rpacore"
                             assert str(exc) == "release artifact missing license file: rpacore-0.1.0-py3-none-any.whl"
                         else:
                             raise AssertionError("Expected ValidationError")
+        assert not (output_dir / "artifacts").exists()
 
     def test_validate_release_candidate_cleans_generated_dirs_after_failure(
         self,
