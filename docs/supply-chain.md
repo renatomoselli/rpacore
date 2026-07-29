@@ -1,6 +1,6 @@
 # Supply Chain
 
-RPA Core v0.1.0 keeps the default runtime dependency set empty. The framework
+RPA Core v0.2.0 keeps the default runtime dependency set empty. The framework
 uses the Python standard library for core execution, persistence, configuration,
 CLI, logging, queue processing, reports, and notification transport.
 
@@ -66,6 +66,11 @@ config, or CI logs.
 
 Release environments should require explicit approval before publication. A
 failed release should preserve logs, artifact names, and hashes for diagnosis.
+Publication consumes only a named passing Release candidate run's locked wheel
+and source distribution. It must verify the run, aggregate gate, source commits,
+version/tag, filenames, sizes, and SHA-256 values before upload, and fail closed
+when the GitHub tag/release or PyPI version already exists. It never rebuilds
+the distributions in the publish workflow.
 
 ## Dependency Updates
 

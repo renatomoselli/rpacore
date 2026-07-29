@@ -1,13 +1,13 @@
 # Testing RPA Core Skills
 
-RPA Core v0.1.0 does not provide `SkillTestCase`, a custom test runner, or a
+RPA Core v0.2.0 does not provide `SkillTestCase`, a custom test runner, or a
 framework-specific pytest plugin. Skill tests should be normal pytest tests that
 instantiate a skill, a `Transaction`, and a `ProcessContext` directly.
 
 This keeps test execution deterministic and visible. A custom base class would
 need rules for hidden setup, exception wrapping, transaction mutation,
 artifact cleanup, and engine ordering. The current examples do not show enough
-repeated boilerplate to justify that public API before v0.1.0.
+repeated boilerplate to justify that public API for v0.2.0.
 
 ## Basic Pattern
 
@@ -105,7 +105,7 @@ preserves any previous destination.
 
 ## Decision
 
-Do not add `SkillTestCase` for the `0.1.x` release line. Plain pytest tests with direct
+Do not add `SkillTestCase` for the `0.2.x` release line. Plain pytest tests with direct
 `ProcessContext` construction cover the demonstrated skill-testing needs:
 business exceptions, system exceptions, durable state, artifact records, and
 engine-level retry/status behavior where needed.

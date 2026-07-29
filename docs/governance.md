@@ -41,7 +41,7 @@ Before merging a release-impacting change, reviewers should check:
 - compatibility notes appear in [CHANGELOG.md](../CHANGELOG.md) when users need
   to know about them
 - persistence, queue, export, CLI, and generated-project changes preserve the
-  documented v0.1.0 contracts
+  documented v0.2.0 contracts
 - runtime dependency changes have a dependency decision
 - `rpacore-examples` either receives a matching update or the change records why
   no example update is required
@@ -114,7 +114,7 @@ or correctness gap.
 
 ## Compatibility Policy
 
-Before v1.0, documented v0.1 public APIs, CLI behavior, storage schemas, export
+Before v1.0, documented v0.2 public APIs, CLI behavior, storage schemas, export
 formats, and generated-project persistence patterns are still compatibility
 boundaries. Breaking them requires a correctness, security, or release-blocking
 reason, a documented migration path, and focused validation.

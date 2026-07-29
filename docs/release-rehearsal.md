@@ -47,10 +47,14 @@ The release manifest should contain:
 - TestPyPI result, or a note that TestPyPI was intentionally skipped
 
 Use the prebuilt, hashed artifacts recorded in the manifest for publication. Do
-not rebuild artifacts during upload. Successful candidate artifacts are kept as
-an immutable content-addressed set under the candidate output directory's
-`artifacts/` directory. Manifest preparation verifies those files again before
-it records their upload paths.
+not rebuild artifacts during upload. A publication run must name one passing
+Release candidate workflow run and provide its full framework/examples commits
+and both artifact SHA-256 values. It downloads only that run's locked artifact
+set and aggregate result, then rejects any mismatch in run identity, commits,
+version/tag, filenames, sizes, hashes, or artifact-set digest. Successful
+candidate artifacts are kept as an immutable content-addressed set under the
+candidate output directory's `artifacts/` directory. Manifest preparation
+verifies those files again before it records their upload paths.
 
 ## Required Rehearsal Checks
 
@@ -78,6 +82,13 @@ artifact set, eight platform-cell evidence artifacts, examples-wheel evidence,
 and aggregate evidence with the release decision. The aggregate result is the
 definitive matrix verdict and fails closed when any required evidence is
 missing. Workflow-artifact retention is not permanent release storage.
+
+Before trusted publishing is enabled, the publish workflow also requires the
+candidate run to be a successful manually dispatched Release candidate run on
+`main` for the locked framework commit. It rejects an existing GitHub tag or
+release for the target version and an existing PyPI version; an unavailable or
+unexpected remote response is a blocker. The protected PyPI job re-downloads
+and re-hashes the same named candidate set immediately before upload.
 
 Then verify:
 

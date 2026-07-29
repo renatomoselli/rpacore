@@ -3,119 +3,159 @@ name: Publish to PyPI
 on:
   workflow_dispatch:
     inputs:
+      candidate_run_id:
+        description: Full GitHub Actions run ID for the passing Release candidate workflow.
+        required: true
+        type: string
+      core_commit:
+        description: Full 40-character RPA Core commit recorded by the candidate lock.
+        required: true
+        type: string
+      examples_commit:
+        description: Full 40-character rpacore-examples commit recorded by the candidate lock.
+        required: true
+        type: string
+      wheel_sha256:
+        description: SHA-256 of the exact candidate wheel.
+        required: true
+        type: string
+      sdist_sha256:
+        description: SHA-256 of the exact candidate source distribution.
+        required: true
+        type: string
       publish_confirm:
-        description: "Type: publish rpacore <pyproject version> to pypi"
+        description: "Type: publish rpacore candidate <candidate_run_id> to pypi"
         required: true
         type: string
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
-  confirm:
-    name: Confirm release version
+  verify-candidate:
+    name: Verify immutable candidate
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@v7
-
-      - name: Read package version
-        id: version
-        run: |
-          version="$(python - <<'PY'
-          import tomllib
-          from pathlib import Path
-
-          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-          print(pyproject["project"]["version"])
-          PY
-          )"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Confirm publish request
-        run: |
-          expected="publish rpacore ${{ steps.version.outputs.version }} to pypi"
-          if [ "${{ github.event.inputs.publish_confirm }}" != "$expected" ]; then
-            echo "Expected confirmation: $expected"
-            exit 1
-          fi
-
-  build:
-    name: Build distributions
-    runs-on: ubuntu-latest
-    needs: confirm
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          ref: main
+          persist-credentials: false
 
-      - name: Install build tools
-        run: python -m pip install --upgrade ".[dev]"
-
-      - name: Verify docs
-        run: python scripts/verify_docs.py --repo-root .
-
-      - name: Run tests
-        run: python -m pytest
-
-      - name: Build wheel and sdist
-        run: python -m build
-
-      - name: Check distribution metadata
-        run: python -m twine check dist/*
-
-      - name: Validate installed wheel
-        run: python scripts/validate_installed_wheel.py --repo-root . --wheel-dir dist
-
-      - name: Generate SHA-256 checksums
-        run: |
-          mkdir checksums
-          python - <<'PY'
-          from hashlib import sha256
-          from pathlib import Path
-
-          lines = []
-          for path in sorted(Path("dist").iterdir()):
-              if path.is_file():
-                  lines.append(f"{sha256(path.read_bytes()).hexdigest()}  {path.name}")
-          Path("checksums/SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-          PY
-          cp checksums/SHA256SUMS.txt "checksums/rpacore-${{ needs.confirm.outputs.version }}-SHA256SUMS.txt"
-
-      - name: Upload checked distributions
-        uses: actions/upload-artifact@v7
+      - uses: actions/download-artifact@v7
         with:
-          name: rpacore-dist
-          path: dist/*
+          name: release-candidate-artifacts-${{ inputs.candidate_run_id }}
+          path: candidate-artifacts
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
 
-      - name: Upload distribution checksums
-        uses: actions/upload-artifact@v7
+      - uses: actions/download-artifact@v7
         with:
-          name: rpacore-dist-checksums
-          path: checksums/*
+          name: release-candidate-evidence-aggregate
+          path: candidate-aggregate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - name: Verify run, exact bytes, and unclaimed release identity
+        run: >
+          python scripts/verify_publish_candidate.py
+          --candidate-artifacts-dir candidate-artifacts
+          --aggregate-evidence candidate-aggregate/release-candidate-aggregate.json
+          --candidate-run-id "${{ inputs.candidate_run_id }}"
+          --expected-version 0.2.0
+          --expected-core-commit "${{ inputs.core_commit }}"
+          --expected-examples-commit "${{ inputs.examples_commit }}"
+          --expected-wheel-sha256 "${{ inputs.wheel_sha256 }}"
+          --expected-sdist-sha256 "${{ inputs.sdist_sha256 }}"
+          --publish-confirm "${{ inputs.publish_confirm }}"
+          --repository "${{ github.repository }}"
+          --github-token "${{ github.token }}"
+          --output candidate-publish-lock.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: verified-publish-candidate-lock
+          path: candidate-publish-lock.json
+          if-no-files-found: error
+          retention-days: 90
 
   publish:
-    name: Publish checked distributions
+    name: Publish verified distributions
     runs-on: ubuntu-latest
-    needs: build
+    needs: verify-candidate
     environment: pypi
 
     permissions:
+      actions: read
       contents: read
       id-token: write
 
     steps:
-      - name: Download checked distributions
-        uses: actions/download-artifact@v7
+      - uses: actions/checkout@v7
         with:
-          name: rpacore-dist
-          path: dist
+          ref: main
+          persist-credentials: false
 
-      - name: Publish to PyPI
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-artifacts-${{ inputs.candidate_run_id }}
+          path: candidate-artifacts
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-candidate-evidence-aggregate
+          path: candidate-aggregate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.candidate_run_id }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: verified-publish-candidate-lock
+          path: publish-lock
+
+      - name: Recheck exact bytes and unclaimed release identity
+        run: >
+          python scripts/verify_publish_candidate.py
+          --candidate-artifacts-dir candidate-artifacts
+          --aggregate-evidence candidate-aggregate/release-candidate-aggregate.json
+          --candidate-run-id "${{ inputs.candidate_run_id }}"
+          --expected-version 0.2.0
+          --expected-core-commit "${{ inputs.core_commit }}"
+          --expected-examples-commit "${{ inputs.examples_commit }}"
+          --expected-wheel-sha256 "${{ inputs.wheel_sha256 }}"
+          --expected-sdist-sha256 "${{ inputs.sdist_sha256 }}"
+          --publish-confirm "${{ inputs.publish_confirm }}"
+          --repository "${{ github.repository }}"
+          --github-token "${{ github.token }}"
+          --expected-lock publish-lock/candidate-publish-lock.json
+
+      - name: Install metadata checker
+        run: python -m pip install --disable-pip-version-check "twine==5.1.1"
+
+      - name: Check immutable distribution metadata
+        run: python -m twine check candidate-artifacts/rpacore-*
+
+      - name: Validate the exact installed wheel
+        run: python scripts/validate_installed_wheel.py --repo-root . --wheel-dir candidate-artifacts
+
+      - name: Prepare exact verified distributions for upload
+        run: |
+          mkdir publish-distributions
+          mkdir publish-checksums
+          cp candidate-artifacts/rpacore-*.whl publish-distributions/
+          cp candidate-artifacts/rpacore-*.tar.gz publish-distributions/
+          printf '%s  %s\n' "${{ inputs.wheel_sha256 }}" "publish-distributions/rpacore-0.2.0-py3-none-any.whl" > publish-checksums/SHA256SUMS.txt
+          printf '%s  %s\n' "${{ inputs.sdist_sha256 }}" "publish-distributions/rpacore-0.2.0.tar.gz" >> publish-checksums/SHA256SUMS.txt
+          sha256sum --check publish-checksums/SHA256SUMS.txt
+
+      - name: Publish exact verified distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: publish-distributions

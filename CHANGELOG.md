@@ -2,7 +2,7 @@
 
 All notable user-facing changes are recorded here.
 
-## Unreleased
+## v0.2.0 - Unreleased
 
 ### Added
 
@@ -83,7 +83,7 @@ All notable user-facing changes are recorded here.
   | `go` / `no-go` decision values | `approved` / `rejected` decision values |
   | default `evidence/` output directory | default `validation-results/` output directory |
 
-- Updated public docs to describe the maintained `0.1.x` release line where the
+- Updated public docs to describe the maintained `0.2.x` release line where the
   wording applies to current documentation and API coverage.
 - Moved package license-file metadata to `project.license-files` and declared an
   explicit setuptools build backend to avoid deprecated build configuration.

@@ -44,8 +44,9 @@ jobs:
         env:
           CORE_COMMIT: ${{ inputs.core_commit }}
           EXAMPLES_COMMIT: ${{ inputs.examples_commit }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          python -c "import hashlib,json,os,pathlib; root=pathlib.Path('artifact-set'); artifacts=[{'name': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size_bytes': path.stat().st_size} for path in sorted(root.glob('rpacore-*'))]; assert len(artifacts) == 2, f'expected wheel and source distribution, found {len(artifacts)}'; (root/'artifact-lock.json').write_text(json.dumps({'core_commit': os.environ['CORE_COMMIT'], 'examples_commit': os.environ['EXAMPLES_COMMIT'], 'artifacts': artifacts}, indent=2, sort_keys=True), encoding='utf-8')"
+          python -c "import hashlib,json,os,pathlib,tomllib; root=pathlib.Path('artifact-set'); version=tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version']; expected={f'rpacore-{version}-py3-none-any.whl':'wheel', f'rpacore-{version}.tar.gz':'sdist'}; paths=sorted(root.glob('rpacore-*')); assert {path.name for path in paths} == set(expected), f'unexpected artifact set: {[path.name for path in paths]}'; artifacts=[{'name': path.name, 'kind': expected[path.name], 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size_bytes': path.stat().st_size} for path in paths]; digest=hashlib.sha256(json.dumps(sorted(artifacts, key=lambda item: item['name']), separators=(',', ':'), sort_keys=True).encode()).hexdigest(); lock={'schema_version': 1, 'repository': os.environ['GITHUB_REPOSITORY'], 'release_candidate': {'workflow': 'Release candidate', 'workflow_path': '.github/workflows/release-candidate.yml', 'run_id': os.environ['RUN_ID']}, 'source': {'core_commit': os.environ['CORE_COMMIT'], 'examples_commit': os.environ['EXAMPLES_COMMIT']}, 'release': {'version': version, 'tag': f'v{version}'}, 'artifacts': artifacts, 'artifact_set_sha256': digest}; (root/'artifact-lock.json').write_text(json.dumps(lock, indent=2, sort_keys=True), encoding='utf-8')"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -82,7 +83,7 @@ jobs:
           EXPECTED_COMMIT: ${{ inputs.core_commit }}
           EXPECTED_EXAMPLES_COMMIT: ${{ inputs.examples_commit }}
         run: |
-          python -c "import hashlib,json,os,pathlib,subprocess; root=pathlib.Path('artifact-set'); lock=json.loads((root/'artifact-lock.json').read_text(encoding='utf-8')); assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == os.environ['EXPECTED_COMMIT']; assert lock['core_commit'] == os.environ['EXPECTED_COMMIT']; assert lock['examples_commit'] == os.environ['EXPECTED_EXAMPLES_COMMIT']; actual=[{'name': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size_bytes': path.stat().st_size} for path in sorted(root.glob('rpacore-*'))]; assert actual == lock['artifacts']"
+          python -c "import hashlib,json,os,pathlib,subprocess; root=pathlib.Path('artifact-set'); lock=json.loads((root/'artifact-lock.json').read_text(encoding='utf-8')); source=lock['source']; assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == os.environ['EXPECTED_COMMIT']; assert source['core_commit'] == os.environ['EXPECTED_COMMIT']; assert source['examples_commit'] == os.environ['EXPECTED_EXAMPLES_COMMIT']; actual=[{'name': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size_bytes': path.stat().st_size} for path in sorted(root.glob('rpacore-*'))]; expected=[{key: artifact[key] for key in ('name','sha256','size_bytes')} for artifact in lock['artifacts']]; assert actual == expected"
 
       - name: Install validation dependencies
         run: python -m pip install -e ".[dev]"
@@ -154,7 +155,7 @@ jobs:
           EXPECTED_COMMIT: ${{ inputs.core_commit }}
           EXPECTED_EXAMPLES_COMMIT: ${{ inputs.examples_commit }}
         run: |
-          python -c "import hashlib,json,os,pathlib,subprocess; root=pathlib.Path('artifact-set'); lock=json.loads((root/'artifact-lock.json').read_text(encoding='utf-8')); assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == os.environ['EXPECTED_COMMIT']; assert subprocess.check_output(['git','-C','rpacore-examples','rev-parse','HEAD'], text=True).strip() == os.environ['EXPECTED_EXAMPLES_COMMIT']; assert lock['core_commit'] == os.environ['EXPECTED_COMMIT']; assert lock['examples_commit'] == os.environ['EXPECTED_EXAMPLES_COMMIT']; actual=[{'name': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size_bytes': path.stat().st_size} for path in sorted(root.glob('rpacore-*'))]; assert actual == lock['artifacts']"
+          python -c "import hashlib,json,os,pathlib,subprocess; root=pathlib.Path('artifact-set'); lock=json.loads((root/'artifact-lock.json').read_text(encoding='utf-8')); source=lock['source']; assert subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip() == os.environ['EXPECTED_COMMIT']; assert subprocess.check_output(['git','-C','rpacore-examples','rev-parse','HEAD'], text=True).strip() == os.environ['EXPECTED_EXAMPLES_COMMIT']; assert source['core_commit'] == os.environ['EXPECTED_COMMIT']; assert source['examples_commit'] == os.environ['EXPECTED_EXAMPLES_COMMIT']; actual=[{'name': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'size_bytes': path.stat().st_size} for path in sorted(root.glob('rpacore-*'))]; expected=[{key: artifact[key] for key in ('name','sha256','size_bytes')} for artifact in lock['artifacts']]; assert actual == expected"
 
       - name: Validate deterministic examples against the frozen wheel
         shell: bash
@@ -240,12 +241,16 @@ jobs:
                           {key: artifact[key] for key in ("name", "sha256", "size_bytes")}
                           for artifact in result.get("artifacts", [])
                       ]
+                      expected_validation_artifacts = [
+                          {key: artifact[key] for key in ("name", "sha256", "size_bytes")}
+                          for artifact in expected_artifacts
+                      ]
                       entry["execution_status"] = (
                           "pass"
                           if result.get("result", {}).get("status") == "pass"
                           and result.get("artifact_source") == "prebuilt"
                           and metadata.get("requested_python") == expected_python
-                          and actual_artifacts == expected_artifacts
+                          and actual_artifacts == expected_validation_artifacts
                           else "fail"
                       )
                   elif not result_path.is_file():
