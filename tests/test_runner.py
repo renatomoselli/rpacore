@@ -20,7 +20,13 @@ from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
-from rpacore.queue import QueueAttemptOutcome, QueueItem, QueueStatus, SqliteQueue
+from rpacore.queue import (
+    QueueAttemptOutcome,
+    QueueItem,
+    QueueLeaseLostError,
+    QueueStatus,
+    SqliteQueue,
+)
 import rpacore.runner as runner_module
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.skill import Skill
@@ -1427,6 +1433,88 @@ class TestRunnerManagedTransactionPersistence:
         assert stored is not None
         assert queue.bindings[0][1] == stored.transaction_id
 
+    def test_initial_persistence_and_binding_share_one_operation_lock(self, tmp_path) -> None:
+        class CountingLock:
+            def __init__(self) -> None:
+                self.acquisitions = 0
+
+            def __enter__(self) -> None:
+                self.acquisitions += 1
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                pass
+
+        queue = _RecordingSqliteQueue(
+            [_item("initial-operation-lock")],
+            str(tmp_path / "queue.db"),
+        )
+        item = queue.next_item("test-worker")
+        assert item is not None
+        operation_lock = CountingLock()
+
+        transaction, revision = runner_module._transaction_for_queue_item(
+            queue,
+            item,
+            lambda queue_item: Transaction(reference=queue_item.reference),
+            transaction_db_path=str(tmp_path / "transactions.db"),
+            retry_business_failures=False,
+            worker_id="test-worker",
+            log=logging.getLogger("test.runner.initial-operation-lock"),
+            summary=QueueRunSummary(),
+            operation_lock=operation_lock,
+        )
+
+        assert operation_lock.acquisitions == 1
+        assert transaction.id == item.transaction_id
+        assert revision == 1
+
+    def test_initial_bind_failure_cleanup_shares_operation_lock(self, tmp_path) -> None:
+        class CountingLock:
+            def __init__(self) -> None:
+                self.acquisitions = 0
+
+            def __enter__(self) -> None:
+                self.acquisitions += 1
+
+            def __exit__(self, exc_type, exc_value, traceback) -> None:
+                pass
+
+        class FailingBindQueue(_RecordingSqliteQueue):
+            def bind_transaction(
+                self,
+                item_id: str,
+                transaction_id: str,
+                *,
+                claimed_by: str,
+                claim_token: str,
+            ) -> None:
+                raise RuntimeError("lost claim")
+
+        transaction_db = str(tmp_path / "transactions.db")
+        queue = FailingBindQueue(
+            [_item("initial-cleanup-operation-lock")],
+            str(tmp_path / "queue.db"),
+        )
+        item = queue.next_item("test-worker")
+        assert item is not None
+        operation_lock = CountingLock()
+
+        with pytest.raises(runner_module._DurableTransactionBindingError, match="lost claim"):
+            runner_module._transaction_for_queue_item(
+                queue,
+                item,
+                lambda queue_item: Transaction(reference=queue_item.reference),
+                transaction_db_path=transaction_db,
+                retry_business_failures=False,
+                worker_id="test-worker",
+                log=logging.getLogger("test.runner.initial-cleanup-operation-lock"),
+                summary=QueueRunSummary(),
+                operation_lock=operation_lock,
+            )
+
+        assert operation_lock.acquisitions == 1
+        assert list_transactions(transaction_db) == []
+
     @pytest.mark.parametrize(
         ("case", "expected_error"),
         [
@@ -1547,6 +1635,73 @@ class TestRunnerManagedTransactionPersistence:
         assert list_transactions(db_path) == []
         assert errors
         assert "could not bind transaction" in str(errors[0])
+
+    def test_bind_lease_loss_cleans_up_and_stops_without_transition(self, tmp_path) -> None:
+        transaction_db = str(tmp_path / "transactions.db")
+        replacement_tokens: list[str] = []
+        after_items: list[tuple[Transaction | None, Exception | None]] = []
+
+        class ReclaimBeforeBindQueue(_RecordingSqliteQueue):
+            def bind_transaction(
+                self,
+                item_id: str,
+                transaction_id: str,
+                *,
+                claimed_by: str,
+                claim_token: str,
+            ) -> None:
+                conn = sqlite3.connect(self.db_path)
+                try:
+                    conn.execute(
+                        "UPDATE queue_items SET claimed_at = '2000-01-01T00:00:00+00:00' "
+                        "WHERE id = ?",
+                        (item_id,),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+                replacement = self.next_item("replacement-worker")
+                assert replacement is not None
+                replacement_tokens.append(replacement.claim_token)
+                super().bind_transaction(
+                    item_id,
+                    transaction_id,
+                    claimed_by=claimed_by,
+                    claim_token=claim_token,
+                )
+
+        item = _item("bind-lease-loss")
+        queue = ReclaimBeforeBindQueue(
+            [item],
+            str(tmp_path / "queue.db"),
+            max_retries=1,
+        )
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda queue_item: Transaction(
+                reference=queue_item.reference,
+                skills=[_SuccessSkill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=transaction_db,
+            after_item=lambda _item, transaction, error: after_items.append(
+                (transaction, error)
+            ),
+        )
+
+        stored = queue.get_item(item.id)
+        assert stored is not None
+        assert after_items == []
+        assert summary == QueueRunSummary(processed=1, failed=1, lease_lost=1)
+        assert stored.status is QueueStatus.IN_PROGRESS
+        assert stored.claimed_by == "replacement-worker"
+        assert stored.claim_token == replacement_tokens[0]
+        assert stored.transaction_id == ""
+        assert list_transactions(transaction_db) == []
 
     def test_bind_memory_error_propagates_after_initial_transaction_cleanup(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
@@ -2151,6 +2306,298 @@ class TestRunnerManagedTransactionPersistence:
 # ---------------------------------------------------------------------------
 
 class TestQueueLeaseHeartbeat:
+    @pytest.mark.parametrize(
+        ("skill_cls", "lost_transition"),
+        [
+            (_SuccessSkill, "complete"),
+            (_SystemFailSkill, "fail"),
+        ],
+    )
+    def test_final_transition_lease_loss_stops_without_claiming_next_item(
+        self,
+        caplog,
+        skill_cls: type[Skill],
+        lost_transition: str,
+    ) -> None:
+        first = _item(f"transition-lease-loss-{lost_transition}")
+        second = _item("unclaimed-after-transition-lease-loss")
+        transition_attempts: list[str] = []
+
+        class LeaseLostTransitionQueue(_FakeQueue):
+            def complete(
+                self,
+                item_id: str,
+                *,
+                claimed_by: str,
+                claim_token: str,
+            ) -> None:
+                if lost_transition == "complete":
+                    transition_attempts.append("complete")
+                    raise QueueLeaseLostError("claim lost during complete")
+                super().complete(
+                    item_id,
+                    claimed_by=claimed_by,
+                    claim_token=claim_token,
+                )
+
+            def fail(
+                self,
+                item_id: str,
+                *,
+                retry: bool = True,
+                claimed_by: str,
+                claim_token: str,
+            ) -> QueueAttemptOutcome:
+                if lost_transition == "fail":
+                    transition_attempts.append("fail")
+                    raise QueueLeaseLostError("claim lost during fail")
+                return super().fail(
+                    item_id,
+                    retry=retry,
+                    claimed_by=claimed_by,
+                    claim_token=claim_token,
+                )
+
+        queue = LeaseLostTransitionQueue([first, second])
+        after_item_calls: list[str] = []
+        logger = logging.getLogger("test.runner.transition-lease-loss")
+
+        with caplog.at_level(logging.ERROR, logger=logger.name):
+            summary = run_queue_loop(
+                queue=queue,
+                engine=Engine(),
+                build_transaction=lambda item: Transaction(
+                    reference=item.reference,
+                    skills=[skill_cls("step", 1)],
+                ),
+                config={},
+                credentials=_CREDS,
+                worker_id="worker",
+                logger=logger,
+                after_item=lambda item, tx, error: after_item_calls.append(item.id),
+            )
+
+        assert summary == QueueRunSummary(processed=1, failed=1, lease_lost=1)
+        assert after_item_calls == [first.id]
+        assert transition_attempts == [lost_transition]
+        assert queue.completed == []
+        assert queue.failed == []
+        assert [item.id for item in queue._items] == [second.id]
+        assert any(record.__dict__.get("event") == "queue_item_lease_lost" for record in caplog.records)
+
+    def test_heartbeat_waits_one_interval_before_first_renewal(self, monkeypatch) -> None:
+        monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 60.0)
+        item = _item("deferred-renewal")
+        item.claimed_by = "worker"
+        item.claim_token = "claim-token"
+        queue = _FakeQueue([])
+
+        heartbeat = runner_module._start_lease_heartbeat(
+            queue,
+            item,
+            worker_id="worker",
+            log=logging.getLogger("test.runner.heartbeat"),
+        )
+        runner_module._stop_lease_heartbeat(heartbeat)
+
+        assert queue.renewals == []
+
+    def test_heartbeat_renews_after_first_interval(self, monkeypatch) -> None:
+        renewal_completed = threading.Event()
+        monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 0.01)
+        item = _item("deferred-renewal")
+        item.claimed_by = "worker"
+        item.claim_token = "claim-token"
+
+        class RenewalQueue(_FakeQueue):
+            def renew_lease(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
+                super().renew_lease(
+                    item_id,
+                    claimed_by=claimed_by,
+                    claim_token=claim_token,
+                )
+                renewal_completed.set()
+
+        queue = RenewalQueue([])
+        heartbeat = runner_module._start_lease_heartbeat(
+            queue,
+            item,
+            worker_id="worker",
+            log=logging.getLogger("test.runner.heartbeat"),
+        )
+        assert renewal_completed.wait(timeout=1)
+        runner_module._stop_lease_heartbeat(heartbeat)
+
+        assert queue.renewals
+        assert queue.renewals[0] == (item.id, "worker")
+
+    def test_checkpoint_serializes_with_heartbeat_renewal(self) -> None:
+        checkpoint_entered = threading.Event()
+        release_checkpoint = threading.Event()
+        renewal_attempted = threading.Event()
+        renewal_completed = threading.Event()
+        heartbeat = runner_module._LeaseHeartbeat(
+            stop_event=threading.Event(),
+            thread=threading.Thread(target=lambda: None),
+        )
+
+        class _RenewQueue(_FakeQueue):
+            def renew_lease(self, item_id: str, *, claimed_by: str, claim_token: str) -> None:
+                renewal_completed.set()
+                super().renew_lease(
+                    item_id,
+                    claimed_by=claimed_by,
+                    claim_token=claim_token,
+                )
+
+        def checkpoint(transaction: Transaction) -> None:
+            checkpoint_entered.set()
+            assert release_checkpoint.wait(timeout=1)
+
+        checked_checkpoint = runner_module._lease_checked_checkpoint(heartbeat, checkpoint)
+        checkpoint_thread = threading.Thread(
+            target=lambda: checked_checkpoint(Transaction(reference="checkpoint")),
+        )
+        checkpoint_thread.start()
+        assert checkpoint_entered.wait(timeout=1)
+
+        errors: list[Exception | None] = []
+        queue = _RenewQueue([])
+
+        def renew() -> None:
+            renewal_attempted.set()
+            with heartbeat.operation_lock:
+                errors.append(
+                    runner_module._renew_lease_with_retries(
+                        queue,
+                        "claimed-item",
+                        claimed_by="worker",
+                        claim_token="claim-token",
+                        log=logging.getLogger("test.runner.heartbeat"),
+                        worker_id="worker",
+                    )
+                )
+
+        renewal_thread = threading.Thread(target=renew)
+        renewal_thread.start()
+        assert renewal_attempted.wait(timeout=1)
+        assert not renewal_completed.wait(timeout=0.1)
+
+        release_checkpoint.set()
+        checkpoint_thread.join(timeout=1)
+        renewal_thread.join(timeout=1)
+
+        assert not checkpoint_thread.is_alive()
+        assert not renewal_thread.is_alive()
+        assert errors == [None]
+        assert renewal_completed.is_set()
+
+    @pytest.mark.parametrize(
+        ("skill_cls", "expected_completed", "expected_failed"),
+        [
+            (_SuccessSkill, True, False),
+            (_SystemFailSkill, False, True),
+        ],
+    )
+    def test_final_transition_serializes_with_heartbeat_renewal(
+        self,
+        skill_cls: type[Skill],
+        expected_completed: bool,
+        expected_failed: bool,
+    ) -> None:
+        renewal_attempted = threading.Event()
+        renewal_completed = threading.Event()
+        renewal_threads: list[threading.Thread] = []
+        item = _item(f"final-transition-{skill_cls.__name__}")
+        item.claimed_by = "worker"
+        item.claim_token = "claim-token"
+        heartbeat = runner_module._LeaseHeartbeat(
+            stop_event=threading.Event(),
+            thread=threading.Thread(target=lambda: None),
+        )
+
+        class TransitionQueue(_FakeQueue):
+            def _start_blocked_renewal(self) -> None:
+                def renew() -> None:
+                    renewal_attempted.set()
+                    with heartbeat.operation_lock:
+                        runner_module._renew_lease_with_retries(
+                            self,
+                            item.id,
+                            claimed_by=item.claimed_by,
+                            claim_token=item.claim_token,
+                            log=logging.getLogger("test.runner.final-transition"),
+                            worker_id="worker",
+                        )
+                        renewal_completed.set()
+
+                renewal_thread = threading.Thread(target=renew)
+                renewal_threads.append(renewal_thread)
+                renewal_thread.start()
+                assert renewal_attempted.wait(timeout=1)
+                assert not renewal_completed.wait(timeout=0.1)
+
+            def complete(
+                self,
+                item_id: str,
+                *,
+                claimed_by: str,
+                claim_token: str,
+            ) -> None:
+                self._start_blocked_renewal()
+                super().complete(
+                    item_id,
+                    claimed_by=claimed_by,
+                    claim_token=claim_token,
+                )
+
+            def fail(
+                self,
+                item_id: str,
+                *,
+                retry: bool = True,
+                claimed_by: str,
+                claim_token: str,
+            ) -> QueueAttemptOutcome:
+                self._start_blocked_renewal()
+                return super().fail(
+                    item_id,
+                    retry=retry,
+                    claimed_by=claimed_by,
+                    claim_token=claim_token,
+                )
+
+        queue = TransitionQueue([])
+        summary = QueueRunSummary()
+
+        assert runner_module._run_claimed_item_with_context(
+            queue,
+            Engine(),
+            lambda queue_item: Transaction(
+                reference=queue_item.reference,
+                skills=[skill_cls("step", 1)],
+            ),
+            {},
+            _CREDS,
+            item,
+            worker_id="worker",
+            notifiers=[],
+            log=logging.getLogger("test.runner.final-transition"),
+            after_item=None,
+            retry_business_failures=False,
+            transaction_db_path=None,
+            shared_resources={},
+            summary=summary,
+            heartbeat=heartbeat,
+        )
+
+        assert len(renewal_threads) == 1
+        renewal_threads[0].join(timeout=1)
+        assert not renewal_threads[0].is_alive()
+        assert renewal_completed.is_set()
+        assert bool(queue.completed) is expected_completed
+        assert bool(queue.failed) is expected_failed
+
     @pytest.mark.parametrize(
         "fatal_source",
         ["engine", "report", "notifier", "after_item", "transition"],

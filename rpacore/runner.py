@@ -79,6 +79,7 @@ class _LeaseHeartbeat:
 
     stop_event: threading.Event
     thread: threading.Thread
+    operation_lock: threading.RLock = field(default_factory=threading.RLock)
     error: BaseException | None = None
 
     def raise_if_failed(self) -> None:
@@ -447,6 +448,7 @@ def _run_claimed_item_with_context(
             worker_id=worker_id,
             log=log,
             summary=summary,
+            operation_lock=heartbeat.operation_lock,
         )
         ctx = ProcessContext(
             transaction=transaction,
@@ -557,12 +559,18 @@ def _run_claimed_item_with_context(
         return False
 
     if originally_intended_complete:
-        transition_error = _complete_queue_item_with_retries(
-            queue,
-            item,
-            worker_id=worker_id,
-            log=log,
-        )
+        with heartbeat.operation_lock:
+            transition_error = _complete_queue_item_with_retries(
+                queue,
+                item,
+                worker_id=worker_id,
+                log=log,
+            )
+        if isinstance(transition_error, QueueLeaseLostError):
+            summary.failed += 1
+            summary.lease_lost += 1
+            _log_lease_lost(log, item, worker_id, transition_error)
+            return False
         if transition_error is not None:
             raise transition_error
         summary.completed += 1
@@ -588,13 +596,19 @@ def _run_claimed_item_with_context(
             or outcome_error is not None
             or not _transaction_has_only_business_failures(transaction)
         )
-    transition_outcome, transition_error = _fail_queue_item_with_retries(
-        queue,
-        item,
-        retry=retry,
-        worker_id=worker_id,
-        log=log,
-    )
+    with heartbeat.operation_lock:
+        transition_outcome, transition_error = _fail_queue_item_with_retries(
+            queue,
+            item,
+            retry=retry,
+            worker_id=worker_id,
+            log=log,
+        )
+    if isinstance(transition_error, QueueLeaseLostError):
+        summary.failed += 1
+        summary.lease_lost += 1
+        _log_lease_lost(log, item, worker_id, transition_error)
+        return False
     if transition_error is not None:
         raise transition_error
     summary.failed += 1
@@ -621,7 +635,9 @@ def _lease_checked_checkpoint(
 
     def checked_checkpoint(transaction: Transaction) -> None:
         heartbeat.raise_if_failed()
-        checkpoint(transaction)
+        with heartbeat.operation_lock:
+            heartbeat.raise_if_failed()
+            checkpoint(transaction)
         heartbeat.raise_if_failed()
 
     return checked_checkpoint
@@ -669,15 +685,18 @@ def _start_lease_heartbeat(
 
     def run() -> None:
         while not stop_event.is_set():
+            if stop_event.wait(_lease_renewal_interval(queue)):
+                return
             try:
-                error = _renew_lease_with_retries(
-                    queue,
-                    item.id,
-                    claimed_by=item.claimed_by,
-                    claim_token=item.claim_token,
-                    log=log,
-                    worker_id=worker_id,
-                )
+                with heartbeat.operation_lock:
+                    error = _renew_lease_with_retries(
+                        queue,
+                        item.id,
+                        claimed_by=item.claimed_by,
+                        claim_token=item.claim_token,
+                        log=log,
+                        worker_id=worker_id,
+                    )
             except _FATAL_SIGNALS as error:
                 heartbeat.error = error
                 return
@@ -688,8 +707,6 @@ def _start_lease_heartbeat(
                     heartbeat.error = _LeaseRenewalError(
                         f"Queue item {item.id!r} lease renewal failed: {error}"
                     )
-                return
-            if stop_event.wait(_lease_renewal_interval(queue)):
                 return
 
     heartbeat.thread = threading.Thread(
@@ -934,6 +951,7 @@ def _transaction_for_queue_item(
     worker_id: str,
     log: logging.Logger,
     summary: QueueRunSummary,
+    operation_lock: threading.RLock,
 ) -> tuple[Transaction, int]:
     if transaction_db_path is None:
         transaction = build_transaction(item)
@@ -970,87 +988,90 @@ def _transaction_for_queue_item(
     _seed_transaction_state_from_payload(transaction, item, worker_id=worker_id, log=log)
     transaction.validate_for_execution()
     _validate_initial_queue_transaction(transaction)
-    revision, error = _save_queue_transaction_with_retries(
-        transaction,
-        db_path=transaction_db_path,
-        queue_db_path=_require_sqlite_queue(queue).db_path,
-        item=item,
-        expected_revision=0,
-        log=log,
-        event="transaction_initial_persistence_retry",
-        queue_item_id=item.id,
-        worker_id=worker_id,
-        clock=_clock_for_queue(queue),
-    )
-    if error is not None:
-        if isinstance(error, TransactionFenceError):
-            raise error
-        summary.persistence_errors += 1
-        log.error(
-            "Initial transaction persistence failed",
-            extra={
-                "event": "transaction_initial_persistence_error",
-                "queue_item_id": item.id,
-                "queue_reference": item.reference,
-                "transaction_id": transaction.id,
-                "transaction_reference": transaction.reference,
-                "worker_id": worker_id,
-            },
-            exc_info=(type(error), error, error.__traceback__),
-        )
-        raise _CheckpointError(
-            error,
-            retry=not isinstance(error, (ExecutionValidationError, JsonStateError)),
-        ) from error
-    try:
-        error = _bind_transaction_with_retries(
-            queue,
-            item.id,
-            transaction.id,
-            claimed_by=item.claimed_by,
-            claim_token=item.claim_token,
+    with operation_lock:
+        revision, error = _save_queue_transaction_with_retries(
+            transaction,
+            db_path=transaction_db_path,
+            queue_db_path=_require_sqlite_queue(queue).db_path,
+            item=item,
+            expected_revision=0,
             log=log,
+            event="transaction_initial_persistence_retry",
+            queue_item_id=item.id,
             worker_id=worker_id,
+            clock=_clock_for_queue(queue),
         )
         if error is not None:
-            raise error
-    except BaseException as exc:
-        try:
-            cleanup_error: BaseException | None = _delete_transaction_with_retries(
-                transaction.id,
-                db_path=transaction_db_path,
-                log=log,
-                queue_item_id=item.id,
-                worker_id=worker_id,
-                clock=_clock_for_queue(queue),
-            )
-        except BaseException as raised_cleanup_error:
-            cleanup_error = raised_cleanup_error
-        if cleanup_error is not None:
+            if isinstance(error, TransactionFenceError):
+                raise error
             summary.persistence_errors += 1
             log.error(
-                "Initial transaction cleanup failed after queue binding error",
+                "Initial transaction persistence failed",
                 extra={
-                    "event": "transaction_initial_cleanup_error",
+                    "event": "transaction_initial_persistence_error",
                     "queue_item_id": item.id,
                     "queue_reference": item.reference,
                     "transaction_id": transaction.id,
                     "transaction_reference": transaction.reference,
                     "worker_id": worker_id,
                 },
-                exc_info=(type(cleanup_error), cleanup_error, cleanup_error.__traceback__),
+                exc_info=(type(error), error, error.__traceback__),
             )
-        if isinstance(exc, _FATAL_SIGNALS):
+            raise _CheckpointError(
+                error,
+                retry=not isinstance(error, (ExecutionValidationError, JsonStateError)),
+            ) from error
+        try:
+            error = _bind_transaction_with_retries(
+                queue,
+                item.id,
+                transaction.id,
+                claimed_by=item.claimed_by,
+                claim_token=item.claim_token,
+                log=log,
+                worker_id=worker_id,
+            )
+            if error is not None:
+                raise error
+        except BaseException as exc:
+            try:
+                cleanup_error: BaseException | None = _delete_transaction_with_retries(
+                    transaction.id,
+                    db_path=transaction_db_path,
+                    log=log,
+                    queue_item_id=item.id,
+                    worker_id=worker_id,
+                    clock=_clock_for_queue(queue),
+                )
+            except BaseException as raised_cleanup_error:
+                cleanup_error = raised_cleanup_error
             if cleanup_error is not None:
-                _add_cleanup_failure_note(exc, "initial transaction", cleanup_error)
-            raise
-        if isinstance(cleanup_error, _FATAL_SIGNALS):
-            raise cleanup_error
-        if not isinstance(exc, Exception):
-            raise
-        raise _DurableTransactionBindingError(
-            f"Queue item {item.id!r} could not bind transaction {transaction.id!r}: {exc}"
-        ) from exc
+                summary.persistence_errors += 1
+                log.error(
+                    "Initial transaction cleanup failed after queue binding error",
+                    extra={
+                        "event": "transaction_initial_cleanup_error",
+                        "queue_item_id": item.id,
+                        "queue_reference": item.reference,
+                        "transaction_id": transaction.id,
+                        "transaction_reference": transaction.reference,
+                        "worker_id": worker_id,
+                    },
+                    exc_info=(type(cleanup_error), cleanup_error, cleanup_error.__traceback__),
+                )
+            if isinstance(exc, _FATAL_SIGNALS):
+                if cleanup_error is not None:
+                    _add_cleanup_failure_note(exc, "initial transaction", cleanup_error)
+                raise
+            if isinstance(cleanup_error, _FATAL_SIGNALS):
+                raise cleanup_error
+            if isinstance(exc, QueueLeaseLostError):
+                raise
+            if not isinstance(exc, Exception):
+                raise
+            raise _DurableTransactionBindingError(
+                f"Queue item {item.id!r} could not bind transaction {transaction.id!r}: {exc}"
+            ) from exc
     item.transaction_id = transaction.id
     if revision is None:
         raise RuntimeError("Initial fenced transaction save returned no revision")
