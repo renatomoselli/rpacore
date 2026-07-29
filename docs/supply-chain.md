@@ -47,6 +47,10 @@ records those durable files; publication must use them without rebuilding.
 Validation is fail-fast and cleans up its generated working directories on
 failure, so preserve the terminal or CI log for diagnosis.
 
+The candidate result also records the embedded SQLite library, effective
+transaction and queue journal modes from disposable installed-wheel probes, and
+the exact `pip`, `build`, and Twine versions used by the gate.
+
 Inspect archive contents so generated examples, private notes, local caches,
 credentials, and review artifacts do not ship in the package. The wheel should
 contain the `rpacore` package, metadata, `LICENSE`, `NOTICE`, and the `rpacore`

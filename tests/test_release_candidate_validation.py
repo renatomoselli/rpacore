@@ -1402,6 +1402,7 @@ dev = ["pytest"]
         transaction_export_ndjson = '{"id": "12345678-1234-1234-1234-123456789abc"}\n'
         stdout_by_name = {
             "installed_import_smoke": '{"version": "0.1.0", "module_file": "venv/rpacore/__init__.py", "exports": []}',
+            "installed_environment_probe": '{"journal": {"policy": "rollback_delete", "queue": {"effective_mode": "delete"}, "transaction": {"effective_mode": "delete"}}, "python": "3.12", "sqlite": {"library_version": "3.45.1"}}',
             "framework_tests": "1 passed in 0.01s",
             "cli_transaction_list_json": transaction_list_json,
             "cli_transaction_show_json": transaction_show_json,
@@ -1484,15 +1485,20 @@ dev = ["pytest"]
                                         "pip": "pip 25",
                                     },
                                 ):
-                                    manifest = module.validate_release_candidate(
-                                        repo_root=repo_root,
-                                        examples_repo=examples_repo,
-                                        work_dir=work_dir,
-                                        output_dir=output_dir,
-                                        examples_pytest=["examples/demo/tests"],
-                                        example_cli_project="examples/demo",
-                                        example_cli_db="rpacore.db",
-                                    )
+                                    with patch.object(
+                                        module,
+                                        "_tool_versions",
+                                        return_value={"pip": "25", "build": "1", "twine": "6"},
+                                    ):
+                                        manifest = module.validate_release_candidate(
+                                            repo_root=repo_root,
+                                            examples_repo=examples_repo,
+                                            work_dir=work_dir,
+                                            output_dir=output_dir,
+                                            examples_pytest=["examples/demo/tests"],
+                                            example_cli_project="examples/demo",
+                                            example_cli_db="rpacore.db",
+                                        )
 
         assert commands == [
             "framework_tests",
@@ -1500,6 +1506,7 @@ dev = ["pytest"]
             "twine_check",
             "create_venv",
             "install_wheel",
+            "installed_environment_probe",
             "installed_import_smoke",
             "cli_version",
             "cli_init",
@@ -1520,7 +1527,8 @@ dev = ["pytest"]
             "install_pytest_for_examples",
             "example_pytest:examples/demo/tests",
         ]
-        assert manifest["commands"][10]["parsed"] == {"transaction_count": 1}
+        command_records = {command["name"]: command for command in manifest["commands"]}
+        assert command_records["cli_transaction_list_json"]["parsed"] == {"transaction_count": 1}
         assert manifest["pytest_totals"] == {"passed": 2}
         assert manifest["validation_index"]["G2-004"] == [
             "example_cli_transaction_list_json",
@@ -1532,7 +1540,11 @@ dev = ["pytest"]
             "example_pytest:examples/demo/tests"
         ]
         assert manifest["artifacts"][0]["contains_examples"] is False
-        assert manifest["schema_version"] == 2
+        assert manifest["schema_version"] == 3
+        assert manifest["environment"]["sqlite"]["library_version"] == "3.45.1"
+        assert manifest["environment"]["journal"]["queue"]["effective_mode"] == "delete"
+        assert manifest["tools"] == {"pip": "25", "build": "1", "twine": "6"}
+        assert command_records["installed_environment_probe"]["parsed"] == manifest["environment"]
         assert Path(manifest["artifacts"][0]["path"]).is_file()
         assert Path(manifest["artifacts"][0]["path"]).parent.parent.parent == output_dir
         assert manifest["dependency_inventory"]["runtime_dependencies"] == []

@@ -34,6 +34,8 @@ The release manifest should contain:
 - framework and examples commit IDs
 - tag name
 - Python and operating-system matrix results
+- embedded SQLite version, effective transaction/queue journal modes, and exact
+  build-tool versions used by the candidate gate
 - wheel and source distribution names, durable paths, sizes, and SHA-256 hashes
 - dependency inventory location
 - SBOM location, or a note that no SBOM was produced
@@ -80,6 +82,8 @@ Then verify:
 - source distribution install smoke test passes
 - generated project scaffold runs from the installed package
 - deterministic representative examples pass from the built wheel
+- installed-wheel SQLite probes confirm the required rollback (`delete`) journal
+  mode for disposable transaction and queue databases
 - repository settings match [Repository Settings](repository-settings.md)
 
 Prepare the release manifest and approval draft from the candidate result and

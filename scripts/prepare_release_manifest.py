@@ -24,7 +24,7 @@ from rpacore._validation import artifact_set_sha256 as _artifact_set_sha256
 MANIFEST_NAME = "release-manifest.json"
 SUMMARY_NAME = "release-approval.md"
 GIT_TIMEOUT_SECONDS = 30
-RELEASE_CANDIDATE_SCHEMA_VERSION = 2
+RELEASE_CANDIDATE_SCHEMA_VERSION = 3
 VALIDATION_STATUSES = frozenset({"pass", "fail"})
 EXPECTED_LICENSE = "Apache-2.0"
 LOGGER = logging.getLogger(__name__)
@@ -258,10 +258,28 @@ def _metadata_license(project: dict[str, Any]) -> str:
 def _release_environment(release_candidate: dict[str, Any]) -> dict[str, Any]:
     platform_info = release_candidate.get("platform")
     python_info = release_candidate.get("python")
+    environment_info = release_candidate.get("environment")
     if not isinstance(platform_info, dict):
         raise ManifestError("release-candidate validation results missing platform object")
     if not isinstance(python_info, dict):
         raise ManifestError("release-candidate validation results missing python object")
+    if not isinstance(environment_info, dict):
+        raise ManifestError("release-candidate validation results missing environment object")
+    sqlite_info = environment_info.get("sqlite")
+    journal_info = environment_info.get("journal")
+    if not isinstance(sqlite_info, dict):
+        raise ManifestError("release-candidate environment missing sqlite object")
+    if not isinstance(journal_info, dict):
+        raise ManifestError("release-candidate environment missing journal object")
+    transaction_journal = journal_info.get("transaction")
+    queue_journal = journal_info.get("queue")
+    if not isinstance(transaction_journal, dict) or not isinstance(queue_journal, dict):
+        raise ManifestError("release-candidate journal missing transaction or queue object")
+    if _require_string(journal_info, "policy", label="release-candidate journal") != "rollback_delete":
+        raise ManifestError("release-candidate journal policy must be rollback_delete")
+    for label, journal in (("transaction", transaction_journal), ("queue", queue_journal)):
+        if _require_string(journal, "effective_mode", label=f"release-candidate {label} journal") != "delete":
+            raise ManifestError(f"release-candidate {label} journal mode must be delete")
     machine = platform_info.get("machine")
     if not isinstance(machine, str) or not machine:
         machine = platform_info.get("architecture")
@@ -279,6 +297,28 @@ def _release_environment(release_candidate: dict[str, Any]) -> dict[str, Any]:
             "executable": python_info.get("executable"),
             "implementation": python_info.get("implementation"),
         },
+        "sqlite": {
+            "library_version": _require_string(
+                sqlite_info,
+                "library_version",
+                label="release-candidate sqlite",
+            )
+        },
+        "journal": {
+            "policy": journal_info["policy"],
+            "transaction": {"effective_mode": transaction_journal["effective_mode"]},
+            "queue": {"effective_mode": queue_journal["effective_mode"]},
+        },
+    }
+
+
+def _tool_versions(release_candidate: dict[str, Any]) -> dict[str, str]:
+    tools = release_candidate.get("tools")
+    if not isinstance(tools, dict):
+        raise ManifestError("release-candidate validation results missing tools object")
+    return {
+        name: _require_string(tools, name, label="release-candidate tools")
+        for name in ("pip", "build", "twine")
     }
 
 
@@ -387,7 +427,7 @@ def prepare_release_manifest(
     }
     generated_at = _utc_now().isoformat()
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": generated_at,
         "decision": {
             "status": _status_from_validation_results(
@@ -416,6 +456,7 @@ def prepare_release_manifest(
             artifact_root=release_candidate_validation_results.parent / "artifacts",
         ),
         "environment": _release_environment(release_candidate),
+        "tools": _tool_versions(release_candidate),
         "dependency_inventory": _dependency_inventory(release_candidate),
         "sbom": sbom,
         "documentation_verification": {

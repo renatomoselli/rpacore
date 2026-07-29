@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Callable
 import fnmatch
 import hashlib
+import importlib.metadata
 import json
 import logging
 import os
@@ -683,6 +684,58 @@ def _python_version_info(python: Path) -> dict[str, str]:
     }
 
 
+def _tool_versions() -> dict[str, str]:
+    return {
+        package: importlib.metadata.version(package)
+        for package in ("pip", "build", "twine")
+    }
+
+
+def _installed_environment_probe_code(probe_root: Path) -> str:
+    return f"""
+import json
+import sqlite3
+import sys
+import tempfile
+from pathlib import Path
+
+from rpacore import SqliteQueue, Transaction, save_transaction
+
+probe_root = Path({str(probe_root)!r})
+probe_root.mkdir(parents=True, exist_ok=True)
+with tempfile.TemporaryDirectory(dir=probe_root) as temporary:
+    root = Path(temporary)
+    transaction_db = root / "transaction.db"
+    queue_db = root / "queue.db"
+    save_transaction(Transaction("release-candidate-journal-probe"), str(transaction_db))
+    SqliteQueue({{"db_path": str(queue_db)}})
+
+    def journal_mode(path):
+        connection = sqlite3.connect(path)
+        try:
+            return str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        finally:
+            connection.close()
+
+    transaction_mode = journal_mode(transaction_db)
+    queue_mode = journal_mode(queue_db)
+    if transaction_mode != "delete" or queue_mode != "delete":
+        raise RuntimeError(
+            "release-candidate journal probe requires delete mode, got "
+            f"transaction={{transaction_mode!r}}, queue={{queue_mode!r}}"
+        )
+    print(json.dumps({{
+        "python": sys.version,
+        "sqlite": {{"library_version": sqlite3.sqlite_version}},
+        "journal": {{
+            "policy": "rollback_delete",
+            "transaction": {{"effective_mode": transaction_mode}},
+            "queue": {{"effective_mode": queue_mode}},
+        }},
+    }}, sort_keys=True))
+"""
+
+
 def _command_record(command_record: CommandRecord) -> dict[str, Any]:
     record = asdict(command_record)
     record.pop("raw_stdout", None)
@@ -932,6 +985,17 @@ def validate_release_candidate(
         commands.append(_run("install_wheel", [str(python), "-m", "pip", "install", str(wheel)], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
         commands.append(
             _run(
+                "installed_environment_probe",
+                [str(python), "-c", _installed_environment_probe_code(outside_dir / "environment-probe")],
+                cwd=outside_dir,
+                allowed_roots=allowed_run_roots,
+                env=env,
+            )
+        )
+        environment_evidence = _parse_json_output(commands[-1])
+        commands[-1].parsed = environment_evidence
+        commands.append(
+            _run(
                 "installed_import_smoke",
                 [
                     str(python),
@@ -1039,7 +1103,7 @@ def validate_release_candidate(
         )
 
         manifest = {
-            "schema_version": 2,
+            "schema_version": 3,
             "generated_at": _utc_now().isoformat(),
             "finding_ids": list(VALIDATION_FINDINGS),
             "platform": {
@@ -1049,6 +1113,8 @@ def validate_release_candidate(
                 "architecture": platform.architecture()[0],
             },
             "python": _python_version_info(Path(sys.executable)),
+            "environment": environment_evidence,
+            "tools": _tool_versions(),
             "repositories": [asdict(repo) for repo in repos],
             "artifacts": artifacts,
             "dependency_inventory": dependency_inventory,

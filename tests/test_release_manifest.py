@@ -157,7 +157,7 @@ def _write_validation_results(tmp_path: Path) -> tuple[Path, Path]:
     release_candidate.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "generated_at": "2026-07-03T00:00:00+00:00",
                 "platform": {
                     "system": "Windows",
@@ -170,6 +170,15 @@ def _write_validation_results(tmp_path: Path) -> tuple[Path, Path]:
                     "version": "3.11.0",
                     "implementation": "CPython",
                 },
+                "environment": {
+                    "sqlite": {"library_version": "3.45.1"},
+                    "journal": {
+                        "policy": "rollback_delete",
+                        "transaction": {"effective_mode": "delete"},
+                        "queue": {"effective_mode": "delete"},
+                    },
+                },
+                "tools": {"pip": "25", "build": "1", "twine": "6"},
                 "result": {"status": "pass"},
                 "artifacts": [
                     {
@@ -260,7 +269,7 @@ def test_prepare_release_manifest_writes_manifest_and_approval_draft(tmp_path: P
     )
 
     assert manifest["decision"]["status"] == "approved"
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert manifest["repositories"]["framework"]["commit"] == framework_commit
     assert manifest["repositories"]["examples"]["commit"] == examples_commit
     assert "path" not in manifest["repositories"]["framework"]
@@ -268,6 +277,8 @@ def test_prepare_release_manifest_writes_manifest_and_approval_draft(tmp_path: P
     assert manifest["environment"]["platform"]["system"] == "Windows"
     assert manifest["documentation_verification"]["status"] == "passed"
     assert manifest["sbom"]["status"] == "not_produced"
+    assert manifest["environment"]["sqlite"]["library_version"] == "3.45.1"
+    assert manifest["tools"] == {"pip": "25", "build": "1", "twine": "6"}
     assert manifest["release"] == {"version": "0.1.0", "tag": "v0.1.0"}
     assert Path(manifest["artifacts"][0]["path"]).parent.parent == tmp_path / "artifacts"
     assert manifest["expected_pypi_metadata"]["license"] == "Apache-2.0"
@@ -323,7 +334,7 @@ def test_prepare_release_manifest_rejects_missing_artifacts(tmp_path: Path) -> N
     _git_init(examples_repo)
     release_candidate = tmp_path / "release-candidate-validation-results.json"
     release_candidate.write_text(
-            json.dumps({"schema_version": 2, "result": {"status": "pass"}, "artifacts": []}),
+            json.dumps({"schema_version": 3, "result": {"status": "pass"}, "artifacts": []}),
         encoding="utf-8",
     )
     examples_wheel = tmp_path / "examples-wheel-validation.json"
@@ -838,7 +849,7 @@ def test_artifact_summary_rejects_a_symlinked_artifact_root(tmp_path: Path) -> N
 def test_release_candidate_schema_version_is_required() -> None:
     script = _load_script()
 
-    with pytest.raises(script.ManifestError, match="schema_version 2"):
+    with pytest.raises(script.ManifestError, match="schema_version 3"):
         script._require_schema_version({})
 
 
@@ -858,6 +869,32 @@ def test_prepare_release_manifest_rejects_missing_environment_subkeys(tmp_path: 
     release_candidate.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(script.ManifestError, match="release-candidate platform missing system"):
+        script.prepare_release_manifest(
+            **_manifest_args(
+                repo_root=repo_root,
+                examples_repo=examples_repo,
+                release_candidate=release_candidate,
+                examples_wheel=examples_wheel,
+                output_dir=tmp_path / "out",
+            )
+        )
+
+
+def test_prepare_release_manifest_rejects_missing_environment(tmp_path: Path) -> None:
+    script = _load_script()
+    repo_root = tmp_path / "rpacore"
+    examples_repo = tmp_path / "rpacore-examples"
+    repo_root.mkdir()
+    examples_repo.mkdir()
+    _write_pyproject(repo_root)
+    _git_init(repo_root)
+    _git_init(examples_repo)
+    release_candidate, examples_wheel = _write_validation_results(tmp_path)
+    payload = json.loads(release_candidate.read_text(encoding="utf-8"))
+    del payload["environment"]
+    release_candidate.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(script.ManifestError, match="missing environment object"):
         script.prepare_release_manifest(
             **_manifest_args(
                 repo_root=repo_root,
@@ -933,6 +970,14 @@ def test_release_environment_uses_architecture_when_machine_is_blank() -> None:
                 "architecture": "64bit",
             },
             "python": {"version": "3.11.9"},
+            "environment": {
+                "sqlite": {"library_version": "3.45.1"},
+                "journal": {
+                    "policy": "rollback_delete",
+                    "transaction": {"effective_mode": "delete"},
+                    "queue": {"effective_mode": "delete"},
+                },
+            },
         }
     )
 
@@ -949,6 +994,14 @@ def test_release_environment_uses_unknown_when_machine_and_architecture_are_blan
                 "release": "10",
             },
             "python": {"version": "3.11.9"},
+            "environment": {
+                "sqlite": {"library_version": "3.45.1"},
+                "journal": {
+                    "policy": "rollback_delete",
+                    "transaction": {"effective_mode": "delete"},
+                    "queue": {"effective_mode": "delete"},
+                },
+            },
         }
     )
 
