@@ -137,7 +137,7 @@ jobs:
           --expected-lock publish-lock/candidate-publish-lock.json
 
       - name: Install metadata checker
-        run: python -m pip install --disable-pip-version-check "twine==5.1.1"
+        run: python -m pip install --disable-pip-version-check "twine==6.2.0" "packaging==24.2"
 
       - name: Check immutable distribution metadata
         run: python -m twine check candidate-artifacts/rpacore-*

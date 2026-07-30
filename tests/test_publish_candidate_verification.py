@@ -246,4 +246,5 @@ def test_publish_workflow_downloads_and_rechecks_only_the_named_candidate() -> N
     assert "--expected-version 0.2.0" in workflow
     assert "--expected-lock publish-lock/candidate-publish-lock.json" in workflow
     assert "python -m build" not in workflow
-    assert 'python -m pip install --disable-pip-version-check "twine==5.1.1"' in workflow
+    assert 'python -m pip install --disable-pip-version-check "twine==6.2.0" "packaging==24.2"' in workflow
+    assert 'twine==5.1.1' not in workflow
