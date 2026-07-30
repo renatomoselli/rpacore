@@ -216,6 +216,8 @@ def test_release_candidate_workflow_runs_identity_and_examples_preflights() -> N
         "Build one artifact set"
     )
     assert "verify_release_candidate_identity.py" in workflow
+    assert "Verify public release documentation" in workflow
+    assert workflow.index("Verify public release documentation") < workflow.index("Build one artifact set")
     assert (
         "--output validation-artifacts/release-candidate/preflight/release-identity-preflight.json"
         in workflow
@@ -237,6 +239,11 @@ def test_release_candidate_workflow_runs_identity_and_examples_preflights() -> N
     assert workflow.count("${{ inputs.examples_commit }}") == 1
     assert "needs.freeze-artifacts.outputs.core_commit" in workflow
     assert "needs.freeze-artifacts.outputs.examples_commit" in workflow
+    assert 'DISPATCHED_MAIN_COMMIT: ${{ github.sha }}' in workflow
+    assert 'test "${{ github.ref }}" = "refs/heads/main"' in workflow
+    assert 'test "$EXPECTED_COMMIT" = "$DISPATCHED_MAIN_COMMIT"' in workflow
+    assert "-r requirements/release.txt" in workflow
+    assert "python -m pip install build twine" not in workflow
 
 
 def test_release_candidate_python_matrix_matches_package_and_support_policy() -> None:
@@ -260,3 +267,20 @@ def test_release_candidate_python_matrix_matches_package_and_support_policy() ->
     assert workflow_versions == {"3.11", "3.12", "3.13", "3.14"}
     assert classifier_versions == workflow_versions
     assert supported_versions == workflow_versions
+
+
+def test_release_toolchain_is_pinned_and_shared_by_ci_candidate_and_publisher() -> None:
+    root = Path(__file__).resolve().parents[1]
+    requirements = (root / "requirements" / "release.txt").read_text(encoding="utf-8").splitlines()
+    ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    candidate = (root / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8")
+    publisher = (root / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+
+    assert [line for line in requirements if line and not line.startswith("#")] == [
+        "build==1.5.0",
+        "twine==6.2.0",
+        "packaging==24.2",
+    ]
+    for workflow in (ci, candidate, publisher):
+        assert "-r requirements/release.txt" in workflow
+        assert "pip install build twine" not in workflow

@@ -12,6 +12,7 @@ from scripts.verify_docs import (
     _check_links,
     _is_dev_url,
     _public_exports,
+    _release_series,
     _run_check,
     _slug,
     main,
@@ -19,7 +20,7 @@ from scripts.verify_docs import (
 )
 
 
-def _write_minimal_repo(root: Path) -> None:
+def _write_minimal_repo(root: Path, *, release_metadata: bool = False) -> None:
     (root / "docs").mkdir()
     (root / "rpacore").mkdir()
     (root / "README.md").write_text("# Root\n\n[Docs](docs/README.md)\n", encoding="utf-8")
@@ -33,6 +34,13 @@ def _write_minimal_repo(root: Path) -> None:
     (root / "docs" / "README.md").write_text("# Docs\n\n[API](api.md)\n", encoding="utf-8")
     (root / "docs" / "api.md").write_text("# API Reference\n\n`Engine`\n", encoding="utf-8")
     (root / "rpacore" / "__init__.py").write_text('__all__ = ["Engine"]\n', encoding="utf-8")
+    if release_metadata:
+        (root / "README.md").write_text("# Root\n\nRPA Core v0.2.0\n\n[Docs](docs/README.md)\n", encoding="utf-8")
+        (root / "CHANGELOG.md").write_text("# Changelog\n\n## v0.2.0 - Unreleased\n", encoding="utf-8")
+        (root / "SECURITY.md").write_text("# Security\n\n| Version | Supported |\n| --- | --- |\n| 0.2.x | Yes |\n", encoding="utf-8")
+        (root / "SUPPORT.md").write_text("# Support\n\nThe latest public `0.2.x` release line.\n", encoding="utf-8")
+        (root / "docs" / "README.md").write_text("# Docs\n\nUse this documentation map as the public `0.2.x` entry point.\n\n[API](api.md)\n", encoding="utf-8")
+        (root / "pyproject.toml").write_text('[project]\nversion = "0.2.0"\n', encoding="utf-8")
 
 
 def test_verify_docs_main_returns_zero_for_current_repo() -> None:
@@ -50,6 +58,105 @@ def test_verify_docs_reports_non_literal_public_exports(tmp_path: Path) -> None:
     assert [finding.message for finding in findings] == [
         "__all__ must be a list or tuple literal for docs verification"
     ]
+
+
+def test_verify_docs_reports_release_line_mismatch(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "SUPPORT.md").write_text("# Support\n\nThe latest public `0.1.x` release line.\n", encoding="utf-8")
+
+    findings = verify_docs(tmp_path)
+
+    assert [(finding.path, finding.message) for finding in findings] == [
+        (Path("SUPPORT.md"), "release version documentation must contain: `0.2.x`")
+    ]
+
+
+def test_verify_docs_reports_top_changelog_version_mismatch(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## v0.1.1 - Unreleased\n", encoding="utf-8")
+
+    findings = verify_docs(tmp_path)
+
+    assert [(finding.path, finding.message) for finding in findings] == [
+        (Path("CHANGELOG.md"), "top changelog release version must be 0.2.0, got 0.1.1")
+    ]
+
+
+def test_verify_docs_reports_expected_release_version_mismatch(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+
+    findings = verify_docs(tmp_path, expected_release_version="0.2.1")
+
+    assert [(finding.path, finding.message) for finding in findings] == [
+        (
+            Path("pyproject.toml"),
+            "project.version must match expected release version 0.2.1, got 0.2.0",
+        )
+    ]
+
+
+def test_verify_docs_requires_pyproject_for_expected_release_version(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path)
+
+    findings = verify_docs(tmp_path, expected_release_version="0.2.0")
+
+    assert [(finding.path, finding.message) for finding in findings] == [
+        (
+            Path("<docs-verifier>"),
+            "release-version check could not complete; fix the doc input or verifier: "
+            "ValueError: cannot read pyproject.toml for expected release-version verification",
+        )
+    ]
+
+
+def test_verify_docs_reports_missing_project_version_as_release_metadata_error(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'rpacore'\n", encoding="utf-8")
+
+    findings = verify_docs(tmp_path)
+
+    assert [(finding.path, finding.message) for finding in findings] == [
+        (
+            Path("<docs-verifier>"),
+            "release-version check could not complete; fix the doc input or verifier: "
+            "ValueError: pyproject.toml project.version must be a non-empty string",
+        )
+    ]
+
+
+def test_verify_docs_reports_malformed_release_metadata_as_release_metadata_error(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "pyproject.toml").write_text("[project\nversion = '0.2.0'\n", encoding="utf-8")
+
+    findings = verify_docs(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0].path == Path("<docs-verifier>")
+    assert "release-version check could not complete" in findings[0].message
+    assert "TOMLDecodeError" in findings[0].message
+
+
+def test_verify_docs_reports_missing_required_release_document_at_its_path(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "SUPPORT.md").unlink()
+
+    findings = verify_docs(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0].path == Path("SUPPORT.md")
+    assert findings[0].message.startswith("cannot read release version documentation:")
+
+
+def test_release_series_requires_numeric_patch_and_accepts_pep440_suffixes() -> None:
+    for version in ("0.2.0", "0.2.0a1", "0.2.0rc1", "0.2.0.post1", "0.2.0+local", "0.2.0.1"):
+        assert _release_series(version) == "0.2.x"
+
+    try:
+        _release_series("0.2.a1")
+    except ValueError as exc:
+        assert "major.minor.patch" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
 
 
 def test_verify_docs_accepts_tuple_public_exports(tmp_path: Path) -> None:

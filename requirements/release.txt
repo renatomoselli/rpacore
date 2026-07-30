@@ -1,0 +1,5 @@
+# CI package, release-candidate, and publisher verification toolchain. Keep all
+# three workflows on these exact versions so metadata parsing is proven early.
+build==1.5.0
+twine==6.2.0
+packaging==24.2

@@ -99,6 +99,7 @@ def _remote_opener(*, tag_exists: bool = False, release_exists: bool = False):
 
 def _verify(module, root: Path, *, opener, **kwargs):
     lock = json.loads((root / "artifact-lock.json").read_text(encoding="utf-8"))
+    publish_confirm = kwargs.pop("publish_confirm", "publish rpacore 0.2.0 candidate 123 to pypi")
     return module.verify_publish_candidate(
         candidate_dir=root,
         expected_run_id="123",
@@ -107,7 +108,7 @@ def _verify(module, root: Path, *, opener, **kwargs):
         expected_examples_commit="b" * 40,
         expected_wheel_sha256=lock["artifacts"][0]["sha256"],
         expected_sdist_sha256=lock["artifacts"][1]["sha256"],
-        publish_confirm="publish rpacore candidate 123 to pypi",
+        publish_confirm=publish_confirm,
         repository="renatomoselli/rpacore",
         github_token="token",
         aggregate_evidence=root.parent / "release-candidate-aggregate.json",
@@ -138,7 +139,7 @@ def test_verify_publish_candidate_canonicalizes_requested_commit_inputs(tmp_path
         expected_examples_commit=("b" * 40).upper(),
         expected_wheel_sha256=artifact_lock["artifacts"][0]["sha256"],
         expected_sdist_sha256=artifact_lock["artifacts"][1]["sha256"],
-        publish_confirm="publish rpacore candidate 123 to pypi",
+        publish_confirm="publish rpacore 0.2.0 candidate 123 to pypi",
         repository="renatomoselli/rpacore",
         github_token="token",
         aggregate_evidence=root.parent / "release-candidate-aggregate.json",
@@ -162,14 +163,69 @@ def test_verify_publish_candidate_rejects_noncanonical_lock_commit(tmp_path: Pat
         raise AssertionError("Expected CandidateVerificationError")
 
 
+def test_verify_publish_candidate_rejects_unknown_schema_v1_artifact_field(tmp_path: Path) -> None:
+    module = _load_script()
+    root, _ = _candidate(tmp_path)
+    artifact_lock_path = root / "artifact-lock.json"
+    artifact_lock = json.loads(artifact_lock_path.read_text(encoding="utf-8"))
+    artifact_lock["artifacts"][0]["checksum_algorithm"] = "sha256"
+    artifact_lock_path.write_text(json.dumps(artifact_lock), encoding="utf-8")
+    (root.parent / "release-candidate-aggregate.json").write_text(
+        json.dumps({"gate_status": "pass", "artifact_lock": artifact_lock}), encoding="utf-8"
+    )
+
+    try:
+        _verify(module, root, opener=_remote_opener())
+    except module.CandidateVerificationError as exc:
+        assert "exactly the schema v1 artifact fields" in str(exc)
+    else:
+        raise AssertionError("Expected CandidateVerificationError")
+
+
+def test_verify_publish_candidate_rejects_missing_schema_v1_artifact_field(tmp_path: Path) -> None:
+    module = _load_script()
+    root, _ = _candidate(tmp_path)
+    artifact_lock_path = root / "artifact-lock.json"
+    artifact_lock = json.loads(artifact_lock_path.read_text(encoding="utf-8"))
+    del artifact_lock["artifacts"][0]["size_bytes"]
+    artifact_lock_path.write_text(json.dumps(artifact_lock), encoding="utf-8")
+    (root.parent / "release-candidate-aggregate.json").write_text(
+        json.dumps({"gate_status": "pass", "artifact_lock": artifact_lock}), encoding="utf-8"
+    )
+
+    try:
+        _verify(module, root, opener=_remote_opener())
+    except module.CandidateVerificationError as exc:
+        assert "exactly the schema v1 artifact fields" in str(exc)
+    else:
+        raise AssertionError("Expected CandidateVerificationError")
+
+
 def test_verify_publish_candidate_rejects_wrong_run(tmp_path: Path) -> None:
     module = _load_script()
     root, _ = _candidate(tmp_path)
 
     try:
-        module.verify_publish_candidate(candidate_dir=root, expected_run_id="124", expected_version="0.2.0", expected_core_commit="a" * 40, expected_examples_commit="b" * 40, expected_wheel_sha256=hashlib.sha256((root / "rpacore-0.2.0-py3-none-any.whl").read_bytes()).hexdigest(), expected_sdist_sha256=hashlib.sha256((root / "rpacore-0.2.0.tar.gz").read_bytes()).hexdigest(), publish_confirm="publish rpacore candidate 124 to pypi", repository="renatomoselli/rpacore", github_token="token", aggregate_evidence=root.parent / "release-candidate-aggregate.json", opener=_remote_opener())
+        module.verify_publish_candidate(candidate_dir=root, expected_run_id="124", expected_version="0.2.0", expected_core_commit="a" * 40, expected_examples_commit="b" * 40, expected_wheel_sha256=hashlib.sha256((root / "rpacore-0.2.0-py3-none-any.whl").read_bytes()).hexdigest(), expected_sdist_sha256=hashlib.sha256((root / "rpacore-0.2.0.tar.gz").read_bytes()).hexdigest(), publish_confirm="publish rpacore 0.2.0 candidate 124 to pypi", repository="renatomoselli/rpacore", github_token="token", aggregate_evidence=root.parent / "release-candidate-aggregate.json", opener=_remote_opener())
     except module.CandidateVerificationError as exc:
         assert "run ID differs" in str(exc)
+    else:
+        raise AssertionError("Expected CandidateVerificationError")
+
+
+def test_verify_publish_candidate_rejects_confirmation_without_release_version(tmp_path: Path) -> None:
+    module = _load_script()
+    root, _ = _candidate(tmp_path)
+
+    try:
+        _verify(
+            module,
+            root,
+            opener=_remote_opener(),
+            publish_confirm="publish rpacore candidate 123 to pypi",
+        )
+    except module.CandidateVerificationError as exc:
+        assert "expected publish confirmation" in str(exc)
     else:
         raise AssertionError("Expected CandidateVerificationError")
 
@@ -243,8 +299,19 @@ def test_publish_workflow_downloads_and_rechecks_only_the_named_candidate() -> N
 
     assert "candidate_run_id" in workflow
     assert "run-id: ${{ inputs.candidate_run_id }}" in workflow
-    assert "--expected-version 0.2.0" in workflow
+    assert "release_version" in workflow
+    assert '--expected-version "${{ inputs.release_version }}"' in workflow
+    assert "--expected-version 0.2.0" not in workflow
     assert "--expected-lock publish-lock/candidate-publish-lock.json" in workflow
     assert "python -m build" not in workflow
-    assert 'python -m pip install --disable-pip-version-check "twine==6.2.0" "packaging==24.2"' in workflow
+    assert "-r requirements/release.txt" in workflow
+    assert "RELEASE_VERSION: ${{ inputs.release_version }}" in workflow
+    assert "rpacore-${RELEASE_VERSION}-py3-none-any.whl" in workflow
+    assert "rpacore-${RELEASE_VERSION}.tar.gz" in workflow
+    assert workflow.count("Verify frozen main source") == 2
+    assert workflow.count('test "$GITHUB_REF" = "refs/heads/main"') == 2
+    assert workflow.count('test "$GITHUB_SHA" = "$EXPECTED_COMMIT"') == 2
+    assert workflow.count('test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"') == 2
+    assert workflow.count("--expected-release-version \"$EXPECTED_RELEASE_VERSION\"") == 2
+    assert workflow.count("python scripts/verify_docs.py") == 2
     assert 'twine==5.1.1' not in workflow

@@ -63,13 +63,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: pip install build twine
+        run: python -m pip install --disable-pip-version-check -r requirements/release.txt
 
       - name: Build wheel and sdist
         run: python -m build
 
       - name: Check dist metadata
-        run: twine check dist/*
+        run: python -m twine check dist/*
 
       - name: Verify examples/ absent from wheel
         run: |

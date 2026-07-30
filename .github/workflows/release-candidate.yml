@@ -44,7 +44,10 @@ jobs:
       - name: Verify frozen framework commit
         env:
           EXPECTED_COMMIT: ${{ steps.normalize-inputs.outputs.core_commit }}
+          DISPATCHED_MAIN_COMMIT: ${{ github.sha }}
         run: |
+          test "${{ github.ref }}" = "refs/heads/main"
+          test "$EXPECTED_COMMIT" = "$DISPATCHED_MAIN_COMMIT"
           test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
 
       - uses: actions/setup-python@v6
@@ -63,9 +66,12 @@ jobs:
           --github-token "$GITHUB_TOKEN"
           --output validation-artifacts/release-candidate/preflight/release-identity-preflight.json
 
+      - name: Verify public release documentation
+        run: python scripts/verify_docs.py --repo-root .
+
       - name: Build one artifact set
         run: |
-          python -m pip install build twine
+          python -m pip install --disable-pip-version-check -r requirements/release.txt
           python -m build --outdir artifact-set
           python -m twine check artifact-set/*
 

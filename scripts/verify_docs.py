@@ -5,6 +5,7 @@ import ast
 import ipaddress
 import re
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -34,6 +35,8 @@ MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 API_TABLE_ROW = re.compile(r"^\|\s*(?P<cell>.+?)\s*\|")
 API_SYMBOL = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
+CHANGELOG_RELEASE_HEADING = re.compile(r"^## v(?P<version>[^\s]+) - ")
+RELEASE_SERIES = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?=\d)")
 DEV_HOSTS = {"localhost"}
 
 
@@ -254,6 +257,81 @@ def _check_api_reference(root: Path, docs: list[Path]) -> list[Finding]:
     return findings
 
 
+def _release_version(root: Path) -> str:
+    metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    project = metadata.get("project")
+    version = project.get("version") if isinstance(project, dict) else None
+    if not isinstance(version, str) or not version:
+        raise ValueError("pyproject.toml project.version must be a non-empty string")
+    return version
+
+
+def _release_series(version: str) -> str:
+    match = RELEASE_SERIES.match(version)
+    if match is None:
+        raise ValueError(f"project.version must begin with major.minor.patch: {version!r}")
+    return f"{match.group('major')}.{match.group('minor')}.x"
+
+
+def _check_release_version_docs(
+    root: Path, *, expected_release_version: str | None = None
+) -> list[Finding]:
+    if not (root / "pyproject.toml").is_file():
+        if expected_release_version is not None:
+            raise ValueError("cannot read pyproject.toml for expected release-version verification")
+        return []
+    version = _release_version(root)
+    series = _release_series(version)
+    findings: list[Finding] = []
+    if expected_release_version is not None and version != expected_release_version:
+        findings.append(
+            Finding(
+                Path("pyproject.toml"),
+                1,
+                f"project.version must match expected release version {expected_release_version}, got {version}",
+            )
+        )
+    expected_text = {
+        Path("README.md"): f"v{version}",
+        Path("SUPPORT.md"): f"`{series}`",
+        Path("SECURITY.md"): f"| {series} | Yes |",
+        Path("docs/README.md"): f"public `{series}` entry point",
+    }
+    for relative, expected in expected_text.items():
+        try:
+            text = (root / relative).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            findings.append(
+                Finding(relative, 1, f"cannot read release version documentation: {exc}")
+            )
+            continue
+        if expected not in text:
+            findings.append(
+                Finding(relative, 1, f"release version documentation must contain: {expected}"))
+
+    changelog = root / "CHANGELOG.md"
+    try:
+        changelog_lines = changelog.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        findings.append(Finding(Path("CHANGELOG.md"), 1, f"cannot read release changelog: {exc}"))
+        return findings
+    for line_number, line in enumerate(changelog_lines, start=1):
+        match = CHANGELOG_RELEASE_HEADING.match(line)
+        if match is not None:
+            if match.group("version") != version:
+                findings.append(
+                    Finding(
+                        Path("CHANGELOG.md"),
+                        line_number,
+                        f"top changelog release version must be {version}, got {match.group('version')}",
+                    )
+                )
+            break
+    else:
+        findings.append(Finding(Path("CHANGELOG.md"), 1, "missing top-level release heading"))
+    return findings
+
+
 def _run_check(name: str, check) -> list[Finding]:
     try:
         return check()
@@ -267,24 +345,38 @@ def _run_check(name: str, check) -> list[Finding]:
         ]
 
 
-def verify_docs(root: Path) -> list[Finding]:
+def verify_docs(root: Path, *, expected_release_version: str | None = None) -> list[Finding]:
     docs = _markdown_files(root)
     findings: list[Finding] = []
     findings.extend(_run_check("links", lambda: _check_links(root, docs)))
     findings.extend(_run_check("forbidden-patterns", lambda: _check_forbidden_patterns(root, docs)))
     findings.extend(_run_check("api-reference", lambda: _check_api_reference(root, docs)))
+    findings.extend(
+        _run_check(
+            "release-version",
+            lambda: _check_release_version_docs(
+                root, expected_release_version=expected_release_version
+            ),
+        )
+    )
     return sorted(findings, key=lambda finding: (str(finding.path), finding.line, finding.message))
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Verify public Markdown docs.")
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--expected-release-version",
+        help="require pyproject.toml project.version to match this release version",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    findings = verify_docs(args.repo_root.resolve())
+    findings = verify_docs(
+        args.repo_root.resolve(), expected_release_version=args.expected_release_version
+    )
     for finding in findings:
         print(f"{finding.path}:{finding.line}: {finding.message}", file=sys.stderr)
     return 1 if findings else 0

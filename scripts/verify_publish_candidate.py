@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 LOCK_NAME = "artifact-lock.json"
 LOCK_SCHEMA_VERSION = 1
+LOCK_V1_ARTIFACT_KEYS = ("name", "kind", "sha256", "size_bytes")
 RELEASE_CANDIDATE_WORKFLOW = "Release candidate"
 RELEASE_CANDIDATE_WORKFLOW_PATH = ".github/workflows/release-candidate.yml"
 
@@ -72,7 +73,7 @@ def _sha256(path: Path) -> str:
 
 def _artifact_set_sha256(artifacts: list[dict[str, Any]]) -> str:
     canonical = [
-        {key: artifact[key] for key in ("name", "kind", "sha256", "size_bytes")}
+        {key: artifact[key] for key in LOCK_V1_ARTIFACT_KEYS}
         for artifact in sorted(artifacts, key=lambda artifact: str(artifact["name"]))
     ]
     return hashlib.sha256(json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
@@ -168,6 +169,10 @@ def _candidate_lock(
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             raise CandidateVerificationError("candidate artifact entry must be a JSON object")
+        if set(artifact) != set(LOCK_V1_ARTIFACT_KEYS):
+            raise CandidateVerificationError(
+                "candidate artifact entry must contain exactly the schema v1 artifact fields"
+            )
         name = _require_string(artifact, "name", label="candidate artifact")
         if Path(name).name != name or name not in expected_names:
             raise CandidateVerificationError(f"candidate artifact has an unexpected name: {name}")
@@ -340,7 +345,7 @@ def verify_publish_candidate(
 ) -> dict[str, Any]:
     if not expected_run_id.isdecimal() or int(expected_run_id) < 1:
         raise CandidateVerificationError("candidate run ID must be a positive decimal workflow run ID")
-    expected_confirmation = f"publish rpacore candidate {expected_run_id} to pypi"
+    expected_confirmation = f"publish rpacore {expected_version} candidate {expected_run_id} to pypi"
     if publish_confirm != expected_confirmation:
         raise CandidateVerificationError(f"expected publish confirmation: {expected_confirmation}")
     expected_core_commit = _canonical_requested_commit(

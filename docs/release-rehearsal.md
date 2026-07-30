@@ -23,8 +23,10 @@ Record these before building artifacts:
 - resolved security, supply-chain, governance, and support decisions
 
 Both repositories should be clean before rehearsal starts. Any framework code,
-schema, API, CLI, storage, export, or generated-project behavior change after
-this point invalidates the candidate and requires a new rehearsal.
+schema, API, CLI, storage, export, generated-project behavior, public
+documentation, package metadata, release workflow/script/tool constraint, or
+examples dependency-metadata change after this point invalidates the candidate
+and requires a new rehearsal.
 
 The rehearsal uses the isolated PEP 517 build environment declared by the
 project. It may need access to the declared build requirements; it does not
@@ -79,25 +81,35 @@ build for the same rehearsal. A standalone examples rerun must use
 
 For the full supported Windows and Linux matrix, use the manually dispatched
 **Release candidate** workflow with the exact framework and examples commits.
-Before artifact construction, that workflow verifies the frozen package version,
-unreleased changelog entry, and release tag against GitHub and PyPI; an existing
-tag, release, package version, or unavailable registry check stops the candidate.
-It also verifies the frozen examples revision's dependency metadata. The workflow
-then builds one locked wheel/source-distribution set, and every platform cell
-validates that downloaded set rather than rebuilding it. The examples job proves
-the installed RPA Core package both before and after example requirements are
-installed; requirements must not replace the supplied candidate wheel. Preserve
-the uploaded artifact set, preflight, eight platform-cell, examples-wheel, and
-aggregate evidence artifacts with the release decision. The aggregate result is
-the definitive matrix verdict and fails closed when any required evidence is
-missing. Workflow-artifact retention is not permanent release storage.
+Before artifact construction, that workflow verifies the frozen commit is the
+dispatched `main` head, verifies the frozen package version, unreleased changelog
+entry, and release tag against GitHub and PyPI, and runs the documentation
+verifier; an existing tag, release, package version, unavailable registry, or
+documentation mismatch stops the candidate. It also verifies the frozen examples
+revision's dependency metadata. CI package, candidate, and publish workflows
+install the same pinned release-toolchain requirements; candidate and publish
+run Twine against the exact candidate artifacts. The workflow then builds one
+locked wheel/source-distribution set, and every platform cell validates that
+downloaded set rather than rebuilding it. The examples job proves the installed
+RPA Core package both before and after example requirements are installed;
+requirements must not replace the supplied candidate wheel. Preserve the
+uploaded artifact set, preflight, eight platform-cell, examples-wheel, and
+aggregate evidence artifacts with the release decision.
+The aggregate result is the definitive matrix verdict and fails closed when any
+required evidence is missing. Workflow-artifact retention is not permanent
+release storage.
 
 The publish workflow requires the candidate run to be a successful manually
-dispatched Release candidate run on
-`main` for the locked framework commit. It rejects an existing GitHub tag or
-release for the target version and an existing PyPI version; an unavailable or
-unexpected remote response is a blocker. The protected PyPI job re-downloads
-and re-hashes the same named candidate set immediately before upload.
+dispatched Release candidate run on `main` for the locked framework commit. Its
+required release-version input must match the candidate lock; it derives the
+artifact filenames from that version and includes both version and run ID in the
+typed confirmation. It rejects an existing GitHub tag or release for the target
+version and an existing PyPI version; an unavailable or unexpected remote
+response is a blocker. Both publish jobs verify that the workflow dispatch and
+fresh `main` checkout still equal the frozen framework commit, rerun public
+documentation and package-version checks, and re-download and re-hash the same
+named candidate set. The protected PyPI job repeats those checks after approval,
+immediately before upload.
 
 Then verify:
 
@@ -108,6 +120,9 @@ Then verify:
   migration guidance, links, and support routes; correct any discrepancy before
   artifact construction. Private planning, validation evidence, and agent-harness
   Markdown are not public release surfaces
+- complete one claim-by-claim semantic review of behavioral public prose; the
+  automated version-line checks cannot determine whether a behavior claim is
+  still true
 - wheel and source distribution pass metadata checks
 - wheel and source distribution contain `LICENSE` and `NOTICE`
 - wheel and source distribution do not contain examples, private notes, review
