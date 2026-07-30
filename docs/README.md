@@ -11,8 +11,8 @@ Use this documentation map as the public `0.2.x` entry point:
 - [Durability and Storage](durability.md): transaction persistence, checkpoint
   timing, schema versions, migrations, recovery, and queue persistence.
 - [API Reference](api.md): supported top-level imports from `rpacore`.
-- [CLI Reference](cli.md): `rpacore init`, `run`, `version`, and transaction
-  inspection/export commands.
+- [CLI Reference](cli.md): `rpacore init`, `run`, `doctor`, `version`, and
+  transaction inspection/export commands.
 - [Configuration Reference](config.md): `rpacore.toml`, `config.toml`, path
   resolution, queue settings, notifications, and credentials.
 - [Project Manifest Reference](project-manifest.md): `rpacore.toml` schema and
@@ -33,8 +33,6 @@ Use this documentation map as the public `0.2.x` entry point:
 - [Testing Skills](testing.md): plain pytest patterns for user-authored skills.
 - [Public Submodule Policy](public-submodules.md): supported import boundary for
   the `0.2.x` release line.
-- [Pre-v0.1.0 API Migration](pre-v0.1.0-api-migration.md): removed pre-release
-  names and their final public replacements.
 - [Runtime Dependency Decisions](runtime-dependencies.md): runtime, optional,
   and development dependency posture.
 - [Non-Goals](non-goals.md): deferred features and rejected runtime behavior.

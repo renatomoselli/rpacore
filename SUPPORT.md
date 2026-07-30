@@ -5,15 +5,14 @@ public APIs, packaging, generated project scaffolds, and public documentation.
 
 ## Supported Versions
 
-The latest public `0.1.x` release line receives compatibility and security fixes
-as maintainer availability permits. Private pre-release commits and local forks
-are not supported release lines.
+The latest public `0.2.x` release line receives compatibility and security fixes
+as maintainer availability permits. Local forks are not supported release lines.
 
 ## Supported Platforms
 
-RPA Core supports Python 3.11, 3.12, and 3.13. The core framework is designed for
-Windows and POSIX environments, with Windows validation required before release.
-Some user automations or optional dependencies may be platform-specific.
+RPA Core supports standard CPython 3.11, 3.12, 3.13, and 3.14 on Windows and
+Ubuntu Linux. Some user automations or optional dependencies may be
+platform-specific.
 
 ## Where To Ask
 
@@ -32,17 +31,15 @@ libraries may be redirected when they are outside the framework boundary.
 
 ## Compatibility Policy
 
-Before v1.0, compatibility is still conservative: documented v0.1 public APIs,
+Before v1.0, compatibility is still conservative: documented public APIs,
 storage schemas, export formats, and CLI behavior should not break without a
 documented correctness, security, or release-blocking reason. Additive changes
 should include tests and public documentation.
 
-RPA Core uses semantic-versioned releases beginning with v0.1.0:
-
 - patch releases should preserve documented public APIs, CLI behavior, storage
   schemas, export formats, and generated-project persistence patterns
 - minor releases may add documented APIs or behavior, but should avoid breaking
-  existing v0.1 users without a recorded migration reason
+  existing users without a documented migration reason
 - breaking changes before v1.0 require a changelog entry, public migration
   guidance, and focused validation results
 

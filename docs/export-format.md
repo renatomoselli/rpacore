@@ -14,7 +14,7 @@ JSON export writes one envelope:
 ```json
 {
   "export_format_version": 1,
-  "framework_version": "0.1.0",
+  "framework_version": "0.2.0",
   "exported_at": "2026-01-01T00:00:00+00:00",
   "transactions": []
 }
@@ -34,15 +34,14 @@ framework-owned fields to an existing export version.
 
 ## Iteration Consistency
 
-Export snapshots matching transaction identifiers in `created_at DESC, id ASC`
-order before loading the first record. Transactions inserted after iteration
-starts are excluded. Updates to a selected transaction are visible when that
-record is loaded. A selected transaction deleted by concurrent cleanup before
-its load is omitted. The identifier snapshot releases its SQLite inspection
-connection before output generation, so slow output or partial consumption
-does not block concurrent transaction checkpoints. Export has no transaction-
-list limit; identifier snapshot memory scales with the number of selected
-transactions.
+Export selects records through normalized-UTC cursor pages in `created_at DESC,
+id ASC` order. It keeps one page of summaries at a time and releases the page
+query before loading records, so slow output or partial consumption does not
+hold a SQLite read lock against concurrent checkpoints. Inserts before the
+current cursor do not appear later; inserts after it can appear in a later page.
+Updates to a selected transaction are visible when that record is loaded. A
+selected transaction deleted by concurrent cleanup before its load is omitted.
+Export has no transaction-list limit.
 
 ## NDJSON
 

@@ -17,6 +17,9 @@ Record these before building artifacts:
 - release approver
 - changelog entry
 - documentation commit
+- reconciliation of every tracked reader-facing Markdown document: `README.md`,
+  `CHANGELOG.md`, `docs/`, and root policy/community documents; check release
+  wording, installation and migration guidance, public links, and support routes
 - resolved security, supply-chain, governance, and support decisions
 
 Both repositories should be clean before rehearsal starts. Any framework code,
@@ -89,8 +92,8 @@ aggregate evidence artifacts with the release decision. The aggregate result is
 the definitive matrix verdict and fails closed when any required evidence is
 missing. Workflow-artifact retention is not permanent release storage.
 
-Before trusted publishing is enabled, the publish workflow also requires the
-candidate run to be a successful manually dispatched Release candidate run on
+The publish workflow requires the candidate run to be a successful manually
+dispatched Release candidate run on
 `main` for the locked framework commit. It rejects an existing GitHub tag or
 release for the target version and an existing PyPI version; an unavailable or
 unexpected remote response is a blocker. The protected PyPI job re-downloads
@@ -100,6 +103,11 @@ Then verify:
 
 - required CI jobs are green
 - documentation verification passed
+- every frozen reader-facing Markdown document agrees with the candidate's
+  version/release line, public API and compatibility posture, installation and
+  migration guidance, links, and support routes; correct any discrepancy before
+  artifact construction. Private planning, validation evidence, and agent-harness
+  Markdown are not public release surfaces
 - wheel and source distribution pass metadata checks
 - wheel and source distribution contain `LICENSE` and `NOTICE`
 - wheel and source distribution do not contain examples, private notes, review

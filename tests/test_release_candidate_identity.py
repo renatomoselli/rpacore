@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
+import tomllib
 import urllib.error
 from pathlib import Path
 from unittest.mock import patch
@@ -235,3 +237,26 @@ def test_release_candidate_workflow_runs_identity_and_examples_preflights() -> N
     assert workflow.count("${{ inputs.examples_commit }}") == 1
     assert "needs.freeze-artifacts.outputs.core_commit" in workflow
     assert "needs.freeze-artifacts.outputs.examples_commit" in workflow
+
+
+def test_release_candidate_python_matrix_matches_package_and_support_policy() -> None:
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github" / "workflows" / "release-candidate.yml").read_text(encoding="utf-8")
+    matrix = re.search(r"python-version:\s*\[([^]]+)\]", workflow)
+    assert matrix is not None
+    workflow_versions = set(re.findall(r'"(3\.\d+)"', matrix.group(1)))
+
+    metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    classifiers = metadata["project"]["classifiers"]
+    classifier_versions = {
+        classifier.removeprefix("Programming Language :: Python :: ")
+        for classifier in classifiers
+        if classifier.startswith("Programming Language :: Python :: 3.")
+    }
+
+    support = (root / "SUPPORT.md").read_text(encoding="utf-8")
+    supported_versions = set(re.findall(r"3\.\d+", support.split("## Where To Ask", 1)[0]))
+
+    assert workflow_versions == {"3.11", "3.12", "3.13", "3.14"}
+    assert classifier_versions == workflow_versions
+    assert supported_versions == workflow_versions

@@ -51,7 +51,7 @@ pip install rpacore
 ```
 
 For complete documentation, start at [docs/README.md](docs/README.md). See
-[CHANGELOG.md](CHANGELOG.md) for the v0.1.0 compatibility baseline. For
+[CHANGELOG.md](CHANGELOG.md) for v0.2.0 release notes and compatibility changes. For
 maintainer validation and release scripts, see [scripts/](scripts/); these
 scripts are intentionally separate from the runtime package.
 
@@ -153,13 +153,15 @@ JSON to stdout with diagnostics only on stderr. Transaction inspection JSON uses
 Transaction export writes portable machine-readable records for all persisted
 transactions. JSON export uses an envelope with `export_format_version = 1`,
 `framework_version`, `exported_at`, and `transactions`. NDJSON export writes one
-record per line with `export_format_version = 1` on each record. Export freezes
-the ordered set of matching transaction identifiers when iteration starts and
-releases the inspection connection before loading records, so a slow export
-does not block concurrent checkpoints. A selected transaction deleted by
-concurrent cleanup before it is loaded is omitted from the export. Unlike
-`transaction list`, export has no 100-record cap; identifier memory therefore
-scales with the number of persisted transactions selected for export.
+record per line with `export_format_version = 1` on each record. Export selects
+records through normalized-UTC cursor pages in `created_at DESC, id ASC` order.
+It keeps one page of summaries at a time and releases the page query before
+loading records, so slow output or partial consumption does not hold a SQLite
+read lock against concurrent checkpoints. Inserts before the current cursor do
+not appear later; inserts after it can appear in a later page. Updates to a
+selected transaction are visible when that record is loaded, while a selected
+transaction deleted by concurrent cleanup before its load is omitted. Unlike
+`transaction list`, export has no 100-record cap.
 
 Machine-readable transaction records include user-supplied state, metadata,
 skill arguments, exception messages, and artifact metadata. These fields can
@@ -363,10 +365,10 @@ Configure I/O timeouts in the library that performs the work, such as the HTTP,
 SMTP, browser, database, or desktop automation client used by a skill. If an
 automation needs a hard deadline with termination, run it behind a separate
 worker process boundary and record the outcome back into RPA
-Core. RPA Core v0.1.0 intentionally rejects Pebble or similar process-timeout
+Core. RPA Core intentionally rejects Pebble or similar process-timeout
 dependencies because process termination cannot make arbitrary external side
 effects reversible. See [Runtime Dependency Decisions](docs/runtime-dependencies.md)
-for the v0.1.0 decisions on process-timeout libraries, Pydantic, Tenacity, and
+for the current decisions on process-timeout libraries, Pydantic, Tenacity, and
 AnyIO.
 
 ## Optional Dependencies
@@ -409,21 +411,22 @@ For vulnerability reporting and local security posture, see
 
 ## Local-First Design
 
-RPA Core v0.1.0 is local-first:
+RPA Core v0.2.0 is local-first:
 
 - projects remain normal Python repos
 - runs persist locally
 - logs, reports, queues, transactions, and artifacts stay readable
 
-Remote orchestration and distributed worker protocols are outside v0.1.0; see
+Remote orchestration and distributed worker protocols are outside v0.2.0; see
 [docs/non-goals.md](docs/non-goals.md) for current non-goals.
 
-## Compatibility Baseline
+## Compatibility
 
-`v0.1.0` is the first supported public compatibility baseline. Breaking changes
-made before that release are tracked for maintainers in
-[docs/pre-v0.1.0-api-migration.md](docs/pre-v0.1.0-api-migration.md), not hidden
-behind compatibility aliases.
+RPA Core's documented public APIs, CLI behavior, storage schemas, export
+formats, and generated-project persistence patterns are compatibility
+boundaries. A breaking change requires a correctness, security, or
+release-blocking reason, a documented migration path, and focused validation.
+See [CHANGELOG.md](CHANGELOG.md) for released user-facing changes.
 
 ## License
 

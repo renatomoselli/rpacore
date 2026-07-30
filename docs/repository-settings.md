@@ -1,9 +1,9 @@
 # Repository Settings
 
-This page records the public repository settings expected before RPA Core
-v0.1.0 is published. GitHub settings are external state, so release rehearsal
-must verify them against the live repositories rather than assuming the files in
-this repository applied them.
+This page records the public repository settings expected for RPA Core releases.
+GitHub settings are external state, so release rehearsal must verify them
+against the live repositories rather than assuming the files in this repository
+applied them.
 
 ## Framework Repository
 
@@ -83,7 +83,7 @@ does not have an independent security process for framework-level findings.
 
 ## Branch Protection
 
-Protect the default branch before public launch:
+Protect the default branch for public releases:
 
 - require pull requests before merging
 - require the branch to be up to date before merging

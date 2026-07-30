@@ -11,8 +11,8 @@ Security fixes target the latest public release line.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | Yes |
-| earlier private/pre-release builds | No |
+| 0.2.x | Yes |
+| earlier release lines | No |
 
 ## Reporting a Vulnerability
 
