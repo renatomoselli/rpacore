@@ -124,6 +124,44 @@ def test_verify_publish_candidate_accepts_exact_completed_candidate(tmp_path: Pa
     assert _verify(module, root, opener=_remote_opener()) == lock
 
 
+def test_verify_publish_candidate_canonicalizes_requested_commit_inputs(tmp_path: Path) -> None:
+    module = _load_script()
+    root, lock = _candidate(tmp_path)
+    lock.pop("_aggregate")
+    artifact_lock = json.loads((root / "artifact-lock.json").read_text(encoding="utf-8"))
+
+    assert module.verify_publish_candidate(
+        candidate_dir=root,
+        expected_run_id="123",
+        expected_version="0.2.0",
+        expected_core_commit=("a" * 40).upper(),
+        expected_examples_commit=("b" * 40).upper(),
+        expected_wheel_sha256=artifact_lock["artifacts"][0]["sha256"],
+        expected_sdist_sha256=artifact_lock["artifacts"][1]["sha256"],
+        publish_confirm="publish rpacore candidate 123 to pypi",
+        repository="renatomoselli/rpacore",
+        github_token="token",
+        aggregate_evidence=root.parent / "release-candidate-aggregate.json",
+        opener=_remote_opener(),
+    ) == lock
+
+
+def test_verify_publish_candidate_rejects_noncanonical_lock_commit(tmp_path: Path) -> None:
+    module = _load_script()
+    root, _ = _candidate(tmp_path)
+    artifact_lock_path = root / "artifact-lock.json"
+    artifact_lock = json.loads(artifact_lock_path.read_text(encoding="utf-8"))
+    artifact_lock["source"]["core_commit"] = ("a" * 40).upper()
+    artifact_lock_path.write_text(json.dumps(artifact_lock), encoding="utf-8")
+
+    try:
+        _verify(module, root, opener=_remote_opener())
+    except module.CandidateVerificationError as exc:
+        assert "candidate core_commit must be a full lowercase git commit" in str(exc)
+    else:
+        raise AssertionError("Expected CandidateVerificationError")
+
+
 def test_verify_publish_candidate_rejects_wrong_run(tmp_path: Path) -> None:
     module = _load_script()
     root, _ = _candidate(tmp_path)

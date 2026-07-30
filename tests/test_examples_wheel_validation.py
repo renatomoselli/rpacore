@@ -753,6 +753,111 @@ class TestExamplesWheelValidationScript:
         assert command_names[-2:] == ["pytest", "run_main"]
         assert all(command.skipped for command in result.commands[-2:])
 
+    def test_post_requirements_identity_failure_skips_example_execution(self, tmp_path: Path) -> None:
+        script = _load_script()
+        examples_repo = tmp_path / "rpacore-examples"
+        example_dir = examples_repo / "examples" / "json_event_log_processor"
+        venv_path = example_dir / ".venv"
+        python = script._venv_python(venv_path)
+        example_dir.mkdir(parents=True, exist_ok=True)
+        (example_dir / "requirements.txt").write_text("rpacore>=0.1.1\n", encoding="utf-8")
+        (example_dir / "tests").mkdir()
+        (example_dir / "tests" / "test_example.py").write_text("def test_ok(): pass", encoding="utf-8")
+
+        def fake_run(name, command, *, cwd, env=None, timeout_seconds, allowed_roots=(), expected_exit_codes=None):
+            if name == "create_venv":
+                python.parent.mkdir(parents=True)
+                python.write_text("", encoding="utf-8")
+            return script.CommandRecord(
+                name=name,
+                command=[str(part) for part in command],
+                cwd=str(cwd),
+                exit_code=1 if name == "candidate_wheel_identity:after_requirements" else 0,
+                duration_seconds=0.1,
+                stdout="",
+                stderr="candidate replaced" if name == "candidate_wheel_identity:after_requirements" else "",
+            )
+
+        with patch.object(script, "_run", side_effect=fake_run):
+            result = script._validate_example(
+                example_dir,
+                examples_repo=examples_repo,
+                wheel=tmp_path / "rpacore.whl",
+                venv_path=venv_path,
+                recreate_venv=True,
+                run_main="deterministic",
+                install_playwright_browsers=False,
+                timeout_seconds=300,
+            )
+
+        command_names = [command.name for command in result.commands]
+        assert result.status == "fail"
+        assert "candidate_wheel_identity:before_requirements" in command_names
+        assert "candidate_wheel_identity:after_requirements" in command_names
+        assert command_names[-2:] == ["pytest", "run_main"]
+        assert all(command.skipped for command in result.commands[-2:])
+        assert not venv_path.exists()
+
+    def test_before_requirements_identity_failure_skips_example_execution(self, tmp_path: Path) -> None:
+        script = _load_script()
+        examples_repo = tmp_path / "rpacore-examples"
+        example_dir = examples_repo / "examples" / "json_event_log_processor"
+        venv_path = example_dir / ".venv"
+        python = script._venv_python(venv_path)
+        example_dir.mkdir(parents=True, exist_ok=True)
+        (example_dir / "requirements.txt").write_text("rpacore>=0.1.1\n", encoding="utf-8")
+        (example_dir / "tests").mkdir()
+        (example_dir / "tests" / "test_example.py").write_text("def test_ok(): pass", encoding="utf-8")
+
+        def fake_run(name, command, *, cwd, env=None, timeout_seconds, allowed_roots=(), expected_exit_codes=None):
+            if name == "create_venv":
+                python.parent.mkdir(parents=True)
+                python.write_text("", encoding="utf-8")
+            return script.CommandRecord(
+                name=name,
+                command=[str(part) for part in command],
+                cwd=str(cwd),
+                exit_code=1 if name == "candidate_wheel_identity:before_requirements" else 0,
+                duration_seconds=0.1,
+                stdout="",
+                stderr="candidate missing" if name == "candidate_wheel_identity:before_requirements" else "",
+            )
+
+        with patch.object(script, "_run", side_effect=fake_run):
+            result = script._validate_example(
+                example_dir,
+                examples_repo=examples_repo,
+                wheel=tmp_path / "rpacore.whl",
+                venv_path=venv_path,
+                recreate_venv=True,
+                run_main="deterministic",
+                install_playwright_browsers=False,
+                timeout_seconds=300,
+            )
+
+        command_names = [command.name for command in result.commands]
+        assert result.status == "fail"
+        assert command_names[-4:] == [
+            "candidate_wheel_identity:before_requirements",
+            "candidate_wheel_identity:after_requirements",
+            "pytest",
+            "run_main",
+        ]
+        assert all(command.skipped for command in result.commands[-3:])
+        assert not venv_path.exists()
+
+    def test_candidate_identity_command_checks_version_and_wheel_hash(self, tmp_path: Path) -> None:
+        script = _load_script()
+
+        command = script._candidate_wheel_identity_command(
+            tmp_path / "python.exe", tmp_path / "rpacore-0.2.0-py3-none-any.whl"
+        )
+
+        assert command[:2] == [str(tmp_path / "python.exe"), "-c"]
+        assert "direct_url.json" in command[2]
+        assert "installed_version" in command[2]
+        assert "installed_sha256" in command[2]
+
     def test_playwright_failure_keeps_installed_import_record(self, tmp_path: Path) -> None:
         script = _load_script()
         examples_repo = tmp_path / "rpacore-examples"

@@ -56,6 +56,12 @@ def _require_commit(value: str, *, label: str) -> None:
         raise CandidateVerificationError(f"{label} must be a full lowercase git commit")
 
 
+def _canonical_requested_commit(value: str, *, label: str) -> str:
+    if len(value) != 40 or any(character not in "0123456789abcdefABCDEF" for character in value):
+        raise CandidateVerificationError(f"{label} must be a full git commit")
+    return value.lower()
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
@@ -337,8 +343,12 @@ def verify_publish_candidate(
     expected_confirmation = f"publish rpacore candidate {expected_run_id} to pypi"
     if publish_confirm != expected_confirmation:
         raise CandidateVerificationError(f"expected publish confirmation: {expected_confirmation}")
-    _require_commit(expected_core_commit, label="requested core_commit")
-    _require_commit(expected_examples_commit, label="requested examples_commit")
+    expected_core_commit = _canonical_requested_commit(
+        expected_core_commit, label="requested core_commit"
+    )
+    expected_examples_commit = _canonical_requested_commit(
+        expected_examples_commit, label="requested examples_commit"
+    )
     _require_sha(expected_wheel_sha256, label="requested wheel SHA-256")
     _require_sha(expected_sdist_sha256, label="requested source distribution SHA-256")
     lock = _candidate_lock(

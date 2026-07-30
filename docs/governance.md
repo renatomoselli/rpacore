@@ -45,6 +45,9 @@ Before merging a release-impacting change, reviewers should check:
 - runtime dependency changes have a dependency decision
 - `rpacore-examples` either receives a matching update or the change records why
   no example update is required
+- examples dependency declarations and duplicated package metadata identify the
+  compatible RPA Core release line and are checked from the frozen examples
+  revision before release-candidate execution
 
 ## Required Checks
 
@@ -64,6 +67,12 @@ Local release rehearsal may run stricter checks than CI. Publication still uses
 the frozen prebuilt artifacts and the release validation results; do not rebuild
 artifacts during upload. See [Release Rehearsal](release-rehearsal.md) for the
 manifest and approval/rejection decision shape.
+
+The release-candidate workflow checks the package version, changelog identity,
+GitHub tag/release, and PyPI version before artifact construction. It also
+rechecks that example requirements leave the supplied candidate wheel installed
+before executing examples. Publication repeats the remote identity and exact-byte
+checks immediately before upload.
 
 ## Repository Hygiene
 

@@ -76,11 +76,17 @@ build for the same rehearsal. A standalone examples rerun must use
 
 For the full supported Windows and Linux matrix, use the manually dispatched
 **Release candidate** workflow with the exact framework and examples commits.
-It builds one locked wheel/source-distribution set, and every platform cell
-validates that downloaded set rather than rebuilding it. Preserve the uploaded
-artifact set, eight platform-cell evidence artifacts, examples-wheel evidence,
-and aggregate evidence with the release decision. The aggregate result is the
-definitive matrix verdict and fails closed when any required evidence is
+Before artifact construction, that workflow verifies the frozen package version,
+unreleased changelog entry, and release tag against GitHub and PyPI; an existing
+tag, release, package version, or unavailable registry check stops the candidate.
+It also verifies the frozen examples revision's dependency metadata. The workflow
+then builds one locked wheel/source-distribution set, and every platform cell
+validates that downloaded set rather than rebuilding it. The examples job proves
+the installed RPA Core package both before and after example requirements are
+installed; requirements must not replace the supplied candidate wheel. Preserve
+the uploaded artifact set, preflight, eight platform-cell, examples-wheel, and
+aggregate evidence artifacts with the release decision. The aggregate result is
+the definitive matrix verdict and fails closed when any required evidence is
 missing. Workflow-artifact retention is not permanent release storage.
 
 Before trusted publishing is enabled, the publish workflow also requires the

@@ -464,6 +464,70 @@ def _pip_install_requirements(
             break
 
 
+def _candidate_wheel_identity_command(python: Path, wheel: Path) -> list[str]:
+    """Return a command that proves the installed package is the supplied wheel."""
+
+    verification = f"""
+import hashlib
+import importlib.metadata
+import json
+from email.parser import BytesParser
+from email.policy import default
+from pathlib import Path
+import zipfile
+
+wheel_path = Path({str(wheel)!r})
+wheel_hash = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+with zipfile.ZipFile(wheel_path) as archive:
+    metadata_names = [name for name in archive.namelist() if name.endswith('.dist-info/METADATA')]
+    if len(metadata_names) != 1:
+        raise SystemExit('candidate wheel must contain exactly one METADATA file')
+    metadata = BytesParser(policy=default).parsebytes(archive.read(metadata_names[0]))
+expected_name = metadata.get('Name')
+expected_version = metadata.get('Version')
+distribution = importlib.metadata.distribution('rpacore')
+direct_url_text = distribution.read_text('direct_url.json')
+direct_url = json.loads(direct_url_text) if direct_url_text else {{}}
+actual = {{
+    'expected_name': expected_name,
+    'expected_version': expected_version,
+    'expected_sha256': wheel_hash,
+    'installed_name': distribution.metadata.get('Name'),
+    'installed_version': distribution.version,
+    'installed_sha256': direct_url.get('archive_info', {{}}).get('hash'),
+}}
+print(json.dumps(actual, sort_keys=True))
+if (
+    actual['expected_name'] != 'rpacore'
+    or actual['installed_name'] != expected_name
+    or actual['installed_version'] != expected_version
+    or actual['installed_sha256'] != f"sha256={{wheel_hash}}"
+):
+    raise SystemExit('installed rpacore does not match the supplied candidate wheel')
+"""
+    return [str(python), "-c", verification]
+
+
+def _record_candidate_wheel_identity(
+    result: ExampleResult,
+    python: Path,
+    wheel: Path,
+    example_dir: Path,
+    *,
+    stage: str,
+    timeout_seconds: int,
+) -> CommandRecord:
+    command = _run(
+        f"candidate_wheel_identity:{stage}",
+        _candidate_wheel_identity_command(python, wheel),
+        cwd=example_dir,
+        timeout_seconds=timeout_seconds,
+        allowed_roots=(example_dir, wheel.parent),
+    )
+    result.commands.append(command)
+    return command
+
+
 def _last_failed_command(commands: list[CommandRecord]) -> CommandRecord | None:
     for command in reversed(commands):
         if not command.passed:
@@ -675,6 +739,31 @@ def _validate_example(
         )
         return result
 
+    candidate_identity = _record_candidate_wheel_identity(
+        result,
+        python,
+        wheel,
+        example_dir,
+        stage="before_requirements",
+        timeout_seconds=timeout_seconds,
+    )
+    if not candidate_identity.passed:
+        _cleanup_failed_setup_venv(venv_path)
+        result.commands.append(
+            _skipped(
+                "candidate_wheel_identity:after_requirements",
+                cwd=example_dir,
+                reason="candidate wheel identity failed before requirements",
+            )
+        )
+        result.commands.append(
+            _skipped("pytest", cwd=example_dir, reason="candidate wheel identity failed before requirements")
+        )
+        result.commands.append(
+            _skipped("run_main", cwd=example_dir, reason="candidate wheel identity failed before requirements")
+        )
+        return result
+
     _pip_install_requirements(
         result,
         python,
@@ -685,6 +774,13 @@ def _validate_example(
     dependency_failure = _last_failed_command(result.commands)
     if dependency_failure is not None:
         _cleanup_failed_setup_venv(venv_path)
+        result.commands.append(
+            _skipped(
+                "candidate_wheel_identity:after_requirements",
+                cwd=example_dir,
+                reason=f"dependency setup failed at {dependency_failure.name}",
+            )
+        )
         result.commands.append(
             _skipped(
                 "pytest",
@@ -698,6 +794,24 @@ def _validate_example(
                 cwd=example_dir,
                 reason=f"dependency setup failed at {dependency_failure.name}",
             )
+        )
+        return result
+
+    candidate_identity = _record_candidate_wheel_identity(
+        result,
+        python,
+        wheel,
+        example_dir,
+        stage="after_requirements",
+        timeout_seconds=timeout_seconds,
+    )
+    if not candidate_identity.passed:
+        _cleanup_failed_setup_venv(venv_path)
+        result.commands.append(
+            _skipped("pytest", cwd=example_dir, reason="candidate wheel identity failed after requirements")
+        )
+        result.commands.append(
+            _skipped("run_main", cwd=example_dir, reason="candidate wheel identity failed after requirements")
         )
         return result
 
