@@ -14,6 +14,10 @@ class ExecutionValidationError(ValueError):
     """Permanent invalid transaction or skill wiring detected before execution."""
 
 
+class DefinitionIdentityError(ExecutionValidationError):
+    """Missing, invalid, changed, or incompatible automation definition identity."""
+
+
 class BusinessException(Exception):
     """Expected business rule violation.
 

@@ -9,16 +9,33 @@ from rpacore.skill import Skill
 from rpacore.transaction import Artifact, HistoryEntry, Transaction
 
 
-TRANSACTION_FORMAT_VERSION = 1
+TRANSACTION_FORMAT_VERSION = 2
 
 
 def serialize_transaction(transaction: Transaction) -> dict[str, object]:
     """Return a canonical record after durable-data, but not wiring, validation."""
+    return _serialize_transaction(transaction, format_version=TRANSACTION_FORMAT_VERSION)
+
+
+def _serialize_transaction_v1(transaction: Transaction) -> dict[str, object]:
+    """Return the frozen transaction-v1 record embedded by report format v1."""
+    return _serialize_transaction(transaction, format_version=1)
+
+
+def _serialize_transaction(
+    transaction: Transaction,
+    *,
+    format_version: int,
+) -> dict[str, object]:
     transaction.validate_durable_data()
+    identity: dict[str, object] = {}
+    if format_version == 2:
+        identity["definition_identity"] = transaction.definition_identity
     return {
-        "transaction_format_version": TRANSACTION_FORMAT_VERSION,
+        "transaction_format_version": format_version,
         "id": transaction.id,
         "reference": transaction.reference,
+        **identity,
         "status": str(transaction.status),
         "retry_count": transaction.retry_count,
         "created_at": _timestamp(transaction.created_at, path="transaction.created_at"),

@@ -2,6 +2,28 @@
 
 All notable user-facing changes are recorded here.
 
+## Unreleased
+
+### Added
+
+- Added caller-owned automation definition identity to durable transactions.
+  Persistent one-off and queue execution require a non-empty identity, and
+  recovery accepts only an exact identity match before mutating resumable state.
+  The identity is independent of the RPA Core, source-control, and deployment
+  versions.
+- Added `DefinitionIdentityError` for missing, invalid, changed, unidentified,
+  or incompatible durable definition identities.
+
+### Breaking
+
+- Transaction schema version 9 adds immutable `definition_identity`. Existing
+  records migrate with an empty identity and remain readable, inspectable, and
+  exportable, but non-successful unidentified records cannot be resumed.
+- Canonical transaction serialization is format version 2 and includes
+  `definition_identity`. CLI and export envelope versions remain version 1;
+  report format version 1 remains frozen and continues embedding its closed
+  transaction-v1 snapshot.
+
 ## v0.2.0 - 2026-07-29
 
 ### Added

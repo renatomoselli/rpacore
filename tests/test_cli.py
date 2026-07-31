@@ -250,6 +250,7 @@ class TestCliInit:
         transactions = list_transactions(str(project / "rpacore.db"))
         assert len(transactions) == 1
         assert transactions[0].status is Status.SUCCESSFUL
+        assert transactions[0].definition_identity == "generated-greeting/v1"
         assert HistoryEvent.SKILL_SUCCEEDED in [
             entry.event for entry in transactions[0].history
         ]
@@ -664,7 +665,8 @@ class TestCliTransaction:
         assert payload["command"] == "transaction:list"
         assert payload["limit"] == 100
         assert payload["transactions"][0]["id"] == tx.id
-        assert payload["transactions"][0]["transaction_format_version"] == 1
+        assert payload["transactions"][0]["transaction_format_version"] == 2
+        assert payload["transactions"][0]["definition_identity"] == ""
         assert payload["transactions"][0]["status"] == "successful"
         assert payload["transactions"][0]["state"] == {"invoice": "001"}
         assert payload["transactions"][0]["metadata"] == {"customer": "acme"}
@@ -735,6 +737,7 @@ class TestCliTransaction:
         assert result.returncode == 0
         assert f"ID:          {tx.id}" in result.stdout
         assert "Reference:   invoice-001" in result.stdout
+        assert "Definition:  (unidentified)" in result.stdout
         assert "1. download: failed" in result.stdout
         assert "- business: bad invoice" in result.stdout
         assert "1. skill_failed status=failed retry=0 skill=download" in result.stdout
@@ -774,7 +777,8 @@ class TestCliTransaction:
         assert payload["schema_version"] == 1
         assert payload["command"] == "transaction:show"
         detail = payload["transaction"]
-        assert detail["transaction_format_version"] == 1
+        assert detail["transaction_format_version"] == 2
+        assert detail["definition_identity"] == ""
         assert detail["id"] == tx.id
         assert detail["state"] == {"invoice": "001"}
         assert detail["metadata"] == {"customer": "acme"}
@@ -825,7 +829,7 @@ class TestCliTransaction:
         assert payload["framework_version"] == cli_module.__version__
         assert payload["exported_at"].endswith("+00:00")
         assert [tx["reference"] for tx in payload["transactions"]] == ["newer", "older"]
-        assert payload["transactions"][1]["transaction_format_version"] == 1
+        assert payload["transactions"][1]["transaction_format_version"] == 2
         assert payload["transactions"][1]["state"] == {"invoice": "001"}
         assert "secret artifact body" not in result.stdout
 
@@ -862,6 +866,7 @@ class TestCliTransaction:
         assert set(records[0]) == {
             "artifacts",
             "created_at",
+            "definition_identity",
             "export_format_version",
             "exported_at",
             "finished_at",
@@ -879,7 +884,7 @@ class TestCliTransaction:
         }
         assert [record["reference"] for record in records] == ["second", "first"]
         assert {record["export_format_version"] for record in records} == {1}
-        assert {record["transaction_format_version"] for record in records} == {1}
+        assert {record["transaction_format_version"] for record in records} == {2}
         assert {record["framework_version"] for record in records} == {
             cli_module.__version__,
         }

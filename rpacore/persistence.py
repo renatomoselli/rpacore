@@ -22,7 +22,7 @@ from rpacore._sqlite import (
     ensure_supported_schema,
     require_current_schema,
 )
-from rpacore.exceptions import BusinessException, SystemException
+from rpacore.exceptions import BusinessException, DefinitionIdentityError, SystemException
 from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.skill import Skill
 from rpacore.status import Status
@@ -318,6 +318,17 @@ def _migrate_transactions_to_v8(conn: sqlite3.Connection) -> None:
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 8)
 
 
+def _migrate_transactions_to_v9(conn: sqlite3.Connection) -> None:
+    """Add immutable caller-supplied automation definition identity."""
+    _ensure_column(
+        conn,
+        "transactions",
+        "definition_identity",
+        "definition_identity TEXT NOT NULL DEFAULT ''",
+    )
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 9)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run explicit transaction schema migrations through one write transaction."""
     # sqlite3's connection context manager does not begin a transaction for
@@ -363,6 +374,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 8:
             _migrate_transactions_to_v8(conn)
             current_version = 8
+        if current_version < 9:
+            _migrate_transactions_to_v9(conn)
+            current_version = 9
         if current_version != _TRANSACTION_SCHEMA_VERSION:
             raise RuntimeError(
                 "Unsupported transaction schema version "
@@ -618,6 +632,18 @@ def _write_transaction_rows(
     claim_token: str = "",
 ) -> int:
     """Write one full transaction snapshot and return its new revision."""
+    identity_row = conn.execute(
+        "SELECT definition_identity FROM transactions WHERE id = ?",
+        (transaction.id,),
+    ).fetchone()
+    if (
+        identity_row is not None
+        and identity_row["definition_identity"] != transaction.definition_identity
+    ):
+        raise DefinitionIdentityError(
+            f"Persisted transaction {transaction.id!r} definition identity is immutable"
+        )
+
     legacy_values: sqlite3.Row | None = None
     timestamps = (transaction.created_at, transaction.started_at, transaction.finished_at)
     if any(value is not None and not _is_aware_timestamp(value) for value in timestamps):
@@ -646,8 +672,8 @@ def _write_transaction_rows(
     conn.execute(
         "INSERT OR IGNORE INTO transactions "
         "(id, reference, status, retry_count, outcome_category, retry_disposition, failure_code, "
-        "created_at, created_at_utc, started_at, finished_at, state) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "created_at, created_at_utc, started_at, finished_at, state, definition_identity) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             transaction.id,
             transaction.reference,
@@ -661,6 +687,7 @@ def _write_transaction_rows(
             started_at or None,
             finished_at or None,
             state_json,
+            transaction.definition_identity,
         ),
     )
     params: tuple[object, ...] = (
@@ -1015,7 +1042,7 @@ def load_transaction(
             _ensure_schema(conn)
         row = conn.execute(
             "SELECT id, reference, status, retry_count, outcome_category, retry_disposition, "
-            "failure_code, created_at, started_at, finished_at, state "
+            "failure_code, created_at, started_at, finished_at, state, definition_identity "
             "FROM transactions WHERE id = ?",
             (transaction_id,),
         ).fetchone()
@@ -1112,6 +1139,7 @@ def load_transaction(
             artifacts=artifacts,
             skills=skills,
             history=history,
+            definition_identity=row["definition_identity"],
         )
     finally:
         conn.close()

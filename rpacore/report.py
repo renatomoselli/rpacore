@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from rpacore.exceptions import BusinessException, SystemException
 from rpacore.outcome import OutcomeCategory, RetryDisposition
-from rpacore.serialization import serialize_transaction
+from rpacore.serialization import _serialize_transaction_v1
 from rpacore.status import Status
 
 if TYPE_CHECKING:
@@ -132,7 +132,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         for artifact in transaction.artifacts
     ]
     try:
-        transaction_record = serialize_transaction(transaction)
+        transaction_record = _serialize_transaction_v1(transaction)
     except (TypeError, ValueError):
         transaction_record = {}
 

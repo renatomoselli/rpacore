@@ -25,7 +25,8 @@ from rpacore._validation import (
 
 _FROZEN_PUBLIC_EXPORTS = (
     "Artifact", "ArtifactReport", "BusinessException", "ConfigField",
-    "CredentialNotFoundError", "CredentialProvider", "EmailNotifier", "Engine",
+    "CredentialNotFoundError", "CredentialProvider", "DefinitionIdentityError",
+    "EmailNotifier", "Engine",
     "EnvCredentialProvider", "ExecutionValidationError", "HistoryEntry", "HistoryEvent",
     "KeyringCredentialProvider", "Notifier", "OutcomeCategory", "OutcomeReport",
     "ProcessContext", "ProjectManifest", "QueueAdminEvent", "QueueAttempt",
@@ -177,7 +178,11 @@ class OkSkill(Skill):
     def execute(self, ctx: ProcessContext) -> None:
         ctx.state["ran"] = True
 
-tx = Transaction(reference="installed-wheel-smoke", skills=[OkSkill("ok", 1)])
+tx = Transaction(
+    reference="installed-wheel-smoke",
+    definition_identity="installed-wheel-smoke/v1",
+    skills=[OkSkill("ok", 1)],
+)
 ctx = ProcessContext(transaction=tx)
 Engine().run(ctx)
 

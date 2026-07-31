@@ -38,10 +38,11 @@ def _json_fixture(name: str) -> dict[str, object]:
     return json.loads((_FIXTURES / name).read_text(encoding="utf-8"))
 
 
-def _fixture_transaction(*, transaction_id: str = "transaction-v1", hour: int = 12) -> Transaction:
+def _fixture_transaction(*, transaction_id: str = "transaction-v2", hour: int = 12) -> Transaction:
     return Transaction(
         id=transaction_id,
         reference="fixture",
+        definition_identity="fixture/v2",
         status=Status.SUCCESSFUL,
         created_at=datetime(2026, 7, 27, hour, 0, tzinfo=timezone.utc),
         state={"invoice": "001"},
@@ -57,13 +58,20 @@ def _normalize_export(payload: dict[str, object]) -> dict[str, object]:
 
 
 def test_checked_examples_are_json_and_have_the_frozen_framework_envelopes() -> None:
-    transaction = _json_fixture("transaction-v1.json")
-    assert tuple(transaction) == (
+    transaction_v1 = _json_fixture("transaction-v1.json")
+    assert tuple(transaction_v1) == (
         "transaction_format_version", "id", "reference", "status", "retry_count",
         "created_at", "started_at", "finished_at", "state", "metadata", "skills",
         "history", "artifacts",
     )
-    assert transaction["transaction_format_version"] == 1
+    assert transaction_v1["transaction_format_version"] == 1
+    transaction_v2 = _json_fixture("transaction-v2.json")
+    assert tuple(transaction_v2) == (
+        "transaction_format_version", "id", "reference", "definition_identity",
+        "status", "retry_count", "created_at", "started_at", "finished_at",
+        "state", "metadata", "skills", "history", "artifacts",
+    )
+    assert transaction_v2["transaction_format_version"] == 2
 
     for name, version_key, version in (
         ("cli-transaction-list-v1.json", "schema_version", 1),
@@ -79,17 +87,17 @@ def test_checked_examples_are_json_and_have_the_frozen_framework_envelopes() -> 
 
     ndjson = json.loads((_FIXTURES / "export-ndjson-v1.ndjson").read_text(encoding="utf-8"))
     assert ndjson["export_format_version"] == 1
-    assert ndjson["transaction_format_version"] == 1
+    assert ndjson["transaction_format_version"] == 2
     assert tuple(check["id"] for check in _json_fixture("doctor-v1.json")["checks"]) == _DOCTOR_CHECK_IDS  # type: ignore[index]
 
 
-def test_transaction_v1_fixture_matches_the_live_serializer() -> None:
-    assert serialize_transaction(_fixture_transaction()) == _json_fixture("transaction-v1.json")
+def test_transaction_v2_fixture_matches_the_live_serializer() -> None:
+    assert serialize_transaction(_fixture_transaction()) == _json_fixture("transaction-v2.json")
 
 
 def test_query_cursor_v1_fixture_remains_accepted_and_rejects_future_versions(tmp_path: Path) -> None:
     db_path = tmp_path / "transactions.db"
-    save_transaction(_fixture_transaction(), str(db_path))
+    save_transaction(_fixture_transaction(transaction_id="transaction-v1"), str(db_path))
     save_transaction(_fixture_transaction(transaction_id="older", hour=11), str(db_path))
     cursor = (_FIXTURES / "query-cursor-v1.txt").read_text(encoding="utf-8").strip()
 
@@ -131,13 +139,13 @@ def test_export_v1_fixtures_match_live_output(capsys: pytest.CaptureFixture[str]
 
 
 def test_report_v1_complete_and_incomplete_fixtures_match_live_output() -> None:
-    complete = generate_report(_fixture_transaction()).record
+    complete = generate_report(_fixture_transaction(transaction_id="transaction-v1")).record
     assert complete is not None
     complete_payload = complete.to_dict()
     complete_payload["generated_at"] = "fixture-generated-at"
     assert complete_payload == _json_fixture("report-v1-complete.json")
 
-    incomplete_transaction = _fixture_transaction()
+    incomplete_transaction = _fixture_transaction(transaction_id="transaction-v1")
     incomplete_transaction.state = {"not_json": object()}
     incomplete = generate_report(incomplete_transaction).record
     assert incomplete is not None

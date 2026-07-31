@@ -41,7 +41,10 @@ def main(
     _output_path = output_path if output_path is not None else "greeting.txt"
     arguments = {"name": "Alice", "output_path": _output_path}
 
-    transaction = Transaction(reference="greet-alice")
+    transaction = Transaction(
+        reference="greet-alice",
+        definition_identity="sample-greeting/v1",
+    )
     transaction.skills = [
         ValidateInput(name="validate_input", execution_order=1, arguments=arguments),
         WriteGreeting(name="write_greeting", execution_order=2, arguments=arguments),

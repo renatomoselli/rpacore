@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import pytest
 
@@ -18,7 +18,12 @@ from rpacore._json_state import JsonStateError
 from rpacore.context import ProcessContext
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
-from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
+from rpacore.exceptions import (
+    BusinessException,
+    DefinitionIdentityError,
+    ExecutionValidationError,
+    SystemException,
+)
 from rpacore.persistence import list_transactions, load_transaction, save_transaction
 from rpacore.queue import (
     QueueAttemptOutcome,
@@ -31,7 +36,18 @@ import rpacore.runner as runner_module
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.skill import Skill
 from rpacore.status import Status
-from rpacore.transaction import HistoryEvent, Transaction
+from rpacore.transaction import HistoryEvent, Transaction as _Transaction
+
+
+_DEFINITION_IDENTITY = "tests.runner/v1"
+
+
+class Transaction(_Transaction):
+    """Test transaction with the suite's explicit automation identity."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("definition_identity", _DEFINITION_IDENTITY)
+        super().__init__(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1521,6 +1537,7 @@ class TestRunnerManagedTransactionPersistence:
             ("wiring", "transaction.reference"),
             ("state", "transaction.state['client']"),
             ("arguments", "arguments['ids']"),
+            ("identity", "definition_identity must be a non-empty str"),
             ("status", "queue transaction.status must be pending"),
             ("history", "queue transaction.history must be empty"),
         ],
@@ -1548,6 +1565,8 @@ class TestRunnerManagedTransactionPersistence:
             build_count += 1
             if case == "wiring":
                 return Transaction(reference="")
+            if case == "identity":
+                return _Transaction(reference="unidentified")
             if case == "state":
                 return Transaction(
                     reference="invalid-state",
@@ -2016,6 +2035,126 @@ class TestRunnerManagedTransactionPersistence:
         assert counts == {"first": 1, "second": 2}
         assert queue.fail_retries == [True]
         assert queue.completed == ["retry"]
+
+    def test_bound_queue_retry_rejects_definition_identity_mismatch_without_mutation(
+        self,
+        tmp_path,
+    ) -> None:
+        db_path = str(tmp_path / "transactions.db")
+        persisted_skill = Skill("step", 1)
+        persisted_skill.status = Status.IN_PROGRESS
+        persisted = Transaction(
+            reference="identity-mismatch",
+            status=Status.IN_PROGRESS,
+            skills=[persisted_skill],
+        )
+        save_transaction(persisted, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            revision_before = conn.execute(
+                "SELECT revision FROM transactions WHERE id = ?",
+                (persisted.id,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        item = _item("identity-mismatch")
+        item.transaction_id = persisted.id
+        queue = _RecordingSqliteQueue([item], str(tmp_path / "queue.db"))
+        errors: list[Exception | None] = []
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=Engine(),
+            build_transaction=lambda queue_item: _Transaction(
+                reference=queue_item.reference,
+                skills=[Skill("step", 1)],
+                definition_identity="tests.runner/v2",
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="test-worker",
+            transaction_db_path=db_path,
+            after_item=lambda _item, _transaction, error: errors.append(error),
+        )
+
+        loaded = load_transaction(persisted.id, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            revision_after = conn.execute(
+                "SELECT revision FROM transactions WHERE id = ?",
+                (persisted.id,),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert summary.failed == 1
+        assert summary.terminal_failed == 1
+        assert queue.fail_retries == [False]
+        assert loaded.status is Status.IN_PROGRESS
+        assert loaded.skills[0].status is Status.IN_PROGRESS
+        assert loaded.history == []
+        assert revision_after == revision_before
+        assert isinstance(errors[0], runner_module._DurableTransactionBindingError)
+        assert isinstance(errors[0].__cause__, DefinitionIdentityError)
+
+    def test_reclaimed_successful_transaction_completes_without_rerunning_engine(
+        self,
+        tmp_path,
+    ) -> None:
+        transaction_db_path = str(tmp_path / "transactions.db")
+        skill = Skill("step", 1)
+        skill.status = Status.SUCCESSFUL
+        transaction = Transaction(
+            reference="completed-before-queue-transition",
+            status=Status.SUCCESSFUL,
+            skills=[skill],
+        )
+        transaction.append_history(
+            HistoryEvent.TRANSACTION_STARTED,
+            status=Status.IN_PROGRESS,
+        )
+        transaction.append_history(
+            HistoryEvent.TRANSACTION_COMPLETED,
+            status=Status.SUCCESSFUL,
+        )
+        save_transaction(transaction, transaction_db_path)
+
+        item = _item("completed-before-queue-transition")
+        item.status = QueueStatus.IN_PROGRESS
+        item.claimed_by = "crashed-worker"
+        item.claimed_at = datetime(2026, 7, 26, tzinfo=timezone.utc)
+        item.claim_token = "expired-claim"
+        item.transaction_id = transaction.id
+        queue = _RecordingSqliteQueue(
+            [item],
+            str(tmp_path / "queue.db"),
+            max_retries=1,
+        )
+
+        class UnexpectedEngine(Engine):
+            def run(self, ctx, *, checkpoint=None) -> None:
+                raise AssertionError("successful transaction must not rerun the engine")
+
+        summary = run_queue_loop(
+            queue=queue,
+            engine=UnexpectedEngine(),
+            build_transaction=lambda queue_item: Transaction(
+                reference=queue_item.reference,
+                skills=[Skill("step", 1)],
+            ),
+            config={},
+            credentials=_CREDS,
+            worker_id="replacement-worker",
+            transaction_db_path=transaction_db_path,
+        )
+
+        loaded = load_transaction(transaction.id, transaction_db_path)
+        assert summary == QueueRunSummary(processed=1, completed=1, failed=0)
+        assert queue.completed == [item.id]
+        assert [entry.event for entry in loaded.history] == [
+            HistoryEvent.TRANSACTION_STARTED,
+            HistoryEvent.TRANSACTION_COMPLETED,
+        ]
 
     def test_bound_queue_retry_does_not_reapply_payload_state(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")

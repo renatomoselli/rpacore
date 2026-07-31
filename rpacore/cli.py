@@ -311,6 +311,7 @@ def _write_transaction_list(transactions: list[Transaction], *, limit: int) -> N
 def _write_transaction_detail(transaction: Transaction) -> None:
     print(f"ID:          {transaction.id}")
     print(f"Reference:   {transaction.reference}")
+    print(f"Definition:  {transaction.definition_identity or '(unidentified)'}")
     print(f"Status:      {transaction.status}")
     print(f"Retries:     {transaction.retry_count}")
     print(f"Created:     {_format_optional_datetime(transaction.created_at)}")
@@ -498,6 +499,7 @@ def _main_py() -> str:
             manifest = load_project_manifest(project_dir)
             transaction = Transaction(
                 reference="generated-greeting",
+                definition_identity="generated-greeting/v1",
                 skills=[
                     WriteGreeting(
                         name="write_greeting",

@@ -139,7 +139,7 @@ class TestPackageVersion:
         assert rpacore.HistoryEvent.TRANSACTION_STARTED == "transaction_started"
 
     def test_serializer_is_reexported(self) -> None:
-        assert rpacore.TRANSACTION_FORMAT_VERSION == 1
+        assert rpacore.TRANSACTION_FORMAT_VERSION == 2
         assert callable(rpacore.serialize_transaction)
 
     def test_public_api_exports_are_deliberate(self) -> None:
@@ -150,6 +150,7 @@ class TestPackageVersion:
             "ConfigField",
             "CredentialNotFoundError",
             "CredentialProvider",
+            "DefinitionIdentityError",
             "EmailNotifier",
             "Engine",
             "EnvCredentialProvider",

@@ -175,6 +175,13 @@ If a bound transaction is missing, corrupt, or fails execution validation,
 resume fails terminally without creating a replacement. The existing binding
 and any durable record are retained for operator inspection and repair; the
 runner never deletes a transaction that has already been bound to a queue item.
+This includes migrated non-successful transactions with an empty definition
+identity: the queue item terminal-fails, while the unidentified transaction is
+left unchanged for audit. Continue that work only under the pinned pre-identity
+runtime, or start a new identified transaction and record the old id as audit
+metadata. If a crash instead leaves a bound transaction durably successful
+before queue completion, reclaim completes the queue item without rerunning the
+Engine or appending another transaction lifecycle.
 
 Initial transaction persistence first validates the current queue token inside
 the same SQLite transaction that writes the pending transaction. Binding that
@@ -297,14 +304,15 @@ exceptions, history, and the canonical transaction record. Its `outcome` view
 directly projects the transaction's captured terminal category, retry
 disposition, and optional failure code; it reports `unknown` rather than
 reconstructing missing truth from lifecycle status, history, or queue attempts.
-The canonical JSON transaction record remains format version 1 and does not
-yet carry those additive fields. `dispatch()` gives each notifier a fresh
-snapshot, so one notifier cannot mutate the transaction, the source report, or
-a later notifier's view. Unsupported arbitrary runtime objects are not
-recursively cloned; they do not belong in durable report data.
+Canonical transaction format v2 includes the caller-owned definition identity.
+Report format v1 remains frozen and therefore continues to embed its closed
+transaction-v1 snapshot without the identity. `dispatch()` gives each notifier
+a fresh snapshot, so one notifier cannot mutate the transaction, the source
+report, or a later notifier's view. Unsupported arbitrary runtime objects are
+not recursively cloned; they do not belong in durable report data.
 
-Canonical transaction format v1 is closed. A framework-owned field may not be
-added, removed, renamed, retyped, or given a new meaning without a new
+Canonical transaction formats v1 and v2 are closed. A framework-owned field may
+not be added, removed, renamed, retyped, or given a new meaning without a new
 transaction format version. Query-page fields follow the same rule. Query
 cursors are opaque, remain bound to their filters, and must be accepted only by
 the version that emitted them; applications should never decode or construct
@@ -357,12 +365,41 @@ The v0.2.0 history vocabulary is closed:
 History entries are persisted audit records, not an in-process event bus.
 Repeated `save_transaction()` calls do not duplicate history rows.
 
+## Automation Definition Identity
+
+`Transaction.definition_identity` is an opaque compatibility token chosen by
+the automation application. It identifies the automation definition that can
+safely continue an in-progress durable transaction. It is not the RPA Core
+package version, a Git commit, a deployment identifier, or a framework protocol
+version. A compatible framework upgrade or application bug fix can keep the
+same token; an incompatible change to recovery semantics, skill identity, or
+durable state interpretation must use a new token and start a new transaction.
+
+The value is optional only for legacy, completed, or inspection-only records.
+Persistent `execute_transaction()` runs and durable queue-created transactions
+require a non-empty identity before any user skill runs. An identity is at most
+255 characters, has no leading or trailing whitespace, and contains no Unicode
+control characters.
+
+The first persisted value is immutable for that transaction id, including an
+empty value written through the manual `save_transaction()` audit path.
+`save_transaction()` rejects attempts to change it without modifying the
+existing record. A non-successful record first saved without an identity is
+inspection-only and cannot later adopt an identity or resume. Loads, queries,
+CLI inspection, exports, and reports continue to work for records whose identity
+is empty.
+
 ## Resume Behavior
 
 `resume_transaction()` reloads a persisted transaction and reattaches executable
-skill instances supplied by the caller. Successful skills remain successful.
-Persisted `IN_PROGRESS` transaction or skill state remains visible after
-`load_transaction()` and is recovered only when `resume_transaction()` is called.
+skill instances supplied by the caller. For a non-successful transaction, the
+caller must also supply the exact persisted `definition_identity`. Missing,
+unidentified, or mismatched identities raise `DefinitionIdentityError` before
+skill/status validation or in-memory recovery mutation. Successful transactions
+are returned unchanged as an idempotent no-op and do not require an identity
+match. Successful skills remain successful. Persisted `IN_PROGRESS` transaction
+or skill state remains visible after `load_transaction()` and is recovered only
+when `resume_transaction()` is called.
 
 For interrupted transactions, `resume_transaction()` preserves successful and
 skipped skills, resets interrupted or pending work to `PENDING`, and keeps
@@ -484,7 +521,7 @@ The current transaction persistence component is recorded as:
 
 ```text
 component = "transactions"
-version   = 8
+version   = 9
 ```
 
 The SQLite queue records its own component version:
@@ -506,7 +543,7 @@ transaction schema and never migrates.
 ## Migrations
 
 Transaction schema migrations are explicit and sequential. The current latest
-transaction schema is version 8.
+transaction schema is version 9.
 
 Version 1 stores:
 
@@ -562,8 +599,14 @@ Version 8 adds transaction `outcome_category`, `retry_disposition`, and
 new fields default to `unknown` or empty rather than inferring missing terminal
 truth from prior status, messages, or retries.
 
+Version 9 adds immutable transaction `definition_identity`. Existing records
+migrate with an empty identity because a compatible automation definition
+cannot be inferred from framework version, source history, skill names, or
+execution history. They remain readable and exportable, but a non-successful
+unidentified record cannot be resumed.
+
 Private-development databases created before component schema versions are still
-readable. When opened, they are migrated to transaction schema version 8 by
+readable. When opened, they are migrated to transaction schema version 9 by
 adding missing columns and recording the component version.
 
 Migration defaults must not invent execution history. Current legacy defaults
@@ -581,6 +624,7 @@ are deliberately limited:
 - missing queue item id and claim token default to empty strings
 - missing outcome category and retry disposition default to `unknown`
 - missing transaction and exception failure codes default to empty strings
+- missing definition identity defaults to an empty, unidentified value
 
 Future persisted models must add fixture-based migration tests from the previous
 latest schema to the new latest schema.
@@ -628,6 +672,7 @@ SQLite checkpoint behavior without hand-writing the callback:
 execute_transaction(transaction, transaction_db_path="rpacore.db")
 ```
 
+The transaction must carry a non-empty application-owned definition identity.
 Its built-in SQLite checkpoint retries match the same short-lived `locked` or
 `busy` policy used by the queue runner. Other SQLite errors remain loud.
 
@@ -647,7 +692,8 @@ that already occurred. Earlier checkpoint failures remain retryable.
 After any checkpoint failure, treat the in-memory `Transaction` object as a
 diagnostic snapshot of the interrupted run. For durable recovery, reload the
 persisted transaction and call `resume_transaction()` with fresh skill
-instances instead of retrying the same partially mutated object.
+instances and the exact persisted definition identity instead of retrying the
+same partially mutated object.
 
 Runner retry has two separate layers. `Engine(max_retries=...)` owns in-process
 skill retry passes for `SystemException` failures inside one claimed queue item;

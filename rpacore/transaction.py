@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 
+from rpacore._definition import validate_definition_identity
 from rpacore._json_state import validate_json_object
 from rpacore.exceptions import ExecutionValidationError
 from rpacore.outcome import OutcomeCategory, RetryDisposition, validate_failure_code
@@ -80,6 +81,7 @@ class Transaction:
     outcome_category: OutcomeCategory = OutcomeCategory.UNKNOWN
     retry_disposition: RetryDisposition = RetryDisposition.UNKNOWN
     failure_code: str = ""
+    definition_identity: str = ""
 
     def __post_init__(self) -> None:
         if self.retry_count < 0:
@@ -89,6 +91,10 @@ class Transaction:
         if not isinstance(self.retry_disposition, RetryDisposition):
             raise TypeError("retry_disposition must be a RetryDisposition")
         self.failure_code = validate_failure_code(self.failure_code)
+        self.definition_identity = validate_definition_identity(
+            self.definition_identity,
+            field="transaction.definition_identity",
+        )
         self.state = dict(self.state)
         self.metadata = dict(self.metadata)
         self.artifacts = list(self.artifacts)
@@ -174,6 +180,10 @@ class Transaction:
         if not isinstance(self.retry_disposition, RetryDisposition):
             raise TypeError("transaction.retry_disposition must be a RetryDisposition")
         self.failure_code = validate_failure_code(self.failure_code)
+        self.definition_identity = validate_definition_identity(
+            self.definition_identity,
+            field="transaction.definition_identity",
+        )
         validate_json_object(self.state, path="transaction.state")
         validate_json_object(self.metadata, path="transaction.metadata")
         for index, artifact in enumerate(self.artifacts):

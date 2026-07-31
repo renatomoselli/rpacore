@@ -17,7 +17,7 @@ from rpacore.config_validation import ConfigField, optional_config, require_conf
 from rpacore.context import ProcessContext
 from rpacore.credentials import CredentialNotFoundError, CredentialProvider, EnvCredentialProvider, KeyringCredentialProvider, build_credential_provider
 from rpacore.engine import Engine
-from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
+from rpacore.exceptions import BusinessException, DefinitionIdentityError, ExecutionValidationError, SystemException
 from rpacore.execution import execute_transaction
 from rpacore.logger import bind_log_context, configure_logger, get_logger
 from rpacore.manifest import (
@@ -64,6 +64,7 @@ __all__ = [
     "ConfigField",
     "CredentialNotFoundError",
     "CredentialProvider",
+    "DefinitionIdentityError",
     "EmailNotifier",
     "Engine",
     "EnvCredentialProvider",

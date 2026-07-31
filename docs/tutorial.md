@@ -135,7 +135,10 @@ def main() -> None:
     config = load_config("config.toml")
     configure_logger(level=str(config["log_level"]), fmt=str(config["log_format"]))
 
-    tx = Transaction(reference="greet-user")
+    tx = Transaction(
+        reference="greet-user",
+        definition_identity="greet-user/v1",
+    )
     tx.skills = [
         WriteGreeting(
             name="write_greeting",
@@ -168,7 +171,10 @@ if __name__ == "__main__":
 
 `execute_transaction()` makes the run crash-durable at engine state boundaries:
 the transaction is saved before user skill code starts and after each status
-transition.
+transition. Its definition identity is an application-owned compatibility token,
+not the RPA Core package version. Keep it stable across compatible code fixes;
+change it when a new automation definition must not resume older in-progress
+transactions.
 
 ## Step 8: Run The Project
 
@@ -226,7 +232,8 @@ rpacore transaction list
 
 - Add a second skill with `execution_order=2`.
 - Load an existing transaction with `load_transaction()`.
-- Resume retryable failures with `resume_transaction()`.
+- Resume retryable failures with `resume_transaction()` and the exact persisted
+  definition identity.
 - Use `ctx.resources` for runtime-only objects that must not be persisted.
 - Read [Durability and Storage](durability.md) for recovery details.
 - Read [Testing Skills](testing.md) for plain pytest examples.

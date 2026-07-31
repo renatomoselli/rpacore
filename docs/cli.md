@@ -16,7 +16,9 @@ Creates a normal Python project directory containing:
 
 The generated `main.py` uses `execute_transaction(transaction_db_path=...)`
 with the project manifest's storage path, so execution and default inspection
-refer to the same durable transaction history.
+refer to the same durable transaction history. It also supplies a stable
+application-owned `definition_identity` so an interrupted run can be resumed
+only by a compatible automation definition.
 
 RPA Core distributions include the framework's `LICENSE` and `NOTICE`. The
 generated project does not copy those files or add a package license field,

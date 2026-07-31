@@ -9,7 +9,12 @@ import pytest
 
 import rpacore.persistence as persistence_module
 from rpacore.context import ProcessContext
-from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
+from rpacore.exceptions import (
+    BusinessException,
+    DefinitionIdentityError,
+    ExecutionValidationError,
+    SystemException,
+)
 from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.persistence import (
     TransactionFenceError,
@@ -33,6 +38,7 @@ def db_path(tmp_path):
 
 
 def make_transaction(**kwargs) -> Transaction:
+    kwargs.setdefault("definition_identity", "tests.persistence/v1")
     return Transaction(reference="REF-001", **kwargs)
 
 
@@ -336,6 +342,31 @@ class TestSaveAndLoad:
         assert loaded.status is Status.PENDING
         assert loaded.retry_count == 0
         assert loaded.skills == []
+
+    def test_roundtrip_preserves_definition_identity(self, db_path) -> None:
+        transaction = make_transaction(
+            definition_identity="invoice-processing/v3",
+        )
+
+        save_transaction(transaction, db_path)
+        loaded = load_transaction(transaction.id, db_path)
+
+        assert loaded.definition_identity == "invoice-processing/v3"
+
+    def test_save_rejects_definition_identity_change_without_mutation(
+        self,
+        db_path,
+    ) -> None:
+        transaction = make_transaction()
+        save_transaction(transaction, db_path)
+        before = transaction_storage_snapshot(db_path, transaction.id)
+        transaction.definition_identity = "tests.persistence/v2"
+        transaction.reference = "must-not-persist"
+
+        with pytest.raises(DefinitionIdentityError, match="immutable"):
+            save_transaction(transaction, db_path)
+
+        assert transaction_storage_snapshot(db_path, transaction.id) == before
 
     def test_roundtrip_preserves_status(self, db_path) -> None:
         tx = make_transaction(status=Status.SUCCESSFUL)
@@ -2195,6 +2226,39 @@ class TestSchemaMigration:
         assert {"outcome_category", "retry_disposition", "failure_code"}.issubset(columns)
         assert "code" in exception_columns
 
+    def test_v8_schema_migrates_unidentified_definition_identity(
+        self,
+        db_path,
+    ) -> None:
+        transaction = make_transaction()
+        save_transaction(transaction, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("ALTER TABLE transactions DROP COLUMN definition_identity")
+            conn.execute(
+                "UPDATE rpacore_schema_versions SET version = 8 "
+                "WHERE component = 'transactions'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        loaded = load_transaction(transaction.id, db_path)
+
+        assert loaded.definition_identity == ""
+        conn = sqlite3.connect(db_path)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(transactions)")}
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions "
+                "WHERE component = 'transactions'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert "definition_identity" in columns
+        assert version == 9
+
     def test_component_schema_version_is_recorded_after_migration(self, db_path) -> None:
         create_legacy_db(db_path)
 
@@ -2207,7 +2271,7 @@ class TestSchemaMigration:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert version == 8
+        assert version == 9
 
     def test_transaction_and_queue_schema_versions_can_share_database(self, db_path) -> None:
         from rpacore.queue import QueueItem, SqliteQueue
@@ -2224,7 +2288,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 4), ("transactions", 8)]
+        assert rows == [("queue", 4), ("transactions", 9)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)
@@ -2235,13 +2299,13 @@ class TestSchemaMigration:
             )
             conn.execute(
                 "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
-                ("transactions", 9),
+                ("transactions", 10),
             )
             conn.commit()
         finally:
             conn.close()
 
-        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 9"):
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 10"):
             list_transactions(db_path)
 
     @pytest.mark.parametrize("readonly", [False, True])

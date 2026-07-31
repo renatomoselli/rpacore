@@ -68,6 +68,10 @@ class TestTransactionFreshState:
         tx = Transaction(reference="INV-001")
         assert tx.artifacts == []
 
+    def test_definition_identity_defaults_to_unidentified(self) -> None:
+        tx = Transaction(reference="INV-001")
+        assert tx.definition_identity == ""
+
     def test_skills_not_shared_between_instances(self) -> None:
         a = Transaction(reference="A")
         b = Transaction(reference="B")
@@ -109,6 +113,36 @@ class TestTransactionCustomValues:
     def test_custom_status(self) -> None:
         tx = Transaction(reference="INV-001", status=Status.IN_PROGRESS)
         assert tx.status is Status.IN_PROGRESS
+
+    def test_custom_definition_identity(self) -> None:
+        tx = Transaction(
+            reference="INV-001",
+            definition_identity="invoice-processing/v2",
+        )
+        assert tx.definition_identity == "invoice-processing/v2"
+
+    @pytest.mark.parametrize(
+        "identity, message",
+        [
+            (None, "must be a str"),
+            (" leading", "leading or trailing whitespace"),
+            ("trailing ", "leading or trailing whitespace"),
+            ("control\ncharacter", "control characters"),
+            ("control\u0085character", "control characters"),
+            ("control\u009bcharacter", "control characters"),
+            ("x" * 256, "at most 255 characters"),
+        ],
+    )
+    def test_invalid_definition_identity_is_rejected(
+        self,
+        identity: object,
+        message: str,
+    ) -> None:
+        with pytest.raises(ExecutionValidationError, match=message):
+            Transaction(
+                reference="INV-001",
+                definition_identity=identity,  # type: ignore[arg-type]
+            )
 
     def test_custom_state(self) -> None:
         tx = Transaction(reference="INV-001", state={"invoice": 42})

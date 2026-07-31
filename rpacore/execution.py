@@ -10,6 +10,7 @@ import time
 from contextlib import AbstractContextManager
 from typing import Callable
 
+from rpacore._definition import validate_definition_identity
 from rpacore._sqlite_retry import is_transient_sqlite_lock, sqlite_retry_delay
 from rpacore._validation import type_error
 from rpacore.context import ProcessContext
@@ -42,6 +43,12 @@ def execute_transaction(
     """
     if checkpoint is not None and transaction_db_path is not None:
         raise ValueError("checkpoint and transaction_db_path are mutually exclusive")
+    if transaction_db_path is not None:
+        validate_definition_identity(
+            transaction.definition_identity,
+            field="transaction.definition_identity",
+            required=True,
+        )
 
     runner = engine if engine is not None else Engine()
     run_config = {} if config is None else config

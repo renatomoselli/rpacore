@@ -4,12 +4,31 @@ import pytest
 
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
-from rpacore.exceptions import BusinessException, SystemException
-from rpacore.persistence import load_transaction, save_transaction
-from rpacore.recovery import resume_transaction
+from rpacore.exceptions import BusinessException, DefinitionIdentityError, SystemException
+from rpacore.persistence import load_transaction, save_transaction as _save_transaction
+from rpacore.recovery import resume_transaction as _resume_transaction
+from rpacore.serialization import serialize_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import HistoryEvent, Transaction
+
+
+_DEFINITION_IDENTITY = "tests.recovery/v1"
+
+
+def save_transaction(transaction: Transaction, db_path: str) -> None:
+    if not transaction.definition_identity:
+        transaction.definition_identity = _DEFINITION_IDENTITY
+    _save_transaction(transaction, db_path)
+
+
+def resume_transaction(
+    tx_id: str,
+    skills: list[Skill],
+    **kwargs: object,
+) -> Transaction:
+    kwargs.setdefault("definition_identity", _DEFINITION_IDENTITY)
+    return _resume_transaction(tx_id, skills, **kwargs)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -449,6 +468,94 @@ def test_resume_successful_transaction_is_effective_no_op(db_path) -> None:
 
     assert counts == {}
     assert resumed.status is Status.SUCCESSFUL
+
+
+def test_resume_rejects_missing_identity_without_mutating_persisted_record(db_path) -> None:
+    skill = Skill("running", 1)
+    skill.status = Status.IN_PROGRESS
+    transaction = Transaction(
+        reference="identified",
+        status=Status.IN_PROGRESS,
+        skills=[skill],
+        definition_identity=_DEFINITION_IDENTITY,
+    )
+    _save_transaction(transaction, db_path)
+    before = serialize_transaction(load_transaction(transaction.id, db_path))
+
+    with pytest.raises(DefinitionIdentityError, match="non-empty str"):
+        _resume_transaction(
+            transaction.id,
+            [Skill("running", 1)],
+            db_path=db_path,
+        )
+
+    assert serialize_transaction(load_transaction(transaction.id, db_path)) == before
+
+
+def test_resume_rejects_mismatched_identity_without_mutating_persisted_record(
+    db_path,
+) -> None:
+    skill = Skill("running", 1)
+    skill.status = Status.IN_PROGRESS
+    transaction = Transaction(
+        reference="identified",
+        status=Status.IN_PROGRESS,
+        skills=[skill],
+        definition_identity=_DEFINITION_IDENTITY,
+    )
+    _save_transaction(transaction, db_path)
+    before = serialize_transaction(load_transaction(transaction.id, db_path))
+
+    with pytest.raises(DefinitionIdentityError, match="does not match"):
+        _resume_transaction(
+            transaction.id,
+            [Skill("running", 1)],
+            db_path=db_path,
+            definition_identity="tests.recovery/v2",
+        )
+
+    assert serialize_transaction(load_transaction(transaction.id, db_path)) == before
+
+
+def test_resume_rejects_unidentified_legacy_record(db_path) -> None:
+    skill = Skill("running", 1)
+    skill.status = Status.IN_PROGRESS
+    transaction = Transaction(
+        reference="legacy",
+        status=Status.IN_PROGRESS,
+        skills=[skill],
+    )
+    _save_transaction(transaction, db_path)
+
+    with pytest.raises(DefinitionIdentityError, match="has no definition identity"):
+        _resume_transaction(
+            transaction.id,
+            [Skill("running", 1)],
+            db_path=db_path,
+            definition_identity=_DEFINITION_IDENTITY,
+        )
+
+
+def test_successful_transaction_is_no_op_without_identity_comparison(db_path) -> None:
+    skill = Skill("done", 1)
+    skill.status = Status.SUCCESSFUL
+    transaction = Transaction(
+        reference="done",
+        status=Status.SUCCESSFUL,
+        skills=[skill],
+        definition_identity=_DEFINITION_IDENTITY,
+    )
+    _save_transaction(transaction, db_path)
+
+    resumed = _resume_transaction(
+        transaction.id,
+        [Skill("changed", 99)],
+        db_path=db_path,
+        definition_identity="different/v2",
+    )
+
+    assert resumed.status is Status.SUCCESSFUL
+    assert resumed.definition_identity == _DEFINITION_IDENTITY
 
 
 def test_resume_missing_skill_mapping_raises_clear_error(db_path) -> None:

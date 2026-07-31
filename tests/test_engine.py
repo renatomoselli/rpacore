@@ -586,6 +586,7 @@ class TestEngineCheckpointing:
             tx = Transaction(
                 reference="crash",
                 id="crash-tx",
+                definition_identity="tests.crash/v1",
                 skills=[FirstSkill("first", 1), CrashSkill("crash", 2)],
             )
             Engine().run(
@@ -632,6 +633,7 @@ class TestEngineCheckpointing:
             tx = Transaction(
                 reference="crash",
                 id="crash-tx",
+                definition_identity="tests.crash/v1",
                 skills=[FirstSkill("first", 1), CrashSkill("crash", 2)],
             )
             Engine().run(
@@ -667,6 +669,7 @@ class TestEngineCheckpointing:
                 "crash-tx",
                 [FirstSkill("first", 1), CompleteSkill("crash", 2)],
                 db_path=sys.argv[1],
+                definition_identity="tests.crash/v1",
             )
             Engine().run(
                 ProcessContext(transaction=tx),

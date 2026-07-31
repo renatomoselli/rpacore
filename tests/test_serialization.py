@@ -36,6 +36,7 @@ def test_serialize_transaction_returns_canonical_json_safe_record() -> None:
         finished_at=datetime(2026, 6, 10, 12, 2, tzinfo=timezone.utc),
         state={"invoice": "001"},
         metadata={"customer": "acme"},
+        definition_identity="invoice-processing/v1",
         skills=[skill],
         artifacts=[
             Artifact(
@@ -57,9 +58,10 @@ def test_serialize_transaction_returns_canonical_json_safe_record() -> None:
     record = serialize_transaction(tx)
 
     assert record == {
-        "transaction_format_version": 1,
+        "transaction_format_version": 2,
         "id": "tx-001",
         "reference": "invoice-001",
+        "definition_identity": "invoice-processing/v1",
         "status": "failed",
         "retry_count": 1,
         "created_at": "2026-06-10T12:00:00+00:00",

@@ -5,7 +5,8 @@ from __future__ import annotations
 from copy import copy
 from collections.abc import Sequence
 
-from rpacore.exceptions import BusinessException
+from rpacore._definition import validate_definition_identity
+from rpacore.exceptions import BusinessException, DefinitionIdentityError
 from rpacore.persistence import load_transaction
 from rpacore.skill import Skill
 from rpacore.status import Status
@@ -18,15 +19,37 @@ def resume_transaction(
     *,
     db_path: str = "rpacore.db",
     retry_business_failures: bool = False,
+    definition_identity: str | None = None,
 ) -> Transaction:
     """Load a persisted transaction and reattach executable skills.
 
     The caller supplies concrete skill instances matched by ``(name,
-    execution_order)``. ``SUCCESSFUL`` skills are left intact so calling this on
-    an already-successful transaction is effectively a no-op, though callers
-    should still check transaction status first to avoid unnecessary work.
+    execution_order)``. A non-successful transaction resumes only when the
+    caller's exact definition identity matches the immutable persisted identity.
+    ``SUCCESSFUL`` skills are left intact so calling this on an already-successful
+    transaction is effectively a no-op, though callers should still check
+    transaction status first to avoid unnecessary work.
     """
     transaction = load_transaction(tx_id, db_path)
+    if transaction.status is Status.SUCCESSFUL:
+        return transaction
+
+    expected_identity = validate_definition_identity(
+        definition_identity,
+        field="definition_identity",
+        required=True,
+    )
+    if not transaction.definition_identity:
+        raise DefinitionIdentityError(
+            f"Persisted transaction {tx_id!r} has no definition identity and "
+            "cannot be resumed by this runtime"
+        )
+    if transaction.definition_identity != expected_identity:
+        raise DefinitionIdentityError(
+            f"Persisted transaction {tx_id!r} definition identity "
+            f"{transaction.definition_identity!r} does not match "
+            f"{expected_identity!r}"
+        )
     transaction.validate_for_execution()
     interrupted = _is_interrupted(transaction)
     already_resumed = (

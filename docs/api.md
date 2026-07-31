@@ -23,10 +23,10 @@ type alias.
 | Symbol | Purpose | Durable mutations and side effects |
 | --- | --- | --- |
 | `Engine` | Executes ordered skills in a `Transaction`. | Mutates transaction, skill statuses, history, timestamps, retry count, state, metadata, and artifacts in memory. Persists only when `checkpoint` calls a persistence function. |
-| `execute_transaction` | Run one transaction with a `ProcessContext`, optional strict SQLite checkpoints, and optional runtime resources. | Mutates the transaction through `Engine.run()`. When `transaction_db_path` is set, creates or migrates the SQLite transaction database and checkpoints each transition. |
+| `execute_transaction` | Run one transaction with a `ProcessContext`, optional strict SQLite checkpoints, and optional runtime resources. | Mutates the transaction through `Engine.run()`. When `transaction_db_path` is set, requires a non-empty definition identity before opening the database, then creates or migrates SQLite storage and checkpoints each transition. |
 | `ProcessContext` | Runtime context passed to skills. | Carries durable `state`, runtime-only `resources`, config, and transaction reference. Resources are not serialized. |
 | `Skill` | Base class for user-authored work units. | User subclasses implement `execute(ctx)`. Side effects belong to user code. |
-| `Transaction` | Unit of execution and persistence. | Stores reference, lifecycle status, terminal outcome/retry truth, skills, durable state, metadata, artifacts, and history. Validates wiring and JSON-safe durable data before execution or persistence. |
+| `Transaction` | Unit of execution and persistence. | Stores reference, caller-owned automation `definition_identity`, lifecycle status, terminal outcome/retry truth, skills, durable state, metadata, artifacts, and history. Validates wiring and JSON-safe durable data before execution or persistence. |
 | `Status` | Transaction and skill status enum. | No side effects. |
 | `OutcomeCategory`, `RetryDisposition` | Stable terminal work reason and actual retry decision. | No side effects. `unknown` represents legacy or incomplete truth; it is never inferred from message text or retry count. |
 
@@ -48,6 +48,7 @@ one-off runs that should persist strict SQLite checkpoints. Use raw
 | `BusinessException` | Expected business-rule failure. | Terminal for that skill unless user data or code changes. Downstream skills continue unless `stop=True`. |
 | `SystemException` | Technical failure such as file, network, or service errors. | Retryable by `Engine(max_retries=...)`. |
 | `ExecutionValidationError` | Invalid transaction wiring or invalid durable state. | Not retryable; fix code or persisted state. |
+| `DefinitionIdentityError` | Missing, invalid, changed, unidentified, or incompatible automation definition identity. | Not retryable with the current definition; supply the exact compatible identity or start a new transaction. |
 | `TransactionFenceError` | A durable queue checkpoint has a stale claim token or transaction revision. | Not retryable by that worker; stop and reacquire the queue item. |
 
 Unhandled exceptions from skill code are recorded as system failures.
@@ -68,13 +69,13 @@ not create a transaction row for invalid wiring or durable data.
 
 | Symbol | Purpose | Side effects |
 | --- | --- | --- |
-| `save_transaction(transaction, db_path)` | Validate and unconditionally save one non-queue transaction to SQLite. | Invalid wiring or durable data fails before the database is opened; valid input creates or migrates the database, writes transaction rows, and advances its persistence revision. Queue runners use a fenced internal checkpoint instead. |
+| `save_transaction(transaction, db_path)` | Validate and unconditionally save one non-queue transaction to SQLite. | Invalid wiring or durable data fails before the database is opened; valid input creates or migrates the database, writes transaction rows, and advances its persistence revision. A transaction's first persisted definition identity, including an empty inspection-only identity, is immutable. A non-successful record first saved without an identity cannot later be resumed. Queue runners use a fenced internal checkpoint instead. |
 | `load_transaction(transaction_id, db_path, readonly=False)` | Load one transaction from SQLite. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite and preserves persisted status values; default mode can migrate older schemas. |
 | `list_transactions(db_path, readonly=False)` | List persisted transactions. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite; default mode can migrate older schemas. A selected transaction removed by concurrent cleanup before deferred load is omitted; other load failures propagate. |
 | `TransactionSummary`, `TransactionPage`, `query_transactions(...)` | Versioned, lightweight transaction query page. | Read-only by default and requires a current schema. Supports exact status-set, UTC window, reference, and top-level metadata filters. Results are ordered by normalized UTC creation time descending then id ascending; opaque cursors are bound to those filters. |
-| `resume_transaction(transaction_id, skills, db_path=...)` | Load, validate, and prepare a persisted transaction for retry. | Mutates in-memory statuses only after validation, reattaches executable skills, preserves history-proven skips caused by a stopping business failure, and appends resume history when needed. |
-| `serialize_transaction(transaction)` | Convert a transaction to JSON-safe data. | Validates durable JSON fields without requiring executable wiring; no I/O. |
-| `TRANSACTION_FORMAT_VERSION` | Current serialized transaction format version. | No side effects. |
+| `resume_transaction(transaction_id, skills, db_path=..., definition_identity=...)` | Load, validate, and prepare a persisted transaction for retry. | Requires an exact identity match for non-successful records before any in-memory mutation, reattaches executable skills, preserves history-proven skips caused by a stopping business failure, and appends resume history when needed. Successful records return unchanged as an idempotent no-op. |
+| `serialize_transaction(transaction)` | Convert a transaction to a JSON-safe format-v2 record. | Includes `definition_identity`, validates durable JSON fields without requiring executable wiring, and performs no I/O. |
+| `TRANSACTION_FORMAT_VERSION` | Current serialized transaction format version (`2`). | No side effects. |
 
 ## Configuration and Paths
 
@@ -125,6 +126,9 @@ environment variables, or enforce cross-field rules.
 `generate_report()`. `render_json()`, `render_text()`, and `render_html()` all
 derive their output from that record, so later mutation of the legacy
 `TransactionReport` convenience fields cannot change rendered operator truth.
+Its embedded transaction-v1 snapshot predates `definition_identity`; consumers
+that need the recovery identity must load or export the canonical transaction-v2
+record instead.
 The decoded record has `complete` and `errors` fields. If canonical transaction
 serialization or record encoding cannot complete, it remains renderable with
 `complete: false`, a stable `rpacore.report.*` error code, and only the

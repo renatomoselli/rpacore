@@ -21,16 +21,23 @@ JSON export writes one envelope:
 ```
 
 Each entry in `transactions` is the canonical serialized transaction record and
-contains `transaction_format_version`.
+contains `transaction_format_version`. The current transaction format is version
+2 and includes the caller-owned `definition_identity` used for recovery
+compatibility. An empty identity marks a legacy or inspection-only record.
+
+Report and notifier payloads use the separate, frozen report format version 1.
+Its embedded transaction-v1 snapshot predates `definition_identity`; consumers
+that need the recovery identity must load or export the canonical transaction-v2
+record.
 
 ## Compatibility
 
 The JSON export envelope, each NDJSON line, and the nested transaction record
 are independently versioned. Consumers must check both the export and
-transaction version before interpreting a record. Version 1 has a closed set
-of framework-owned fields: changing, removing, renaming, retyping, or changing
-the meaning of one requires a new format version. RPA Core does not add new
-framework-owned fields to an existing export version.
+transaction version before interpreting a record. Each released version has a
+closed set of framework-owned fields: changing, removing, renaming, retyping,
+or changing the meaning of one requires a new format version. RPA Core does not
+add new framework-owned fields to an existing export or transaction version.
 
 ## Iteration Consistency
 

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from rpacore._clock import _Clock, _SYSTEM_CLOCK
+from rpacore._definition import validate_definition_identity
 from rpacore._json_state import JsonStateError, validate_json_object
 from rpacore._sqlite_retry import is_transient_sqlite_lock, sqlite_retry_delay
 from rpacore._validation import type_error
@@ -456,23 +457,24 @@ def _run_claimed_item_with_context(
             resources=dict(shared_resources),
             credentials=credentials,
         )
-        if transaction_db_path is not None:
-            checkpoint = _lease_checked_checkpoint(
-                heartbeat,
-                _strict_transaction_checkpoint(
-                    db_path=transaction_db_path,
-                    queue_db_path=_require_sqlite_queue(queue).db_path,
-                    item=item,
-                    initial_revision=transaction_revision,
-                    worker_id=worker_id,
-                    log=log,
-                    summary=summary,
-                    clock=_clock_for_queue(queue),
-                ),
-            )
-        else:
-            checkpoint = _lease_only_checkpoint(heartbeat)
-        engine.run(ctx, checkpoint=checkpoint)
+        if transaction_db_path is None or transaction.status is not Status.SUCCESSFUL:
+            if transaction_db_path is not None:
+                checkpoint = _lease_checked_checkpoint(
+                    heartbeat,
+                    _strict_transaction_checkpoint(
+                        db_path=transaction_db_path,
+                        queue_db_path=_require_sqlite_queue(queue).db_path,
+                        item=item,
+                        initial_revision=transaction_revision,
+                        worker_id=worker_id,
+                        log=log,
+                        summary=summary,
+                        clock=_clock_for_queue(queue),
+                    ),
+                )
+            else:
+                checkpoint = _lease_only_checkpoint(heartbeat)
+            engine.run(ctx, checkpoint=checkpoint)
         heartbeat.raise_if_failed()
         validate_json_object(ctx.transaction.state, path="transaction.state")
         originally_intended_complete = ctx.transaction.status == Status.SUCCESSFUL
@@ -967,6 +969,7 @@ def _transaction_for_queue_item(
                 candidate.skills,
                 db_path=transaction_db_path,
                 retry_business_failures=retry_business_failures,
+                definition_identity=candidate.definition_identity,
             )
             return transaction, _load_transaction_revision(
                 item.transaction_id,
@@ -1147,6 +1150,11 @@ def _seed_transaction_state_from_payload(
 
 def _validate_initial_queue_transaction(transaction: Transaction) -> None:
     """Reject pre-started transactions before their provisional durable save."""
+    validate_definition_identity(
+        transaction.definition_identity,
+        field="transaction.definition_identity",
+        required=True,
+    )
     if transaction.status is not Status.PENDING:
         raise ExecutionValidationError(
             "queue transaction.status must be pending before initial binding"

@@ -51,7 +51,11 @@ class _BusinessFailSkill(Skill):
 
 
 def _transaction(*skills: Skill) -> Transaction:
-    return Transaction(reference="tx", skills=list(skills))
+    return Transaction(
+        reference="tx",
+        skills=list(skills),
+        definition_identity="tests.execution/v1",
+    )
 
 
 @contextmanager
@@ -60,6 +64,26 @@ def _resource_scope(value: object) -> Iterator[dict[str, object]]:
 
 
 class TestExecuteTransaction:
+    def test_transaction_db_path_requires_definition_identity_before_mutation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "rpacore.db"
+        transaction = Transaction(
+            reference="unidentified",
+            skills=[_SuccessSkill("step", 1)],
+        )
+
+        with pytest.raises(
+            ExecutionValidationError,
+            match="definition_identity must be a non-empty str",
+        ):
+            execute_transaction(transaction, transaction_db_path=db_path)
+
+        assert transaction.status is Status.PENDING
+        assert transaction.history == []
+        assert not db_path.exists()
+
     def test_transaction_db_path_persists_strict_checkpoints(self, tmp_path: Path) -> None:
         db_path = tmp_path / "rpacore.db"
         transaction = _transaction(_SuccessSkill("step", 1))

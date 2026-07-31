@@ -81,7 +81,10 @@ from my_skills import FetchRecord, ProcessRecord, WriteOutput
 config = load_config("config.toml")
 configure_logger(level=config["log_level"], fmt=config["log_format"])
 
-tx = Transaction(reference="my-automation")
+tx = Transaction(
+    reference="my-automation",
+    definition_identity="my-automation/v1",
+)
 tx.skills = [
     FetchRecord(
         name="fetch_record",
@@ -104,6 +107,11 @@ execute_transaction(
     transaction_db_path=config["transaction_db_path"],
 )
 ```
+
+`definition_identity` is your automation's recovery-compatibility token. It is
+not tied to the RPA Core package version: keep it stable through compatible
+fixes, and change it when older in-progress transactions must not resume under
+the new automation definition.
 
 ## CLI
 
@@ -148,7 +156,8 @@ returns the latest 100 transactions by default; pass `--limit N` to choose a
 different cap. Human output is intended for operators; `--json` writes parseable
 JSON to stdout with diagnostics only on stderr. Transaction inspection JSON uses
 `schema_version = 1` and embeds the canonical transaction record with
-`transaction_format_version = 1`.
+`transaction_format_version = 2`. The record includes the caller-owned
+`definition_identity` used to guard recovery compatibility.
 
 Transaction export writes portable machine-readable records for all persisted
 transactions. JSON export uses an envelope with `export_format_version = 1`,
@@ -280,7 +289,9 @@ or skill state transition. Advanced callers can still build `ProcessContext`
 directly and call `Engine.run(ctx, checkpoint=...)`. Without a checkpoint
 callback, user code may still save only after `Engine.run()` returns. Loading a
 persisted transaction preserves the stored status; explicit recovery happens
-when user code calls `resume_transaction()`.
+when user code calls `resume_transaction()` with the exact application-owned
+definition identity. Unidentified or mismatched non-successful records fail
+closed before recovery mutation.
 
 ## Configuration
 
