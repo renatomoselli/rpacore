@@ -14,7 +14,7 @@ JSON export writes one envelope:
 ```json
 {
   "export_format_version": 1,
-  "framework_version": "0.2.0",
+  "framework_version": "0.3.0",
   "exported_at": "2026-01-01T00:00:00+00:00",
   "transactions": []
 }

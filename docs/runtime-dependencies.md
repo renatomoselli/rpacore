@@ -1,6 +1,6 @@
 # Runtime Dependency Decisions
 
-RPA Core v0.2.0 keeps the default runtime dependency set empty. The framework
+RPA Core keeps the default runtime dependency set empty. The framework
 uses the Python standard library for persistence, configuration, CLI wiring,
 logging, notification transport, and queue processing. Existing optional extras
 remain:
@@ -8,7 +8,7 @@ remain:
 - `rpacore[screenshots]` installs `mss` for framework-captured screenshots.
 - `rpacore[keyring]` installs `keyring` for OS credential-store integration.
 
-No new runtime dependency is adopted by the v0.2.0 architecture.
+No new runtime dependency is adopted by the current architecture.
 
 ## Decision Matrix
 

@@ -2,7 +2,7 @@
 
 All notable user-facing changes are recorded here.
 
-## Unreleased
+## v0.3.0 - Unreleased
 
 ### Added
 

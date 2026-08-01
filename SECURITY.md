@@ -14,6 +14,9 @@ Security fixes target the latest public release line.
 | 0.2.x | Yes |
 | earlier release lines | No |
 
+The unreleased `0.3.0` development line on `main` is not a published support
+line. This table changes only after that version is released.
+
 ## Reporting a Vulnerability
 
 Use GitHub's private vulnerability reporting flow for this repository when it is

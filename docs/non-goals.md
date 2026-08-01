@@ -1,6 +1,6 @@
 # Non-Goals
 
-RPA Core v0.2.0 intentionally does not ship:
+RPA Core intentionally does not ship:
 
 - runtime AI behavior or AI service calls
 - a managed execution service or remote worker protocol
@@ -14,6 +14,6 @@ RPA Core v0.2.0 intentionally does not ship:
 - artifact content storage or upload
 - browser, desktop, PDF, spreadsheet, or HTTP action wrappers
 
-These omissions are part of the local-first v0.2.0 contract. User automations
+These omissions are part of the current local-first Core contract. User automations
 remain ordinary Python projects, and side-effecting work belongs in user-authored
 skills.

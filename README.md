@@ -4,6 +4,14 @@ Deterministic, stateful RPA in Python for code-first enterprise automation.
 
 Requires Python 3.11+.
 
+> Current development version: `0.3.0` (unreleased).
+> Latest published release: `v0.2.0`.
+
+The documentation on `main` describes the unreleased `0.3.0` API. Installing
+`rpacore` from PyPI currently provides the published `0.2.x` API; use the
+[`v0.2.0` source and documentation](https://github.com/renatomoselli/rpacore/tree/v0.2.0)
+when you need the stable published contract.
+
 ## Package Name
 
 The public project name is **RPA Core**. The package, import path, and CLI
@@ -51,7 +59,8 @@ pip install rpacore
 ```
 
 For complete documentation, start at [docs/README.md](docs/README.md). See
-[CHANGELOG.md](CHANGELOG.md) for v0.2.0 release notes and compatibility changes. For
+[CHANGELOG.md](CHANGELOG.md) for current development changes and published
+release notes. For
 maintainer validation and release scripts, see [scripts/](scripts/); these
 scripts are intentionally separate from the runtime package.
 
@@ -64,7 +73,7 @@ Community and release-readiness routes:
 - [Maintainers](MAINTAINERS.md)
 - [Governance and Release Process](docs/governance.md)
 
-## Quick Start
+## Quick Start (`0.3.0` development API)
 
 ```python
 from rpacore import (
@@ -422,13 +431,14 @@ For vulnerability reporting and local security posture, see
 
 ## Local-First Design
 
-RPA Core v0.2.0 is local-first:
+RPA Core is local-first:
 
 - projects remain normal Python repos
 - runs persist locally
 - logs, reports, queues, transactions, and artifacts stay readable
 
-Remote orchestration and distributed worker protocols are outside v0.2.0; see
+Remote orchestration and distributed worker protocols are outside the current
+Core runtime; see
 [docs/non-goals.md](docs/non-goals.md) for current non-goals.
 
 ## Compatibility

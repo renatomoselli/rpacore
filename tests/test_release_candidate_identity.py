@@ -26,9 +26,12 @@ def _load_script():
 def _repo(tmp_path: Path, *, changelog: bool = True) -> Path:
     root = tmp_path / "rpacore"
     root.mkdir()
-    (root / "pyproject.toml").write_text("[project]\nversion = '0.2.0'\n", encoding="utf-8")
+    (root / "pyproject.toml").write_text("[project]\nversion = '0.3.0'\n", encoding="utf-8")
     if changelog:
-        (root / "CHANGELOG.md").write_text("## v0.2.0 - Unreleased\n", encoding="utf-8")
+        (root / "CHANGELOG.md").write_text(
+            "## v0.3.0 - Unreleased\n\n## v0.2.0 - 2026-07-29\n",
+            encoding="utf-8",
+        )
     return root
 
 
@@ -66,7 +69,7 @@ def test_release_identity_accepts_unclaimed_version(tmp_path: Path) -> None:
         "schema_version": 1,
         "status": "pass",
         "source": {"core_commit": COMMIT},
-        "release": {"version": "0.2.0", "tag": "v0.2.0"},
+        "release": {"version": "0.3.0", "tag": "v0.3.0"},
     }
 
 
@@ -88,7 +91,10 @@ def test_release_identity_canonicalizes_uppercase_commit_input(tmp_path: Path) -
 def test_release_identity_accepts_changelog_heading_with_trailing_whitespace(tmp_path: Path) -> None:
     script = _load_script()
     repo_root = _repo(tmp_path)
-    (repo_root / "CHANGELOG.md").write_text("## v0.2.0 - Unreleased   \n", encoding="utf-8")
+    (repo_root / "CHANGELOG.md").write_text(
+        "## v0.3.0 - Unreleased   \n\n## v0.2.0 - 2026-07-29\n",
+        encoding="utf-8",
+    )
 
     with patch.object(script, "_current_commit", return_value=COMMIT):
         result = script.verify_release_candidate_identity(
@@ -99,7 +105,7 @@ def test_release_identity_accepts_changelog_heading_with_trailing_whitespace(tmp
             opener=_absent_opener,
         )
 
-    assert result["release"] == {"version": "0.2.0", "tag": "v0.2.0"}
+    assert result["release"] == {"version": "0.3.0", "tag": "v0.3.0"}
 
 
 def test_release_identity_rejects_non_commit_input(tmp_path: Path) -> None:
@@ -125,7 +131,7 @@ def test_release_identity_rejects_existing_pypi_version(tmp_path: Path) -> None:
 
     def opener(request, *, timeout: int):
         if "pypi.org" in request.full_url:
-            return _Response({"info": {"version": "0.2.0"}})
+            return _Response({"info": {"version": "0.3.0"}})
         return _absent_opener(request, timeout=timeout)
 
     with patch.object(script, "_current_commit", return_value=COMMIT):
@@ -148,7 +154,7 @@ def test_release_identity_rejects_existing_github_tag(tmp_path: Path) -> None:
 
     def opener(request, *, timeout: int):
         if "/git/ref/tags/" in request.full_url:
-            return _Response({"ref": "refs/tags/v0.2.0"})
+            return _Response({"ref": "refs/tags/v0.3.0"})
         return _absent_opener(request, timeout=timeout)
 
     with patch.object(script, "_current_commit", return_value=COMMIT):
@@ -262,7 +268,9 @@ def test_release_candidate_python_matrix_matches_package_and_support_policy() ->
     }
 
     support = (root / "SUPPORT.md").read_text(encoding="utf-8")
-    supported_versions = set(re.findall(r"3\.\d+", support.split("## Where To Ask", 1)[0]))
+    supported_versions = set(
+        re.findall(r"(?<![\d.])3\.\d+", support.split("## Where To Ask", 1)[0])
+    )
 
     assert workflow_versions == {"3.11", "3.12", "3.13", "3.14"}
     assert classifier_versions == workflow_versions

@@ -1,6 +1,9 @@
 # Public Submodule Policy
 
-For v0.2.0, the supported import boundary is the top-level `rpacore` package.
+For the current `0.3.0` development API, the supported import boundary is the
+top-level `rpacore` package. The latest published API remains `v0.2.0`; use its
+[versioned policy](https://github.com/renatomoselli/rpacore/blob/v0.2.0/docs/public-submodules.md)
+when working from the published package.
 
 Use:
 

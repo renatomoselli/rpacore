@@ -35,7 +35,10 @@ MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 API_TABLE_ROW = re.compile(r"^\|\s*(?P<cell>.+?)\s*\|")
 API_SYMBOL = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
-CHANGELOG_RELEASE_HEADING = re.compile(r"^## v(?P<version>[^\s]+) - ")
+CHANGELOG_RELEASE_HEADING = re.compile(
+    r"^## v(?P<version>[^\s]+) - (?P<label>.+?)\s*$"
+)
+CHANGELOG_RELEASE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 RELEASE_SERIES = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?=\d)")
 DEV_HOSTS = {"localhost"}
 
@@ -281,7 +284,6 @@ def _check_release_version_docs(
             raise ValueError("cannot read pyproject.toml for expected release-version verification")
         return []
     version = _release_version(root)
-    series = _release_series(version)
     findings: list[Finding] = []
     if expected_release_version is not None and version != expected_release_version:
         findings.append(
@@ -291,13 +293,84 @@ def _check_release_version_docs(
                 f"project.version must match expected release version {expected_release_version}, got {version}",
             )
         )
+    changelog = root / "CHANGELOG.md"
+    try:
+        changelog_lines = changelog.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        findings.append(Finding(Path("CHANGELOG.md"), 1, f"cannot read release changelog: {exc}"))
+        return findings
+    headings = [
+        (line_number, match.group("version"), match.group("label"))
+        for line_number, line in enumerate(changelog_lines, start=1)
+        if (match := CHANGELOG_RELEASE_HEADING.match(line)) is not None
+    ]
+    if not headings:
+        findings.append(Finding(Path("CHANGELOG.md"), 1, "missing top-level release heading"))
+        return findings
+
+    top_line, top_version, top_label = headings[0]
+    if top_version != version:
+        findings.append(
+            Finding(
+                Path("CHANGELOG.md"),
+                top_line,
+                f"top changelog release version must be {version}, got {top_version}",
+            )
+        )
+
+    published = next(
+        (
+            (line_number, heading_version)
+            for line_number, heading_version, label in headings
+            if CHANGELOG_RELEASE_DATE.fullmatch(label)
+        ),
+        None,
+    )
+    if published is None:
+        findings.append(
+            Finding(Path("CHANGELOG.md"), top_line, "missing latest dated published release heading")
+        )
+        return findings
+
+    _, published_version = published
+    unreleased_headings = [
+        (line_number, heading_version)
+        for line_number, heading_version, label in headings
+        if label == "Unreleased"
+    ]
+    if version != published_version:
+        if unreleased_headings != [(top_line, version)]:
+            findings.append(
+                Finding(
+                    Path("CHANGELOG.md"),
+                    top_line,
+                    f"expected exactly one Unreleased heading at the top for v{version}",
+                )
+            )
+    elif unreleased_headings:
+        findings.append(
+            Finding(
+                Path("CHANGELOG.md"),
+                top_line,
+                f"published state must not retain an Unreleased heading: v{unreleased_headings[0][1]}",
+            )
+        )
+
+    published_series = _release_series(published_version)
+    development_series = _release_series(version)
     expected_text = {
-        Path("README.md"): f"v{version}",
-        Path("SUPPORT.md"): f"`{series}`",
-        Path("SECURITY.md"): f"| {series} | Yes |",
-        Path("docs/README.md"): f"public `{series}` entry point",
+        Path("README.md"): (
+            f"Current development version: `{version}`",
+            f"Latest published release: `v{published_version}`",
+        ),
+        Path("SUPPORT.md"): (f"`{published_series}`",),
+        Path("SECURITY.md"): (f"| {published_series} | Yes |",),
+        Path("docs/README.md"): (
+            f"Current development version: `{version}`",
+            f"Latest published release: `v{published_version}`",
+        ),
     }
-    for relative, expected in expected_text.items():
+    for relative, expected_values in expected_text.items():
         try:
             text = (root / relative).read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
@@ -305,30 +378,39 @@ def _check_release_version_docs(
                 Finding(relative, 1, f"cannot read release version documentation: {exc}")
             )
             continue
-        if expected not in text:
-            findings.append(
-                Finding(relative, 1, f"release version documentation must contain: {expected}"))
-
-    changelog = root / "CHANGELOG.md"
-    try:
-        changelog_lines = changelog.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as exc:
-        findings.append(Finding(Path("CHANGELOG.md"), 1, f"cannot read release changelog: {exc}"))
-        return findings
-    for line_number, line in enumerate(changelog_lines, start=1):
-        match = CHANGELOG_RELEASE_HEADING.match(line)
-        if match is not None:
-            if match.group("version") != version:
+        for expected in expected_values:
+            if expected not in text:
                 findings.append(
-                    Finding(
-                        Path("CHANGELOG.md"),
-                        line_number,
-                        f"top changelog release version must be {version}, got {match.group('version')}",
-                    )
+                    Finding(relative, 1, f"release version documentation must contain: {expected}")
                 )
-            break
-    else:
-        findings.append(Finding(Path("CHANGELOG.md"), 1, "missing top-level release heading"))
+        if relative == Path("SUPPORT.md") and development_series != published_series:
+            development_tokens = (version, development_series)
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                lowered = line.lower()
+                if (
+                    any(token in line for token in development_tokens)
+                    and re.search(r"\bsupported\b|\breceives?\b.*\bfixes\b", lowered)
+                    and re.search(r"\bnot\s+(?:currently\s+)?supported\b", lowered) is None
+                ):
+                    findings.append(
+                        Finding(
+                            relative,
+                            line_number,
+                            f"unpublished development version must not be claimed as supported: {version}",
+                        )
+                    )
+        if (
+            relative in {Path("SUPPORT.md"), Path("SECURITY.md")}
+            and development_series != published_series
+            and f"| {development_series} | Yes |" in text
+        ):
+            findings.append(
+                Finding(
+                    relative,
+                    1,
+                    f"unpublished development series must not be marked supported: {development_series}",
+                )
+            )
     return findings
 
 

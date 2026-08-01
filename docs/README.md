@@ -4,7 +4,14 @@ RPA Core is a local-first Python framework for deterministic, durable
 automation. Users write ordinary Python skills, wire them into a transaction,
 and choose when to persist checkpoints.
 
-Use this documentation map as the public `0.2.x` entry point:
+> Current development version: `0.3.0` (unreleased).
+> Latest published release: `v0.2.0`.
+
+This documentation map describes the current `0.3.0` development API. For the
+latest published and supported `0.2.x` contract, use the
+[`v0.2.0` documentation](https://github.com/renatomoselli/rpacore/tree/v0.2.0/docs).
+
+Start here:
 
 - [Tutorial](tutorial.md): install RPA Core, scaffold a project, write a skill,
   run it, inspect persisted transactions, and resume work.
@@ -32,7 +39,7 @@ Use this documentation map as the public `0.2.x` entry point:
   required checks, examples validation, and release approval.
 - [Testing Skills](testing.md): plain pytest patterns for user-authored skills.
 - [Public Submodule Policy](public-submodules.md): supported import boundary for
-  the `0.2.x` release line.
+  the current development API.
 - [Runtime Dependency Decisions](runtime-dependencies.md): runtime, optional,
   and development dependency posture.
 - [Non-Goals](non-goals.md): deferred features and rejected runtime behavior.

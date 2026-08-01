@@ -35,12 +35,23 @@ def _write_minimal_repo(root: Path, *, release_metadata: bool = False) -> None:
     (root / "docs" / "api.md").write_text("# API Reference\n\n`Engine`\n", encoding="utf-8")
     (root / "rpacore" / "__init__.py").write_text('__all__ = ["Engine"]\n', encoding="utf-8")
     if release_metadata:
-        (root / "README.md").write_text("# Root\n\nRPA Core v0.2.0\n\n[Docs](docs/README.md)\n", encoding="utf-8")
-        (root / "CHANGELOG.md").write_text("# Changelog\n\n## v0.2.0 - Unreleased\n", encoding="utf-8")
+        (root / "README.md").write_text(
+            "# Root\n\nCurrent development version: `0.3.0`\n\n"
+            "Latest published release: `v0.2.0`\n\n[Docs](docs/README.md)\n",
+            encoding="utf-8",
+        )
+        (root / "CHANGELOG.md").write_text(
+            "# Changelog\n\n## v0.3.0 - Unreleased\n\n## v0.2.0 - 2026-07-29\n",
+            encoding="utf-8",
+        )
         (root / "SECURITY.md").write_text("# Security\n\n| Version | Supported |\n| --- | --- |\n| 0.2.x | Yes |\n", encoding="utf-8")
         (root / "SUPPORT.md").write_text("# Support\n\nThe latest public `0.2.x` release line.\n", encoding="utf-8")
-        (root / "docs" / "README.md").write_text("# Docs\n\nUse this documentation map as the public `0.2.x` entry point.\n\n[API](api.md)\n", encoding="utf-8")
-        (root / "pyproject.toml").write_text('[project]\nversion = "0.2.0"\n', encoding="utf-8")
+        (root / "docs" / "README.md").write_text(
+            "# Docs\n\nCurrent development version: `0.3.0`\n\n"
+            "Latest published release: `v0.2.0`\n\n[API](api.md)\n",
+            encoding="utf-8",
+        )
+        (root / "pyproject.toml").write_text('[project]\nversion = "0.3.0"\n', encoding="utf-8")
 
 
 def test_verify_docs_main_returns_zero_for_current_repo() -> None:
@@ -73,24 +84,31 @@ def test_verify_docs_reports_release_line_mismatch(tmp_path: Path) -> None:
 
 def test_verify_docs_reports_top_changelog_version_mismatch(tmp_path: Path) -> None:
     _write_minimal_repo(tmp_path, release_metadata=True)
-    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n\n## v0.1.1 - Unreleased\n", encoding="utf-8")
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## v0.1.1 - Unreleased\n\n## v0.2.0 - 2026-07-29\n",
+        encoding="utf-8",
+    )
 
     findings = verify_docs(tmp_path)
 
     assert [(finding.path, finding.message) for finding in findings] == [
-        (Path("CHANGELOG.md"), "top changelog release version must be 0.2.0, got 0.1.1")
+        (
+            Path("CHANGELOG.md"),
+            "expected exactly one Unreleased heading at the top for v0.3.0",
+        ),
+        (Path("CHANGELOG.md"), "top changelog release version must be 0.3.0, got 0.1.1"),
     ]
 
 
 def test_verify_docs_reports_expected_release_version_mismatch(tmp_path: Path) -> None:
     _write_minimal_repo(tmp_path, release_metadata=True)
 
-    findings = verify_docs(tmp_path, expected_release_version="0.2.1")
+    findings = verify_docs(tmp_path, expected_release_version="0.3.1")
 
     assert [(finding.path, finding.message) for finding in findings] == [
         (
             Path("pyproject.toml"),
-            "project.version must match expected release version 0.2.1, got 0.2.0",
+            "project.version must match expected release version 0.3.1, got 0.3.0",
         )
     ]
 
@@ -98,7 +116,7 @@ def test_verify_docs_reports_expected_release_version_mismatch(tmp_path: Path) -
 def test_verify_docs_requires_pyproject_for_expected_release_version(tmp_path: Path) -> None:
     _write_minimal_repo(tmp_path)
 
-    findings = verify_docs(tmp_path, expected_release_version="0.2.0")
+    findings = verify_docs(tmp_path, expected_release_version="0.3.0")
 
     assert [(finding.path, finding.message) for finding in findings] == [
         (
@@ -134,6 +152,118 @@ def test_verify_docs_reports_malformed_release_metadata_as_release_metadata_erro
     assert findings[0].path == Path("<docs-verifier>")
     assert "release-version check could not complete" in findings[0].message
     assert "TOMLDecodeError" in findings[0].message
+
+
+def test_verify_docs_accepts_published_steady_state(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "README.md").write_text(
+        "# Root\n\nCurrent development version: `0.3.0`\n\n"
+        "Latest published release: `v0.3.0`\n\n[Docs](docs/README.md)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "docs" / "README.md").write_text(
+        "# Docs\n\nCurrent development version: `0.3.0`\n\n"
+        "Latest published release: `v0.3.0`\n\n[API](api.md)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## v0.3.0 - 2026-08-01\n\n## v0.2.0 - 2026-07-29\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "SECURITY.md").write_text(
+        "# Security\n\n| Version | Supported |\n| --- | --- |\n| 0.3.x | Yes |\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "SUPPORT.md").write_text(
+        "# Support\n\nThe latest public `0.3.x` release line.\n",
+        encoding="utf-8",
+    )
+
+    assert verify_docs(tmp_path) == []
+
+
+def test_verify_docs_rejects_duplicate_development_changelog_heading(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## v0.3.0 - Unreleased\n\n## v0.3.0 - Unreleased\n\n"
+        "## v0.2.0 - 2026-07-29\n",
+        encoding="utf-8",
+    )
+
+    findings = verify_docs(tmp_path)
+
+    assert [finding.message for finding in findings] == [
+        "expected exactly one Unreleased heading at the top for v0.3.0"
+    ]
+
+
+def test_verify_docs_rejects_misplaced_development_changelog_heading(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## v0.2.0 - 2026-07-29\n\n## v0.3.0 - Unreleased\n",
+        encoding="utf-8",
+    )
+
+    findings = verify_docs(tmp_path)
+
+    assert [finding.message for finding in findings] == [
+        "expected exactly one Unreleased heading at the top for v0.3.0",
+        "top changelog release version must be 0.3.0, got 0.2.0",
+    ]
+
+
+def test_verify_docs_rejects_stale_published_unreleased_heading(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## v0.3.0 - Unreleased\n\n## v0.2.0 - Unreleased\n\n"
+        "## v0.2.0 - 2026-07-29\n",
+        encoding="utf-8",
+    )
+
+    findings = verify_docs(tmp_path)
+
+    assert [finding.message for finding in findings] == [
+        "expected exactly one Unreleased heading at the top for v0.3.0"
+    ]
+
+
+def test_verify_docs_rejects_unpublished_series_as_supported(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "SECURITY.md").write_text(
+        "# Security\n\n| Version | Supported |\n| --- | --- |\n"
+        "| 0.3.x | Yes |\n| 0.2.x | Yes |\n",
+        encoding="utf-8",
+    )
+
+    findings = verify_docs(tmp_path)
+
+    assert [(finding.path, finding.message) for finding in findings] == [
+        (
+            Path("SECURITY.md"),
+            "unpublished development series must not be marked supported: 0.3.x",
+        )
+    ]
+
+
+def test_verify_docs_rejects_prose_support_claim_for_unpublished_version(
+    tmp_path: Path,
+) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+    (tmp_path / "SUPPORT.md").write_text(
+        "# Support\n\nThe latest public `0.2.x` release line receives fixes.\n\n"
+        "The unreleased 0.3.0 line on main is fully supported.\n",
+        encoding="utf-8",
+    )
+
+    findings = verify_docs(tmp_path)
+
+    assert [(finding.path, finding.line, finding.message) for finding in findings] == [
+        (
+            Path("SUPPORT.md"),
+            5,
+            "unpublished development version must not be claimed as supported: 0.3.0",
+        )
+    ]
 
 
 def test_verify_docs_reports_missing_required_release_document_at_its_path(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 # Project Manifest
 
 `rpacore.toml` describes how RPA Core finds a user project's Python entrypoint
-and local transaction storage. It is intentionally small for `v0.2.0`.
+and local transaction storage. It is intentionally small.
 
 Example:
 
@@ -58,7 +58,7 @@ directory loads `rpacore.toml` from that directory.
 
 ## Decisions
 
-RPA Core `v0.2.0` keeps skill construction and transaction wiring in Python.
+RPA Core keeps skill construction and transaction wiring in Python.
 The manifest does not support:
 
 - `pipeline_from_config`

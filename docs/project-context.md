@@ -169,7 +169,7 @@ All exceptions should be logged and persisted.
 - The test layout mirrors `rpacore/` where practical
 - Run `pytest` from the project root
 - Each commit should pass the full test suite
-- Skill testing guidance lives in `docs/testing.md`; v0.2.0 uses normal pytest
+- Skill testing guidance lives in `docs/testing.md`; RPA Core uses normal pytest
   tests instead of a custom `SkillTestCase` base class.
 - Core validation migration decisions live in `docs/core-validation-audit.md`.
 - Public import and compatibility boundaries live in `docs/api.md` and

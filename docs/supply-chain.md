@@ -1,6 +1,6 @@
 # Supply Chain
 
-RPA Core v0.2.0 keeps the default runtime dependency set empty. The framework
+RPA Core keeps the default runtime dependency set empty. The framework
 uses the Python standard library for core execution, persistence, configuration,
 CLI, logging, queue processing, reports, and notification transport.
 

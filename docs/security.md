@@ -88,8 +88,8 @@ database explicitly; RPA Core does not silently normalize corrupt records.
 
 RPA Core rejects blank and `:memory:` durable database paths. Transaction CLI
 inspection opens existing files read-only and refuses missing or incompatible
-schemas without migration. Queue databases use rollback journal on the v0.2.x
-line to avoid the documented SQLite WAL-reset race in affected embedded
+schemas without migration. Queue databases use rollback journal on supported
+runtimes to avoid the documented SQLite WAL-reset race in affected embedded
 runtimes. Keep database and journal files together during backup and restore.
 
 Database paths are trusted operator configuration, not a filesystem sandbox.

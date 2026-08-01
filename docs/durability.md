@@ -5,7 +5,7 @@ standard library. Persistence is local-first: users can inspect database files
 without a service, and queue storage remains separate from transaction history
 by default.
 
-SQLite is the built-in persistence backend for `v0.2.0`. Users can choose where
+SQLite is the built-in persistence backend. Users can choose where
 the SQLite files live, but RPA Core does not yet ship alternate transaction
 persistence adapters for databases such as PostgreSQL or MySQL.
 
@@ -288,7 +288,7 @@ lease expiry makes the item reclaimable later.
 
 ## Extension and Event API Decision
 
-RPA Core v0.2.0 does not provide a generic synchronous `Engine` event bus.
+RPA Core does not provide a generic synchronous `Engine` event bus.
 The extension surface stays explicit:
 
 - persisted transaction history records the durable execution timeline
@@ -490,8 +490,8 @@ multiple connections for normal persistence and queue operation.
 
 Queue databases, and transaction databases attached for queue checkpoints, use
 SQLite's rollback journal rather than WAL. This is a
-correctness-first policy for the stdlib SQLite runtimes supported by the
-`v0.2.x` line: SQLite documents a rare multi-connection WAL-reset corruption
+correctness-first policy for the supported stdlib SQLite runtimes: SQLite
+documents a rare multi-connection WAL-reset corruption
 race in affected releases. RPA Core does not claim that a Python package can
 replace the SQLite library embedded in CPython. CI and installed-wheel jobs
 record both Python and SQLite versions so this policy can be revisited from
