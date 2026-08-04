@@ -29,6 +29,7 @@ content:
 - text and JSON logs
 - text and HTML reports
 - JSON and NDJSON exports
+- execution-transition checkpoint state selected by a sink allowlist
 - SQLite transaction and queue databases
 - artifact names, paths, kinds, and metadata
 - screenshots captured on exception
@@ -53,6 +54,16 @@ which free-form content is secret. Do not place credentials or sensitive
 payload values in exception messages, local variables rendered by custom
 tracebacks, event names, or log strings. Apply access controls and retention
 policy to both text and JSON logs.
+
+An execution-transition sink receives lifecycle identifiers, status and outcome
+facts, plus only the transaction-state keys named by
+`transition_state_fields`. The allowlist is a data-release boundary, not a
+redaction engine: RPA Core does not inspect selected values for credentials,
+personal data, or business sensitivity. Keep secrets and runtime handles in
+credential providers or `ctx.resources`, select the minimum required state, and
+apply authentication, encryption, access control, retention, and deletion at
+the sink destination. Sink delivery occurs before the matching local checkpoint
+and is not proof that either side has durably committed the fact.
 
 ## Credentials and Generated Projects
 

@@ -56,6 +56,7 @@ from rpacore.serialization import TRANSACTION_FORMAT_VERSION, serialize_transact
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
+from rpacore.transition import ExecutionTransition
 
 __all__ = [
     "Artifact",
@@ -68,6 +69,7 @@ __all__ = [
     "EmailNotifier",
     "Engine",
     "EnvCredentialProvider",
+    "ExecutionTransition",
     "ExecutionValidationError",
     "HistoryEntry",
     "HistoryEvent",

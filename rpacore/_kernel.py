@@ -1,67 +1,20 @@
-"""Private execution-transition seam used to prove shared-kernel composition."""
+"""Private emitter for closed execution-transition facts."""
 
 from __future__ import annotations
 
-import json
+from collections.abc import Callable, Iterable
 from copy import deepcopy
-from dataclasses import dataclass
-from typing import Callable, Iterable
 
-from rpacore._json_state import validate_json_object
 from rpacore.outcome import OutcomeCategory
 from rpacore.skill import Skill
 from rpacore.transaction import HistoryEntry, HistoryEvent, Transaction
+from rpacore.transition import (
+    EXECUTION_TRANSITION_SCHEMA_VERSION,
+    ExecutionTransition,
+)
 
 
-_TRANSITION_SCHEMA_VERSION = 1
-
-
-@dataclass(frozen=True)
-class _ExecutionTransition:
-    """Immutable, minimized fact emitted after one lifecycle mutation."""
-
-    schema_version: int
-    transition_id: str
-    sequence: int
-    occurred_at: str
-    event: str
-    transaction_id: str
-    transaction_reference: str
-    definition_identity: str
-    transaction_status: str
-    execution_pass: int
-    skill_name: str
-    skill_execution_order: int | None
-    skill_status: str
-    outcome_category: str
-    failure_code: str
-    retry_recommended: bool | None
-    checkpoint_state_json: str
-
-    def to_record(self) -> dict[str, object]:
-        """Return a fresh JSON-safe record without coordinator disposition."""
-        return {
-            "schema_version": self.schema_version,
-            "transition_id": self.transition_id,
-            "sequence": self.sequence,
-            "occurred_at": self.occurred_at,
-            "event": self.event,
-            "transaction_id": self.transaction_id,
-            "transaction_reference": self.transaction_reference,
-            "definition_identity": self.definition_identity,
-            "transaction_status": self.transaction_status,
-            "execution_pass": self.execution_pass,
-            "skill_name": self.skill_name,
-            "skill_execution_order": self.skill_execution_order,
-            "skill_status": self.skill_status,
-            "outcome_category": self.outcome_category,
-            "failure_code": self.failure_code,
-            "retry_recommended": self.retry_recommended,
-            "checkpoint_state": json.loads(self.checkpoint_state_json),
-        }
-
-
-_TransitionSink = Callable[[_ExecutionTransition], None]
+_TransitionSink = Callable[[ExecutionTransition], None]
 
 
 class _TransitionEmitter:
@@ -71,15 +24,21 @@ class _TransitionEmitter:
         self,
         sink: _TransitionSink | None = None,
         *,
-        checkpoint_state_fields: Iterable[str] = (),
+        transition_state_fields: Iterable[str] = (),
     ) -> None:
-        fields = tuple(checkpoint_state_fields)
+        if sink is not None and not callable(sink):
+            raise TypeError("transition_sink must be callable or None")
+        if isinstance(transition_state_fields, (str, bytes)):
+            raise TypeError("transition_state_fields must be an iterable of strings")
+        fields = tuple(transition_state_fields)
         if any(not isinstance(field, str) or not field for field in fields):
-            raise ValueError("checkpoint_state_fields must contain non-empty strings")
+            raise ValueError("transition_state_fields must contain non-empty strings")
         if len(fields) != len(set(fields)):
-            raise ValueError("checkpoint_state_fields must not contain duplicates")
+            raise ValueError("transition_state_fields must not contain duplicates")
+        if fields and sink is None:
+            raise ValueError("transition_state_fields requires transition_sink")
         self._sink = sink
-        self._checkpoint_state_fields = fields
+        self._transition_state_fields = fields
 
     def append(
         self,
@@ -110,25 +69,14 @@ class _TransitionEmitter:
         *,
         skill: Skill | None,
         include_checkpoint_state: bool,
-    ) -> _ExecutionTransition:
+    ) -> ExecutionTransition:
         checkpoint_state: dict[str, object] = {}
         if include_checkpoint_state:
             checkpoint_state = {
                 field: deepcopy(transaction.state[field])
-                for field in self._checkpoint_state_fields
+                for field in self._transition_state_fields
                 if field in transaction.state
             }
-            validate_json_object(
-                checkpoint_state,
-                path="kernel_transition.checkpoint_state",
-            )
-        checkpoint_state_json = json.dumps(
-            checkpoint_state,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
         retry_recommended: bool | None = None
         if entry.event is HistoryEvent.TRANSACTION_COMPLETED:
             if transaction.outcome_category is OutcomeCategory.SYSTEM_FAILED:
@@ -140,8 +88,8 @@ class _TransitionEmitter:
             }:
                 retry_recommended = False
 
-        return _ExecutionTransition(
-            schema_version=_TRANSITION_SCHEMA_VERSION,
+        return ExecutionTransition(
+            schema_version=EXECUTION_TRANSITION_SCHEMA_VERSION,
             transition_id=f"{transaction.id}:{entry.sequence}",
             sequence=entry.sequence,
             occurred_at=entry.timestamp.isoformat(),
@@ -157,5 +105,5 @@ class _TransitionEmitter:
             outcome_category=transaction.outcome_category.value,
             failure_code=transaction.failure_code,
             retry_recommended=retry_recommended,
-            checkpoint_state_json=checkpoint_state_json,
+            checkpoint_state=checkpoint_state,
         )

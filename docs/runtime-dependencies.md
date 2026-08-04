@@ -8,7 +8,9 @@ remain:
 - `rpacore[screenshots]` installs `mss` for framework-captured screenshots.
 - `rpacore[keyring]` installs `keyring` for OS credential-store integration.
 
-No new runtime dependency is adopted by the current architecture.
+The optional synchronous execution-transition sink and its frozen record use
+only dataclasses, JSON, copying, and typing from the standard library. No new
+runtime dependency is adopted by the current architecture.
 
 ## Decision Matrix
 

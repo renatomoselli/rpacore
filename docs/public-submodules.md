@@ -8,7 +8,7 @@ when working from the published package.
 Use:
 
 ```python
-from rpacore import Engine, Transaction, resolve_config_paths
+from rpacore import Engine, ExecutionTransition, Transaction, resolve_config_paths
 ```
 
 Avoid importing from implementation submodules in application code unless a

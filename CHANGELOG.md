@@ -13,6 +13,10 @@ All notable user-facing changes are recorded here.
   versions.
 - Added `DefinitionIdentityError` for missing, invalid, changed, unidentified,
   or incompatible durable definition identities.
+- Added an optional synchronous execution-transition sink to `Engine.run()` and
+  a frozen top-level `ExecutionTransition` format-v1 fact. Standalone calls are
+  unchanged when no sink is supplied; selected checkpoint state is explicit,
+  JSON-safe, minimized, and detached.
 
 ### Breaking
 

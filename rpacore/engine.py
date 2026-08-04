@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Callable, Iterable, Literal
 
 from rpacore._json_state import validate_json_object
-from rpacore._kernel import _TransitionEmitter, _TransitionSink
+from rpacore._kernel import _TransitionEmitter
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, ExecutionValidationError, SystemException
 from rpacore.logger import bind_log_context, get_logger
@@ -18,6 +18,7 @@ from rpacore.screenshot import capture_screenshot
 from rpacore.skill import Skill
 from rpacore.status import Status
 from rpacore.transaction import HistoryEvent, Transaction
+from rpacore.transition import ExecutionTransition
 
 
 class Engine:
@@ -73,8 +74,20 @@ class Engine:
         ctx: ProcessContext,
         *,
         checkpoint: Callable[[Transaction], None] | None = None,
+        transition_sink: Callable[[ExecutionTransition], None] | None = None,
+        transition_state_fields: Iterable[str] = (),
     ) -> None:
-        """Execute all skills in the transaction, retrying retryable failed skills up to max_retries times."""
+        """Execute skills and optionally emit closed lifecycle transitions.
+
+        The synchronous transition sink runs after each lifecycle mutation and
+        history append but before the matching strict checkpoint callback.
+        ``transition_state_fields`` selects the only durable state keys copied
+        into each emitted fact.
+        """
+        transitions = _TransitionEmitter(
+            transition_sink,
+            transition_state_fields=transition_state_fields,
+        )
         transaction = ctx.transaction
         log_context: dict[str, str] = {"transaction_id": transaction.id}
         if transaction.reference:
@@ -83,28 +96,8 @@ class Engine:
             self._run(
                 ctx,
                 checkpoint=checkpoint,
-                transitions=_TransitionEmitter(),
+                transitions=transitions,
             )
-
-    def _run_with_transition_sink(
-        self,
-        ctx: ProcessContext,
-        *,
-        transition_sink: _TransitionSink,
-        checkpoint: Callable[[Transaction], None] | None = None,
-        checkpoint_state_fields: Iterable[str] = (),
-    ) -> None:
-        """Run through the private prototype seam without changing public API."""
-        transaction = ctx.transaction
-        log_context: dict[str, str] = {"transaction_id": transaction.id}
-        if transaction.reference:
-            log_context["transaction_reference"] = transaction.reference
-        transitions = _TransitionEmitter(
-            transition_sink,
-            checkpoint_state_fields=checkpoint_state_fields,
-        )
-        with bind_log_context(**log_context):
-            self._run(ctx, checkpoint=checkpoint, transitions=transitions)
 
     def _run(
         self,
