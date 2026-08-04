@@ -154,6 +154,7 @@ class TestPackageVersion:
             "EmailNotifier",
             "Engine",
             "EnvCredentialProvider",
+            "ExecutionTransition",
             "ExecutionValidationError",
             "HistoryEntry",
             "HistoryEvent",

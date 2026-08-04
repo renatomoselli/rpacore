@@ -38,6 +38,9 @@ def test_smoke_code_exercises_public_configuration_and_query_apis(tmp_path: Path
     assert "expected_public_exports" in smoke_code
     assert "v011_public_exports" in smoke_code
     assert "frozen v0.2 contract" in smoke_code
+    assert "ExecutionTransition" in smoke_code
+    assert "transition_sink=transitions.append" in smoke_code
+    assert 'transition_state_fields=("ran",)' in smoke_code
     compile(smoke_code, "<installed-wheel-smoke>", "exec")
 
 
@@ -57,6 +60,8 @@ def test_typing_consumer_uses_scalar_accessor_types() -> None:
 
     assert 'retries: int = require_config(config, "retries", int)' in consumer_code
     assert 'state_label: str = context.require_state("label", str)' in consumer_code
+    assert "transitions: list[ExecutionTransition] = []" in consumer_code
+    assert "transition_sink=transitions.append" in consumer_code
 
 
 class TestInstalledWheelValidationScript:
@@ -97,7 +102,7 @@ class TestInstalledWheelValidationScript:
 
         assert "imported rpacore from checkout" in code
         assert repr(str(repo_root.resolve())) in code
-        assert "Engine().run(ctx)" in code
+        assert "transition_sink=transitions.append" in code
         assert "ctx.state" in code
 
     def test_run_prints_command_and_checks_result(self, tmp_path: Path, capsys) -> None:

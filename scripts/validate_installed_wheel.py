@@ -27,7 +27,8 @@ _FROZEN_PUBLIC_EXPORTS = (
     "Artifact", "ArtifactReport", "BusinessException", "ConfigField",
     "CredentialNotFoundError", "CredentialProvider", "DefinitionIdentityError",
     "EmailNotifier", "Engine",
-    "EnvCredentialProvider", "ExecutionValidationError", "HistoryEntry", "HistoryEvent",
+    "EnvCredentialProvider", "ExecutionTransition", "ExecutionValidationError",
+    "HistoryEntry", "HistoryEvent",
     "KeyringCredentialProvider", "Notifier", "OutcomeCategory", "OutcomeReport",
     "ProcessContext", "ProjectManifest", "QueueAdminEvent", "QueueAttempt",
     "QueueAttemptOutcome", "QueueItem", "QueueLeaseLostError", "QueuePoisonEvent",
@@ -140,6 +141,7 @@ import rpacore
 from rpacore import (
     ConfigField,
     Engine,
+    ExecutionTransition,
     bind_log_context,
     configure_logger,
     OutcomeCategory,
@@ -184,13 +186,28 @@ tx = Transaction(
     skills=[OkSkill("ok", 1)],
 )
 ctx = ProcessContext(transaction=tx)
-Engine().run(ctx)
+transitions: list[ExecutionTransition] = []
+Engine().run(
+    ctx,
+    transition_sink=transitions.append,
+    transition_state_fields=("ran",),
+)
 
 assert tx.status is Status.SUCCESSFUL
 assert tx.outcome_category is OutcomeCategory.SUCCESSFUL
 assert tx.retry_disposition is RetryDisposition.NOT_APPLICABLE
 assert tx.skills[0].status is Status.SUCCESSFUL
 assert ctx.state == {{"ran": True}}
+assert transitions
+assert isinstance(transitions[-1], ExecutionTransition)
+assert transitions[-1].to_record()["checkpoint_state"] == {{"ran": True}}
+assert set(transitions[-1].to_record()) == {{
+    "schema_version", "transition_id", "sequence", "occurred_at", "event",
+    "transaction_id", "transaction_reference", "definition_identity",
+    "transaction_status", "execution_pass", "skill_name",
+    "skill_execution_order", "skill_status", "outcome_category",
+    "failure_code", "retry_recommended", "checkpoint_state",
+}}
 report = generate_report(tx)
 assert isinstance(report.outcome, OutcomeReport)
 assert isinstance(report.record, ReportRecord)
@@ -226,7 +243,7 @@ print(f"Python {{platform.python_version()}}; SQLite {{sqlite3.sqlite_version}}"
 
 def _typing_consumer_code() -> str:
     return """\
-from rpacore import ProcessContext, Transaction, optional_config, require_config
+from rpacore import Engine, ExecutionTransition, ProcessContext, Transaction, optional_config, require_config
 
 config: dict[str, object] = {"retries": 2, "label": "ready"}
 retries: int = require_config(config, "retries", int)
@@ -238,9 +255,17 @@ config_retries: int = context.require_config("retries", int)
 context.state["label"] = label
 state_label: str = context.require_state("label", str)
 state_retries: int = context.optional_state("retries", int, retries)
+transitions: list[ExecutionTransition] = []
+Engine().run(
+    context,
+    transition_sink=transitions.append,
+    transition_state_fields=("label",),
+)
+transition_record: dict[str, object] = transitions[-1].to_record()
 
 assert config_retries == state_retries
 assert state_label == label
+assert transition_record["schema_version"] == 1
 """
 
 

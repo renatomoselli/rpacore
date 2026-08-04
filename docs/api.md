@@ -26,6 +26,7 @@ type alias.
 | Symbol | Purpose | Durable mutations and side effects |
 | --- | --- | --- |
 | `Engine` | Executes ordered skills in a `Transaction`. | Mutates transaction, skill statuses, history, timestamps, retry count, state, metadata, and artifacts in memory. Persists only when `checkpoint` calls a persistence function. |
+| `ExecutionTransition` | Frozen execution-transition-v1 fact emitted by an optional `Engine.run()` sink. | Contains closed lifecycle truth and only explicitly allowlisted checkpoint state. `checkpoint_state` and `to_record()` return fresh detached dictionaries; the fact performs no I/O. |
 | `execute_transaction` | Run one transaction with a `ProcessContext`, optional strict SQLite checkpoints, and optional runtime resources. | Mutates the transaction through `Engine.run()`. When `transaction_db_path` is set, requires a non-empty definition identity before opening the database, then creates or migrates SQLite storage and checkpoints each transition. |
 | `ProcessContext` | Runtime context passed to skills. | Carries durable `state`, runtime-only `resources`, config, and transaction reference. Resources are not serialized. |
 | `Skill` | Base class for user-authored work units. | User subclasses implement `execute(ctx)`. Side effects belong to user code. |
@@ -43,6 +44,35 @@ Use `execute_transaction(transaction, transaction_db_path=...)` for ordinary
 one-off runs that should persist strict SQLite checkpoints. Use raw
 `Engine.run(ctx, checkpoint=...)` when you need to build the full
 `ProcessContext` or custom persistence callback yourself.
+
+### Execution transition sink
+
+`Engine.run()` accepts optional keyword-only `transition_sink` and
+`transition_state_fields` arguments. The sink receives one
+`ExecutionTransition` after each lifecycle mutation and history append, before
+the matching strict checkpoint callback. The sink is synchronous: if it raises,
+the exception propagates, user execution stops before the next enforceable
+effect boundary, and the already-applied in-memory mutation is not rolled back.
+If the sink raises while another exception is already being handled, the sink
+exception supersedes it; the lifecycle status and history already applied remain
+available in memory.
+No retry, replay, transport, persistence, or delivery guarantee is implied.
+
+`transition_state_fields` is an explicit allowlist of non-empty, unique state
+keys. It requires a sink and is validated before transaction mutation. Selected
+values must be JSON-safe, are detached at emission time, and cannot be changed
+by later transaction or decoded-record mutation. Selected keys absent from
+`transaction.state` are omitted. Config, metadata, resources, credentials,
+exceptions, paths, and retry disposition are never copied automatically.
+
+Execution transition format v1 is a closed 17-field record: `schema_version`,
+`transition_id`, `sequence`, `occurred_at`, `event`, `transaction_id`,
+`transaction_reference`, `definition_identity`, `transaction_status`,
+`execution_pass`, `skill_name`, `skill_execution_order`, `skill_status`,
+`outcome_category`, `failure_code`, `retry_recommended`, and
+`checkpoint_state`. `retry_recommended` is a Core classification fact, not a
+durable retry decision. Consumers should call `to_record()` and reject schema
+versions they do not support.
 
 ## Exceptions
 
@@ -177,11 +207,12 @@ captures both framework and application events without duplicate handlers.
 
 ### Versioned record compatibility
 
-Canonical transaction, query-page/cursor, report, doctor, CLI, export, and log
-records are framework-owned contracts. For a given version, their documented
-framework fields are closed: adding, removing, renaming, retyping, or changing
-the meaning of one requires a new version. Existing conditional fields retain
-their documented conditions; they do not create a general extension point.
+Canonical transaction, execution-transition, query-page/cursor, report, doctor,
+CLI, export, and log records are framework-owned contracts. For a given version,
+their documented framework fields are closed: adding, removing, renaming,
+retyping, or changing the meaning of one requires a new version. Existing
+conditional fields retain their documented conditions; they do not create a
+general extension point.
 
 Query cursors are opaque. Pass a cursor only back to the matching
 `query_transactions()` call; the framework accepts its supported cursor version
