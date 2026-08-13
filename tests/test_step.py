@@ -1,113 +1,113 @@
-"""Tests for rpacore.skill."""
+"""Tests for rpacore.step."""
 
 import pytest
 
 from rpacore.exceptions import BusinessException, SystemException
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.status import Status
 
 
-class TestSkillFreshState:
-    """A freshly created Skill has predictable defaults."""
+class TestStepFreshState:
+    """A freshly created Step has predictable defaults."""
 
     def test_name(self) -> None:
-        skill = Skill("login", 1)
-        assert skill.name == "login"
+        step = Step("login", 1)
+        assert step.name == "login"
 
     def test_execution_order(self) -> None:
-        skill = Skill("login", 1)
-        assert skill.execution_order == 1
+        step = Step("login", 1)
+        assert step.execution_order == 1
 
     def test_status_defaults_to_pending(self) -> None:
-        skill = Skill("login", 1)
-        assert skill.status is Status.PENDING
+        step = Step("login", 1)
+        assert step.status is Status.PENDING
 
     def test_arguments_defaults_to_empty_dict(self) -> None:
-        skill = Skill("login", 1)
-        assert skill.arguments == {}
+        step = Step("login", 1)
+        assert step.arguments == {}
 
     def test_exceptions_defaults_to_empty_list(self) -> None:
-        skill = Skill("login", 1)
-        assert skill.exceptions == []
+        step = Step("login", 1)
+        assert step.exceptions == []
 
     def test_no_public_timeout_attribute(self) -> None:
-        skill = Skill("login", 1)
-        assert not hasattr(skill, "timeout")
+        step = Step("login", 1)
+        assert not hasattr(step, "timeout")
 
     def test_arguments_not_shared_between_instances(self) -> None:
-        a = Skill("a", 1)
-        b = Skill("b", 2)
+        a = Step("a", 1)
+        b = Step("b", 2)
         a.arguments["key"] = "value"
         assert "key" not in b.arguments
 
     def test_exceptions_not_shared_between_instances(self) -> None:
-        a = Skill("a", 1)
-        b = Skill("b", 2)
+        a = Step("a", 1)
+        b = Step("b", 2)
         a.exceptions.append(BusinessException("err"))
         assert len(b.exceptions) == 0
 
 
-class TestSkillCustomArguments:
+class TestStepCustomArguments:
     def test_custom_arguments(self) -> None:
-        skill = Skill("login", 1, arguments={"user": "admin"})
-        assert skill.arguments == {"user": "admin"}
+        step = Step("login", 1, arguments={"user": "admin"})
+        assert step.arguments == {"user": "admin"}
 
     def test_custom_arguments_does_not_mutate_original(self) -> None:
         args = {"user": "admin"}
-        skill = Skill("login", 1, arguments=args)
-        skill.arguments["password"] = "secret"
+        step = Step("login", 1, arguments=args)
+        step.arguments["password"] = "secret"
         assert "password" not in args
 
 
-class TestSkillTimeoutRemoved:
+class TestStepTimeoutRemoved:
     def test_timeout_keyword_is_not_public_api(self) -> None:
         with pytest.raises(TypeError, match="timeout"):
-            Skill("login", 1, timeout=0.5)  # type: ignore[call-arg]
+            Step("login", 1, timeout=0.5)  # type: ignore[call-arg]
 
 
-class TestSkillExecute:
-    def test_base_skill_raises_not_implemented(self) -> None:
+class TestStepExecute:
+    def test_base_step_raises_not_implemented(self) -> None:
         from rpacore.context import ProcessContext
         from rpacore.transaction import Transaction
-        skill = Skill("login", 1)
+        step = Step("login", 1)
         ctx = ProcessContext(transaction=Transaction(reference="test"))
         with pytest.raises(NotImplementedError, match="login"):
-            skill.execute(ctx)
+            step.execute(ctx)
 
     def test_subclass_can_implement_execute(self) -> None:
         from rpacore.context import ProcessContext
         from rpacore.transaction import Transaction
 
-        class LoginSkill(Skill):
+        class LoginStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 ctx.state["logged_in"] = True
 
-        skill = LoginSkill("login", 1)
+        step = LoginStep("login", 1)
         ctx = ProcessContext(transaction=Transaction(reference="test"))
-        skill.execute(ctx)
+        step.execute(ctx)
         assert ctx.state["logged_in"] is True
 
 
-class TestSkillStatusTransitions:
+class TestStepStatusTransitions:
     def test_status_can_be_set_to_in_progress(self) -> None:
-        skill = Skill("login", 1)
-        skill.status = Status.IN_PROGRESS
-        assert skill.status is Status.IN_PROGRESS
+        step = Step("login", 1)
+        step.status = Status.IN_PROGRESS
+        assert step.status is Status.IN_PROGRESS
 
     def test_status_can_be_set_to_successful(self) -> None:
-        skill = Skill("login", 1)
-        skill.status = Status.SUCCESSFUL
-        assert skill.status is Status.SUCCESSFUL
+        step = Step("login", 1)
+        step.status = Status.SUCCESSFUL
+        assert step.status is Status.SUCCESSFUL
 
     def test_status_can_be_set_to_failed(self) -> None:
-        skill = Skill("login", 1)
-        skill.status = Status.FAILED
-        assert skill.status is Status.FAILED
+        step = Step("login", 1)
+        step.status = Status.FAILED
+        assert step.status is Status.FAILED
 
     def test_exceptions_can_be_recorded(self) -> None:
-        skill = Skill("login", 1)
+        step = Step("login", 1)
         exc = SystemException("timeout", action="login")
-        skill.exceptions.append(exc)
-        skill.status = Status.FAILED
-        assert len(skill.exceptions) == 1
-        assert skill.status is Status.FAILED
+        step.exceptions.append(exc)
+        step.status = Status.FAILED
+        assert len(step.exceptions) == 1
+        assert step.status is Status.FAILED

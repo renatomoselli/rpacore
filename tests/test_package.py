@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import tomllib
-from importlib import metadata
+from importlib import import_module, metadata
 from pathlib import Path
 
+import pytest
+
 import rpacore
+from rpacore.step import Step
 from rpacore.cli import main
 
 
@@ -139,7 +142,7 @@ class TestPackageVersion:
         assert rpacore.HistoryEvent.TRANSACTION_STARTED == "transaction_started"
 
     def test_serializer_is_reexported(self) -> None:
-        assert rpacore.TRANSACTION_FORMAT_VERSION == 2
+        assert rpacore.TRANSACTION_FORMAT_VERSION == 3
         assert callable(rpacore.serialize_transaction)
 
     def test_public_api_exports_are_deliberate(self) -> None:
@@ -175,8 +178,8 @@ class TestPackageVersion:
             "QueueStatus",
             "ReportRecord",
             "RetryDisposition",
-            "Skill",
-            "SkillReport",
+            "Step",
+            "StepReport",
             "SqliteQueue",
             "Status",
             "SystemException",
@@ -223,9 +226,16 @@ class TestPackageVersion:
         assert not expected - actual, f"Missing public exports: {sorted(expected - actual)}"
         assert rpacore.__all__ == sorted(rpacore.__all__)
 
+    def test_step_api_rejects_retired_execution_module(self) -> None:
+        assert rpacore.Step is Step
+        assert rpacore.StepReport.__name__ == "StepReport"
+
+        with pytest.raises(ModuleNotFoundError, match=r"rpacore\.skill"):
+            import_module("rpacore.skill")
+
     def test_rejected_features_are_not_public_exports(self) -> None:
         rejected = {
-            "SkillTestCase",
+            "StepTestCase",
             "pipeline_from_config",
             "resume_cli_transaction",
             "EventBus",

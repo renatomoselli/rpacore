@@ -1,4 +1,4 @@
-"""Transaction — a group of skills to execute."""
+"""Transaction — a group of steps to execute."""
 
 from __future__ import annotations
 
@@ -11,19 +11,19 @@ from rpacore._definition import validate_definition_identity
 from rpacore._json_state import validate_json_object
 from rpacore.exceptions import ExecutionValidationError
 from rpacore.outcome import OutcomeCategory, RetryDisposition, validate_failure_code
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.status import Status
 
 
 class HistoryEvent(StrEnum):
-    """Closed v0.1.0 vocabulary for durable transaction history."""
+    """Closed vocabulary for durable transaction history."""
 
     TRANSACTION_STARTED = "transaction_started"
-    SKILL_STARTED = "skill_started"
-    SKILL_SUCCEEDED = "skill_succeeded"
-    SKILL_FAILED = "skill_failed"
-    SKILL_SKIPPED = "skill_skipped"
-    SKILL_INTERRUPTED = "skill_interrupted"
+    STEP_STARTED = "step_started"
+    STEP_SUCCEEDED = "step_succeeded"
+    STEP_FAILED = "step_failed"
+    STEP_SKIPPED = "step_skipped"
+    STEP_INTERRUPTED = "step_interrupted"
     RETRY_SCHEDULED = "retry_scheduled"
     TRANSACTION_RESUMED = "transaction_resumed"
     TRANSACTION_COMPLETED = "transaction_completed"
@@ -38,8 +38,8 @@ class HistoryEntry:
     event: HistoryEvent
     status: Status
     retry_number: int
-    skill_name: str = ""
-    skill_execution_order: int | None = None
+    step_name: str = ""
+    step_execution_order: int | None = None
 
 
 @dataclass
@@ -59,10 +59,10 @@ class Artifact:
 
 @dataclass
 class Transaction:
-    """A transaction groups skills into a single executable unit.
+    """A transaction groups steps into a single executable unit.
 
-    Skills are stored in insertion order. Use ordered_skills() to get
-    them sorted by execution_order, and failed_skills() to get only
+    Steps are stored in insertion order. Use ordered_steps() to get
+    them sorted by execution_order, and failed_steps() to get only
     the ones that failed.
     """
 
@@ -76,7 +76,7 @@ class Transaction:
     state: dict[str, object] = field(default_factory=dict)
     metadata: dict[str, object] = field(default_factory=dict)
     artifacts: list[Artifact] = field(default_factory=list)
-    skills: list[Skill] = field(default_factory=list)
+    steps: list[Step] = field(default_factory=list)
     history: list[HistoryEntry] = field(default_factory=list)
     outcome_category: OutcomeCategory = OutcomeCategory.UNKNOWN
     retry_disposition: RetryDisposition = RetryDisposition.UNKNOWN
@@ -98,16 +98,16 @@ class Transaction:
         self.state = dict(self.state)
         self.metadata = dict(self.metadata)
         self.artifacts = list(self.artifacts)
-        self.skills = list(self.skills)
+        self.steps = list(self.steps)
         self.history = list(self.history)
 
-    def ordered_skills(self) -> list[Skill]:
-        """Return skills sorted by execution_order."""
-        return sorted(self.skills, key=lambda s: s.execution_order)
+    def ordered_steps(self) -> list[Step]:
+        """Return steps sorted by execution_order."""
+        return sorted(self.steps, key=lambda s: s.execution_order)
 
-    def failed_skills(self) -> list[Skill]:
-        """Return skills with status FAILED."""
-        return [s for s in self.skills if s.status == Status.FAILED]
+    def failed_steps(self) -> list[Step]:
+        """Return steps with status FAILED."""
+        return [s for s in self.steps if s.status == Status.FAILED]
 
     def append_history(
         self,
@@ -115,7 +115,7 @@ class Transaction:
         *,
         status: Status | None = None,
         retry_number: int | None = None,
-        skill: Skill | None = None,
+        step: Step | None = None,
         timestamp: datetime | None = None,
     ) -> HistoryEntry:
         """Append and return a transaction-local durable history entry."""
@@ -125,8 +125,8 @@ class Transaction:
             event=event,
             status=status if status is not None else self.status,
             retry_number=retry_number if retry_number is not None else self.retry_count,
-            skill_name="" if skill is None else skill.name,
-            skill_execution_order=None if skill is None else skill.execution_order,
+            step_name="" if step is None else step.name,
+            step_execution_order=None if step is None else step.execution_order,
         )
         self.history.append(entry)
         return entry
@@ -142,31 +142,31 @@ class Transaction:
 
         names: set[str] = set()
         orders: set[int] = set()
-        for skill in self.skills:
-            if not isinstance(skill.name, str):
+        for step in self.steps:
+            if not isinstance(step.name, str):
                 raise ExecutionValidationError(
-                    f"skill.name must be a non-empty str, got {skill.name!r}"
+                    f"step.name must be a non-empty str, got {step.name!r}"
                 )
-            if not skill.name.strip():
-                raise ExecutionValidationError("skill.name must be a non-empty str")
-            if skill.name in names:
+            if not step.name.strip():
+                raise ExecutionValidationError("step.name must be a non-empty str")
+            if step.name in names:
                 raise ExecutionValidationError(
-                    f"skill.name must be unique within a transaction: {skill.name!r}"
+                    f"step.name must be unique within a transaction: {step.name!r}"
                 )
-            names.add(skill.name)
+            names.add(step.name)
 
-            order = skill.execution_order
+            order = step.execution_order
             if isinstance(order, bool) or not isinstance(order, int):
                 raise ExecutionValidationError(
-                    f"skill.execution_order must be a positive int, got {order!r}"
+                    f"step.execution_order must be a positive int, got {order!r}"
                 )
             if order <= 0:
                 raise ExecutionValidationError(
-                    f"skill.execution_order must be a positive int, got {order!r}"
+                    f"step.execution_order must be a positive int, got {order!r}"
                 )
             if order in orders:
                 raise ExecutionValidationError(
-                    "skill.execution_order must be unique within a transaction: "
+                    "step.execution_order must be unique within a transaction: "
                     f"{order!r}"
                 )
             orders.add(order)
@@ -191,8 +191,8 @@ class Transaction:
                 artifact.metadata,
                 path=f"transaction.artifacts[{index}].metadata",
             )
-        for skill in self.skills:
+        for step in self.steps:
             validate_json_object(
-                skill.arguments,
-                path=f"transaction.skills[{skill.name!r}].arguments",
+                step.arguments,
+                path=f"transaction.steps[{step.name!r}].arguments",
             )

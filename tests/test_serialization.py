@@ -12,7 +12,7 @@ from rpacore import (
     BusinessException,
     HistoryEvent,
     ProcessContext,
-    Skill,
+    Step,
     Status,
     SystemException,
     Transaction,
@@ -22,10 +22,10 @@ from rpacore._json_state import JsonStateError
 
 
 def test_serialize_transaction_returns_canonical_json_safe_record() -> None:
-    skill = Skill("download", 1, arguments={"invoice": "001"})
-    skill.status = Status.FAILED
-    skill.exceptions.append(BusinessException("bad invoice", action="download"))
-    skill.exceptions.append(SystemException("timeout", action="download", retry_number=1))
+    step = Step("download", 1, arguments={"invoice": "001"})
+    step.status = Status.FAILED
+    step.exceptions.append(BusinessException("bad invoice", action="download"))
+    step.exceptions.append(SystemException("timeout", action="download", retry_number=1))
     tx = Transaction(
         id="tx-001",
         reference="invoice-001",
@@ -37,7 +37,7 @@ def test_serialize_transaction_returns_canonical_json_safe_record() -> None:
         state={"invoice": "001"},
         metadata={"customer": "acme"},
         definition_identity="invoice-processing/v1",
-        skills=[skill],
+        steps=[step],
         artifacts=[
             Artifact(
                 id="artifact-001",
@@ -50,15 +50,15 @@ def test_serialize_transaction_returns_canonical_json_safe_record() -> None:
         ],
     )
     tx.append_history(
-        HistoryEvent.SKILL_FAILED,
-        skill=skill,
+        HistoryEvent.STEP_FAILED,
+        step=step,
         timestamp=datetime(2026, 6, 10, 12, 4, tzinfo=timezone.utc),
     )
 
     record = serialize_transaction(tx)
 
     assert record == {
-        "transaction_format_version": 2,
+        "transaction_format_version": 3,
         "id": "tx-001",
         "reference": "invoice-001",
         "definition_identity": "invoice-processing/v1",
@@ -69,7 +69,7 @@ def test_serialize_transaction_returns_canonical_json_safe_record() -> None:
         "finished_at": "2026-06-10T12:02:00+00:00",
         "state": {"invoice": "001"},
         "metadata": {"customer": "acme"},
-        "skills": [
+        "steps": [
             {
                 "name": "download",
                 "execution_order": 1,
@@ -81,18 +81,18 @@ def test_serialize_transaction_returns_canonical_json_safe_record() -> None:
                         "message": "bad invoice",
                         "action": "download",
                         "retry_number": 0,
-                        "datetime_occurred": skill.exceptions[0].datetime_occurred.isoformat(),
+                        "occurred_at": step.exceptions[0].occurred_at.isoformat(),
                         "screenshot_path": "",
-                        "stops_execution": False,
+                        "halts_remaining_steps": False,
                     },
                     {
                         "type": "system",
                         "message": "timeout",
                         "action": "download",
                         "retry_number": 1,
-                        "datetime_occurred": skill.exceptions[1].datetime_occurred.isoformat(),
+                        "occurred_at": step.exceptions[1].occurred_at.isoformat(),
                         "screenshot_path": "",
-                        "stops_execution": True,
+                        "halts_remaining_steps": True,
                     },
                 ],
             }
@@ -101,11 +101,11 @@ def test_serialize_transaction_returns_canonical_json_safe_record() -> None:
             {
                 "sequence": 1,
                 "timestamp": "2026-06-10T12:04:00+00:00",
-                "event": "skill_failed",
+                "event": "step_failed",
                 "status": "failed",
                 "retry_number": 1,
-                "skill_name": "download",
-                "skill_execution_order": 1,
+                "step_name": "download",
+                "step_execution_order": 1,
             }
         ],
         "artifacts": [
@@ -145,12 +145,12 @@ def test_serializer_excludes_resources_config_credentials_and_artifact_contents(
 
 
 def test_serializer_returns_snapshot_of_mutable_json_fields() -> None:
-    skill = Skill("download", 1, arguments={"items": [{"id": "001"}]})
+    step = Step("download", 1, arguments={"items": [{"id": "001"}]})
     tx = Transaction(
         reference="invoice",
         state={"items": [{"id": "001"}]},
         metadata={"labels": ["urgent"]},
-        skills=[skill],
+        steps=[step],
         artifacts=[
             Artifact(
                 name="invoice",
@@ -164,12 +164,12 @@ def test_serializer_returns_snapshot_of_mutable_json_fields() -> None:
 
     tx.state["items"][0]["id"] = "mutated"  # type: ignore[index]
     tx.metadata["labels"].append("mutated")  # type: ignore[union-attr]
-    skill.arguments["items"][0]["id"] = "mutated"  # type: ignore[index]
+    step.arguments["items"][0]["id"] = "mutated"  # type: ignore[index]
     tx.artifacts[0].metadata["labels"].append("mutated")  # type: ignore[union-attr]
 
     assert record["state"] == {"items": [{"id": "001"}]}
     assert record["metadata"] == {"labels": ["urgent"]}
-    assert record["skills"][0]["arguments"] == {  # type: ignore[index]
+    assert record["steps"][0]["arguments"] == {  # type: ignore[index]
         "items": [{"id": "001"}],
     }
     assert record["artifacts"][0]["metadata"] == {  # type: ignore[index]
@@ -188,23 +188,45 @@ def test_serializer_normalizes_naive_datetime_as_utc() -> None:
     assert record["created_at"] == "2026-06-10T12:00:00+00:00"
 
 
-def test_serializer_rejects_non_json_safe_skill_arguments_with_path() -> None:
-    skill = Skill("download", 1, arguments={"invoice": object()})
-    tx = Transaction(reference="invoice", skills=[skill])
+@pytest.mark.parametrize("exception_type", [BusinessException, SystemException])
+def test_serializer_normalizes_naive_exception_datetime_as_utc(
+    exception_type: type[BusinessException] | type[SystemException],
+) -> None:
+    step = Step("download", 1)
+    step.exceptions.append(
+        exception_type(
+            "failure",
+            action="download",
+            occurred_at=datetime(2026, 6, 10, 12, 5),
+        )
+    )
+    tx = Transaction(reference="invoice", steps=[step])
 
-    with pytest.raises(JsonStateError, match=r"transaction\.skills\['download'\]\.arguments\['invoice'\]"):
+    record = serialize_transaction(tx)
+
+    steps = record["steps"]
+    assert isinstance(steps, list)
+    exceptions = steps[0]["exceptions"]
+    assert exceptions[0]["occurred_at"] == "2026-06-10T12:05:00+00:00"
+
+
+def test_serializer_rejects_non_json_safe_step_arguments_with_path() -> None:
+    step = Step("download", 1, arguments={"invoice": object()})
+    tx = Transaction(reference="invoice", steps=[step])
+
+    with pytest.raises(JsonStateError, match=r"transaction\.steps\['download'\]\.arguments\['invoice'\]"):
         serialize_transaction(tx)
 
 
-def test_serializer_rejects_tuple_skill_arguments_without_coercion() -> None:
+def test_serializer_rejects_tuple_step_arguments_without_coercion() -> None:
     tx = Transaction(
         reference="invoice",
-        skills=[Skill("download", 1, arguments={"ids": (1, 2)})],
+        steps=[Step("download", 1, arguments={"ids": (1, 2)})],
     )
 
     with pytest.raises(
         JsonStateError,
-        match=r"transaction\.skills\['download'\]\.arguments\['ids'\]",
+        match=r"transaction\.steps\['download'\]\.arguments\['ids'\]",
     ):
         serialize_transaction(tx)
 

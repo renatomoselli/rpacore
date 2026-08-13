@@ -13,7 +13,7 @@ JSON export writes one envelope:
 
 ```json
 {
-  "export_format_version": 1,
+  "export_format_version": 2,
   "framework_version": "0.3.0",
   "exported_at": "2026-01-01T00:00:00+00:00",
   "transactions": []
@@ -22,13 +22,11 @@ JSON export writes one envelope:
 
 Each entry in `transactions` is the canonical serialized transaction record and
 contains `transaction_format_version`. The current transaction format is version
-2 and includes the caller-owned `definition_identity` used for recovery
+3 and includes the caller-owned `definition_identity` used for recovery
 compatibility. An empty identity marks a legacy or inspection-only record.
 
-Report and notifier payloads use the separate, frozen report format version 1.
-Its embedded transaction-v1 snapshot predates `definition_identity`; consumers
-that need the recovery identity must load or export the canonical transaction-v2
-record.
+Report and notifier payloads use the separate report format version 2, which
+embeds the canonical transaction-v3 record.
 
 ## Compatibility
 
@@ -59,7 +57,7 @@ record. Consumers should parse each line independently.
 ## Sensitive Data
 
 Machine-readable transaction records can include user-supplied state, metadata,
-skill arguments, exception messages, and artifact metadata. They do not include
+step arguments, exception messages, and artifact metadata. They do not include
 runtime resources, config, credentials, or artifact file contents.
 
 Export files should be handled as sensitive business data.

@@ -58,13 +58,13 @@ directory loads `rpacore.toml` from that directory.
 
 ## Decisions
 
-RPA Core keeps skill construction and transaction wiring in Python.
+RPA Core keeps step construction and transaction wiring in Python.
 The manifest does not support:
 
 - `pipeline_from_config`
-- automatic skill discovery
+- automatic step discovery
 - CLI transaction resume
-- declarative skill graphs
+- declarative step graphs
 - runtime AI behavior or AI dependencies
 
 Those features require a separate deterministic contract before they can be

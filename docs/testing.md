@@ -1,8 +1,8 @@
-# Testing RPA Core Skills
+# Testing RPA Core Steps
 
-RPA Core does not provide `SkillTestCase`, a custom test runner, or a
-framework-specific pytest plugin. Skill tests should be normal pytest tests that
-instantiate a skill, a `Transaction`, and a `ProcessContext` directly.
+RPA Core does not provide a custom step test case, test runner, or
+framework-specific pytest plugin. Step tests should be normal pytest tests that
+instantiate a step, a `Transaction`, and a `ProcessContext` directly.
 
 This keeps test execution deterministic and visible. A custom base class would
 need rules for hidden setup, exception wrapping, transaction mutation,
@@ -11,25 +11,25 @@ repeated boilerplate to justify that public API.
 
 ## Basic Pattern
 
-Test skill behavior at the smallest useful boundary:
+Test step behavior at the smallest useful boundary:
 
 ```python
 from pathlib import Path
 
 from rpacore import ProcessContext, Transaction
-from skills.greeting import WriteGreeting
+from steps.greeting import WriteGreeting
 
 
 def test_write_greeting(tmp_path: Path) -> None:
     output = tmp_path / "greeting.txt"
-    skill = WriteGreeting(
+    step = WriteGreeting(
         name="write_greeting",
         execution_order=1,
         arguments={"name": "Alice", "output_path": str(output)},
     )
-    transaction = Transaction(reference="test", skills=[skill])
+    transaction = Transaction(reference="test", steps=[step])
 
-    skill.execute(ProcessContext(transaction=transaction))
+    step.execute(ProcessContext(transaction=transaction))
 
     assert output.read_text(encoding="utf-8") == "Hello, Alice\n"
     assert transaction.state["greeting_path"] == str(output)
@@ -42,7 +42,7 @@ assertion.
 ## Business Exceptions
 
 Business failures are expected domain outcomes. Assert the exception directly
-when testing a skill method, and assert that no unintended state or artifacts
+when testing a step method, and assert that no unintended state or artifacts
 were produced:
 
 ```python
@@ -51,24 +51,24 @@ import pytest
 from rpacore import BusinessException, ProcessContext, Transaction
 
 
-def test_skill_rejects_invalid_input(skill) -> None:
-    transaction = Transaction(reference="test", skills=[skill])
+def test_step_rejects_invalid_input(step) -> None:
+    transaction = Transaction(reference="test", steps=[step])
 
     with pytest.raises(BusinessException, match="invalid input"):
-        skill.execute(ProcessContext(transaction=transaction))
+        step.execute(ProcessContext(transaction=transaction))
 
     assert transaction.state == {}
     assert transaction.artifacts == []
 ```
 
 Use an engine-level test when you need to verify that a `BusinessException`
-sets skill status, lets later skills continue, or stops execution with
-`stop=True`.
+sets step status, lets later steps continue, or halts remaining work with
+`halts_remaining_steps=True`.
 
 ## System Exceptions
 
-System failures are technical failures. If the skill raises `SystemException`
-itself, assert that exception directly. If the skill raises another unexpected
+System failures are technical failures. If the step raises `SystemException`
+itself, assert that exception directly. If the step raises another unexpected
 exception, use an engine-level test to verify the framework wraps it as a
 `SystemException` and applies retry behavior.
 
@@ -78,19 +78,19 @@ import pytest
 from rpacore import ProcessContext, SystemException, Transaction
 
 
-def test_skill_reports_service_timeout(skill) -> None:
-    transaction = Transaction(reference="test", skills=[skill])
+def test_step_reports_service_timeout(step) -> None:
+    transaction = Transaction(reference="test", steps=[step])
 
     with pytest.raises(SystemException, match="service timeout"):
-        skill.execute(ProcessContext(transaction=transaction))
+        step.execute(ProcessContext(transaction=transaction))
 ```
 
 ## State and Artifacts
 
-`ctx.state` is durable JSON-safe transaction state. Skill arguments,
+`ctx.state` is durable JSON-safe transaction state. Step arguments,
 transaction metadata, and artifact metadata follow the same JSON-safe contract.
 Use lists rather than tuples and assert exact shapes and values that later
-skills or persisted records depend on.
+steps or persisted records depend on.
 
 Use `ctx.add_artifact()` to register generated file paths. Tests should assert
 the artifact record, not read artifact contents through the reporting or
@@ -105,13 +105,13 @@ preserves any previous destination.
 
 ## Decision
 
-Do not add `SkillTestCase` to the current API. Plain pytest tests with direct
-`ProcessContext` construction cover the demonstrated skill-testing needs:
+Do not add a framework-specific test base class to the current API. Plain pytest
+tests with direct `ProcessContext` construction cover the demonstrated step-testing needs:
 business exceptions, system exceptions, durable state, artifact records, and
 engine-level retry/status behavior where needed.
 
 If repeated real projects later show meaningful boilerplate that cannot be
 removed with ordinary pytest fixtures, add a narrow helper for that workflow.
 Any helper must document its setup timing, mutation behavior, exception
-disposition, and whether it runs a single skill directly or delegates to
+disposition, and whether it runs a single step directly or delegates to
 `Engine.run()`.

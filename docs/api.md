@@ -7,7 +7,7 @@ when working from the published package. For current development, prefer
 imports such as:
 
 ```python
-from rpacore import Engine, ProcessContext, Skill, Transaction
+from rpacore import Engine, ProcessContext, Step, Transaction
 ```
 
 Only symbols exported by `rpacore.__all__` are covered by the public compatibility
@@ -25,19 +25,19 @@ type alias.
 
 | Symbol | Purpose | Durable mutations and side effects |
 | --- | --- | --- |
-| `Engine` | Executes ordered skills in a `Transaction`. | Mutates transaction, skill statuses, history, timestamps, retry count, state, metadata, and artifacts in memory. Persists only when `checkpoint` calls a persistence function. |
-| `ExecutionTransition` | Frozen execution-transition-v1 fact emitted by an optional `Engine.run()` sink. | Contains closed lifecycle truth and only explicitly allowlisted checkpoint state. `checkpoint_state` and `to_record()` return fresh detached dictionaries; the fact performs no I/O. |
+| `Engine` | Executes ordered steps in a `Transaction`. | Mutates transaction, step statuses, history, timestamps, retry count, state, metadata, and artifacts in memory. Persists only when `checkpoint` calls a persistence function. |
+| `ExecutionTransition` | Frozen execution-transition-v2 fact emitted by an optional `Engine.run()` sink. | Contains closed lifecycle truth and only explicitly allowlisted checkpoint state. `checkpoint_state` and `to_record()` return fresh detached dictionaries; the fact performs no I/O. |
 | `execute_transaction` | Run one transaction with a `ProcessContext`, optional strict SQLite checkpoints, and optional runtime resources. | Mutates the transaction through `Engine.run()`. When `transaction_db_path` is set, requires a non-empty definition identity before opening the database, then creates or migrates SQLite storage and checkpoints each transition. |
-| `ProcessContext` | Runtime context passed to skills. | Carries durable `state`, runtime-only `resources`, config, and transaction reference. Resources are not serialized. |
-| `Skill` | Base class for user-authored work units. | User subclasses implement `execute(ctx)`. Side effects belong to user code. |
-| `Transaction` | Unit of execution and persistence. | Stores reference, caller-owned automation `definition_identity`, lifecycle status, terminal outcome/retry truth, skills, durable state, metadata, artifacts, and history. Validates wiring and JSON-safe durable data before execution or persistence. |
-| `Status` | Transaction and skill status enum. | No side effects. |
+| `ProcessContext` | Runtime context passed to steps. | Carries durable `state`, runtime-only `resources`, config, and transaction reference. Resources are not serialized. |
+| `Step` | Base class for user-authored work units. | User subclasses implement `execute(ctx)`. Side effects belong to user code. |
+| `Transaction` | Unit of execution and persistence. | Stores reference, caller-owned automation `definition_identity`, lifecycle status, terminal outcome/retry truth, steps, durable state, metadata, artifacts, and history. Validates wiring and JSON-safe durable data before execution or persistence. |
+| `Status` | Transaction and step status enum. | No side effects. |
 | `OutcomeCategory`, `RetryDisposition` | Stable terminal work reason and actual retry decision. | No side effects. `unknown` represents legacy or incomplete truth; it is never inferred from message text or retry count. |
 
 `Engine.run(ctx, checkpoint=...)` validates wiring and JSON-safe transaction
-state, metadata, skill arguments, and artifact metadata before user skill code
+state, metadata, step arguments, and artifact metadata before user step code
 runs. When a checkpoint callback is supplied, it is called after each
-transaction or skill state transition. Checkpoint failures propagate and stop
+transaction or step state transition. Checkpoint failures propagate and stop
 execution.
 
 Use `execute_transaction(transaction, transaction_db_path=...)` for ordinary
@@ -65,10 +65,10 @@ by later transaction or decoded-record mutation. Selected keys absent from
 `transaction.state` are omitted. Config, metadata, resources, credentials,
 exceptions, paths, and retry disposition are never copied automatically.
 
-Execution transition format v1 is a closed 17-field record: `schema_version`,
+Execution transition format v2 is a closed 17-field record: `schema_version`,
 `transition_id`, `sequence`, `occurred_at`, `event`, `transaction_id`,
 `transaction_reference`, `definition_identity`, `transaction_status`,
-`execution_pass`, `skill_name`, `skill_execution_order`, `skill_status`,
+`execution_pass`, `step_name`, `step_execution_order`, `step_status`,
 `outcome_category`, `failure_code`, `retry_recommended`, and
 `checkpoint_state`. `retry_recommended` is a Core classification fact, not a
 durable retry decision. Consumers should call `to_record()` and reject schema
@@ -78,13 +78,13 @@ versions they do not support.
 
 | Symbol | Purpose | Retry classification |
 | --- | --- | --- |
-| `BusinessException` | Expected business-rule failure. | Terminal for that skill unless user data or code changes. Downstream skills continue unless `stop=True`. |
+| `BusinessException` | Expected business-rule failure. | Terminal for that step unless user data or code changes. Downstream steps continue unless `halts_remaining_steps=True`. |
 | `SystemException` | Technical failure such as file, network, or service errors. | Retryable by `Engine(max_retries=...)`. |
 | `ExecutionValidationError` | Invalid transaction wiring or invalid durable state. | Not retryable; fix code or persisted state. |
 | `DefinitionIdentityError` | Missing, invalid, changed, unidentified, or incompatible automation definition identity. | Not retryable with the current definition; supply the exact compatible identity or start a new transaction. |
 | `TransactionFenceError` | A durable queue checkpoint has a stale claim token or transaction revision. | Not retryable by that worker; stop and reacquire the queue item. |
 
-Unhandled exceptions from skill code are recorded as system failures.
+Unhandled exceptions from step code are recorded as system failures.
 `MemoryError` is not masked by checkpoint errors.
 
 `BusinessException` and `SystemException` accept an optional `code=`. Codes are
@@ -106,9 +106,9 @@ not create a transaction row for invalid wiring or durable data.
 | `load_transaction(transaction_id, db_path, readonly=False)` | Load one transaction from SQLite. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite and preserves persisted status values; default mode can migrate older schemas. |
 | `list_transactions(db_path, readonly=False)` | List persisted transactions. `readonly=True` requires an existing current-schema database and never migrates it. | Reads SQLite; default mode can migrate older schemas. A selected transaction removed by concurrent cleanup before deferred load is omitted; other load failures propagate. |
 | `TransactionSummary`, `TransactionPage`, `query_transactions(...)` | Versioned, lightweight transaction query page. | Read-only by default and requires a current schema. Supports exact status-set, UTC window, reference, and top-level metadata filters. Results are ordered by normalized UTC creation time descending then id ascending; opaque cursors are bound to those filters. |
-| `resume_transaction(transaction_id, skills, db_path=..., definition_identity=...)` | Load, validate, and prepare a persisted transaction for retry. | Requires an exact identity match for non-successful records before any in-memory mutation, reattaches executable skills, preserves history-proven skips caused by a stopping business failure, and appends resume history when needed. Successful records return unchanged as an idempotent no-op. |
-| `serialize_transaction(transaction)` | Convert a transaction to a JSON-safe format-v2 record. | Includes `definition_identity`, validates durable JSON fields without requiring executable wiring, and performs no I/O. |
-| `TRANSACTION_FORMAT_VERSION` | Current serialized transaction format version (`2`). | No side effects. |
+| `resume_transaction(transaction_id, steps, db_path=..., definition_identity=...)` | Load, validate, and prepare a persisted transaction for retry. | Requires an exact identity match for non-successful records before any in-memory mutation, reattaches executable steps, preserves history-proven skips caused by a halting business failure, and appends resume history when needed. Successful records return unchanged as an idempotent no-op. |
+| `serialize_transaction(transaction)` | Convert a transaction to a JSON-safe format-v3 record. | Includes `definition_identity`, validates durable JSON fields without requiring executable wiring, and performs no I/O. |
+| `TRANSACTION_FORMAT_VERSION` | Current serialized transaction format version (`3`). | No side effects. |
 
 ## Configuration and Paths
 
@@ -152,16 +152,15 @@ environment variables, or enforce cross-field rules.
 | --- | --- | --- |
 | `CredentialProvider`, `EnvCredentialProvider`, `KeyringCredentialProvider`, `CredentialNotFoundError`, `build_credential_provider` | Resolve credentials from documented providers. | Environment/keyring reads depending on provider. Credentials are not persisted by RPA Core. |
 | `configure_logger`, `get_logger`, `bind_log_context` | Configure stdlib logging and scoped correlation. | Successful configuration atomically replaces RPA Core-owned handlers while preserving application handlers. Invalid configuration leaves the logger unchanged. Context is restored when a binding scope exits. |
-| `ArtifactReport`, `OutcomeReport`, `ReportRecord`, `SkillReport`, `TransactionReport`, `generate_report`, `render_json`, `render_html`, `render_text` | Build and render transaction reports. | `TransactionReport.outcome` directly projects captured terminal category, retry disposition, and optional failure code; it does not infer them from status, history, or queue attempts. `TransactionReport.record` is an immutable, JSON-safe report-v1 record; `render_json()` returns its canonical JSON. Report generation snapshots JSON-safe nested data and exceptions; rendering has no file I/O. |
+| `ArtifactReport`, `OutcomeReport`, `ReportRecord`, `StepReport`, `TransactionReport`, `generate_report`, `render_json`, `render_html`, `render_text` | Build and render transaction reports. | `TransactionReport.outcome` directly projects captured terminal category, retry disposition, and optional failure code; it does not infer them from status, history, or queue attempts. `TransactionReport.record` is an immutable, JSON-safe report-v2 record; `render_json()` returns its canonical JSON. Report generation snapshots JSON-safe nested data and exceptions; rendering has no file I/O. |
 | `Notifier`, `EmailNotifier`, `WebhookNotifier`, `build_notifiers`, `dispatch` | Send notifications. | Dispatch gives each notifier an isolated report snapshot. SMTP or HTTP requests occur when configured. Payloads can contain sensitive transaction data. |
 
-`ReportRecord` is report format v1: a frozen JSON-safe record formed once by
+`ReportRecord` is report format v2: a frozen JSON-safe record formed once by
 `generate_report()`. `render_json()`, `render_text()`, and `render_html()` all
 derive their output from that record, so later mutation of the legacy
 `TransactionReport` convenience fields cannot change rendered operator truth.
-Its embedded transaction-v1 snapshot predates `definition_identity`; consumers
-that need the recovery identity must load or export the canonical transaction-v2
-record instead.
+Its embedded transaction-v3 snapshot includes `definition_identity` and uses
+the current step vocabulary.
 The decoded record has `complete` and `errors` fields. If canonical transaction
 serialization or record encoding cannot complete, it remains renderable with
 `complete: false`, a stable `rpacore.report.*` error code, and only the
@@ -169,7 +168,7 @@ available transaction header; it never changes the transaction outcome.
 
 `WebhookNotifier` preserves its existing payload by default. Set
 `notification.webhook.include_report = true` to add a `report` member
-containing report format v1. This is opt-in because reports include existing
+containing report format v2. This is opt-in because reports include existing
 diagnostic metadata, artifact paths, and exception details.
 
 ### Logging format contract
@@ -179,26 +178,19 @@ tracebacks and explicit stack information are appended as additional sections
 when present, so consumers must not assume a fixed number of delimiters. Use
 `JsonFormatter` for machine parsing.
 
-JSON log format v1 is the default and always includes `log_format_version`, UTC
-`timestamp`, `event`, `level`, and `message`. It additionally includes an
-`exception` object with `type`, `message`, and `traceback` when exception
-information is present, and a `stack` string when stack information is present.
-These optional fields are additive within v1; strict consumers must allow them.
-
-Pass `json_version=2` to `configure_logger(fmt="json", ...)`, or construct
-`JsonFormatter(version=2)`, to opt into JSON log format v2. Its protected
-envelope has `log_format_version`, UTC `timestamp`, `severity`, `logger`,
+JSON log format v3 uses a protected envelope with `log_format_version`, UTC
+`timestamp`, `severity`, `logger`,
 namespaced `event`, `message`, and nested `attributes`. Exception details use
 `exception.type`, `exception.message`, and `exception.stacktrace`; explicit
-stack information is `stacktrace`. V2 intentionally keeps attributes separate
+stack information is `stacktrace`. V3 intentionally keeps attributes separate
 from the envelope and omits automatic config, credential, resource, state,
-metadata, path, and URL fields. Existing v1 output is unchanged unless v2 is
-selected. Framework event names are prefixed with `rpacore.` and use dot
+metadata, path, and URL fields. Framework event names are prefixed with `rpacore.` and use dot
 separators; for example, `queue_run_completed` is
-`rpacore.queue.run_completed` in v2.
+`rpacore.queue.run_completed` in v3. Old JSON log format selection is no longer
+available.
 
 `bind_log_context()` temporarily attaches approved scalar correlation fields
-such as transaction, queue-item, worker, skill, retry, and attempt identifiers.
+such as transaction, queue-item, worker, step, retry, and attempt identifiers.
 Nested scopes restore the prior context even when execution raises. Context is
 local to the current execution context: code that starts a new thread must bind
 the identifiers it needs in that thread. `get_logger("my_automation")` returns
@@ -216,9 +208,8 @@ general extension point.
 
 Query cursors are opaque. Pass a cursor only back to the matching
 `query_transactions()` call; the framework accepts its supported cursor version
-and rejects unsupported versions. JSON log v1 keeps its documented conditional
-exception and stack fields plus existing flat event extras. JSON log v2 keeps a
-protected envelope and confines event attributes to `attributes`. Doctor
+and rejects unsupported versions. JSON log v3 keeps a protected envelope and
+confines event attributes to `attributes`. Doctor
 consumers should use check `id`, `status`, and documented scalar detail fields;
 summary prose is for people rather than semantic parsing.
 

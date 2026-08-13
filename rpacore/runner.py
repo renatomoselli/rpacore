@@ -966,7 +966,7 @@ def _transaction_for_queue_item(
             candidate = build_transaction(item)
             transaction = resume_transaction(
                 item.transaction_id,
-                candidate.skills,
+                candidate.steps,
                 db_path=transaction_db_path,
                 retry_business_failures=retry_business_failures,
                 definition_identity=candidate.definition_identity,
@@ -1166,13 +1166,13 @@ def _validate_initial_queue_transaction(transaction: Transaction) -> None:
 
 
 def _transaction_has_only_business_failures(transaction: Transaction | None) -> bool:
-    """Return True when all failed skills ended with business exceptions."""
+    """Return True when all failed steps ended with business exceptions."""
     if transaction is None:
         return False
-    failed = transaction.failed_skills()
+    failed = transaction.failed_steps()
     return bool(failed) and all(
-        skill.exceptions and isinstance(skill.exceptions[-1], BusinessException)
-        for skill in failed
+        step.exceptions and isinstance(step.exceptions[-1], BusinessException)
+        for step in failed
     )
 
 
@@ -1256,8 +1256,8 @@ def _checkpoint_failure_allows_queue_retry(transaction: Transaction, *, db_path:
 
 def _in_memory_checkpoint_failure_allows_queue_retry(transaction: Transaction) -> bool:
     """Retry after an unpersisted checkpoint unless it recorded a business failure."""
-    if transaction.history and transaction.history[-1].event == HistoryEvent.SKILL_FAILED:
-        return not _has_business_failed_skill(transaction)
+    if transaction.history and transaction.history[-1].event == HistoryEvent.STEP_FAILED:
+        return not _has_business_failed_step(transaction)
     return True
 
 
@@ -1266,17 +1266,17 @@ def _transaction_history_allows_queue_retry(transaction: Transaction) -> bool:
     if not transaction.history:
         return True
     last_event = transaction.history[-1].event
-    if last_event == HistoryEvent.SKILL_SUCCEEDED:
+    if last_event == HistoryEvent.STEP_SUCCEEDED:
         return False
-    if last_event == HistoryEvent.SKILL_FAILED:
-        return not _has_business_failed_skill(transaction)
+    if last_event == HistoryEvent.STEP_FAILED:
+        return not _has_business_failed_step(transaction)
     return True
 
 
-def _has_business_failed_skill(transaction: Transaction) -> bool:
+def _has_business_failed_step(transaction: Transaction) -> bool:
     return any(
-        skill.exceptions and isinstance(skill.exceptions[-1], BusinessException)
-        for skill in transaction.failed_skills()
+        step.exceptions and isinstance(step.exceptions[-1], BusinessException)
+        for step in transaction.failed_steps()
     )
 
 

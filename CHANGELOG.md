@@ -14,19 +14,38 @@ All notable user-facing changes are recorded here.
 - Added `DefinitionIdentityError` for missing, invalid, changed, unidentified,
   or incompatible durable definition identities.
 - Added an optional synchronous execution-transition sink to `Engine.run()` and
-  a frozen top-level `ExecutionTransition` format-v1 fact. Standalone calls are
+  a frozen top-level `ExecutionTransition` format-v2 fact. Standalone calls are
   unchanged when no sink is supplied; selected checkpoint state is explicit,
   JSON-safe, minimized, and detached.
 
 ### Breaking
 
-- Transaction schema version 9 adds immutable `definition_identity`. Existing
-  records migrate with an empty identity and remain readable, inspectable, and
-  exportable, but non-successful unidentified records cannot be resumed.
-- Canonical transaction serialization is format version 2 and includes
-  `definition_identity`. CLI and export envelope versions remain version 1;
-  report format version 1 remains frozen and continues embedding its closed
-  transaction-v1 snapshot.
+- Renamed the public execution object from `Skill` to `Step`, including
+  transaction collections/helpers, report views, generated project packages,
+  history, transitions, logging fields, and machine-record keys. The retired
+  Python names have no compatibility aliases. Generic terms such as
+  `arguments`, `exceptions`, `BusinessException`, `SystemException`,
+  `Status.SUCCESSFUL`, and `execution_order` are unchanged.
+- Renamed exception timestamps to `occurred_at` and the business-failure halt
+  option to `halts_remaining_steps`. System failures still always halt the
+  current execution pass.
+- Advanced transaction SQLite schema 9 to 10 with a transactional, one-way
+  migration from the retired table, column, and history-event vocabulary.
+  Queue schema remains version 4.
+- Advanced machine-readable contracts without reusing old version numbers:
+
+  | Contract | v0.2 | v0.3 |
+  | --- | --- | --- |
+  | Canonical transaction | 2 | 3 |
+  | Report | 1 | 2 |
+  | Execution transition | 1 | 2 |
+  | CLI transaction list/show | 1 | 2 |
+  | JSON/NDJSON export | 1 | 2 |
+  | JSON log | 1 or 2 | 3 |
+
+  Doctor and query-cursor formats remain version 1. JSON log v3 is the sole
+  JSON output; the old format selector has been removed. See
+  [Migrating from v0.2 to v0.3](docs/v0.3-migration.md).
 
 ## v0.2.0 - 2026-07-29
 

@@ -1,4 +1,4 @@
-"""ProcessContext — shared execution context passed to every skill."""
+"""ProcessContext — shared execution context passed to every step."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ T = TypeVar("T")
 
 @dataclass
 class ProcessContext:
-    """Carries all state a skill may need during execution.
+    """Carries all state a step may need during execution.
 
     Attributes:
         transaction:  The active transaction being executed.

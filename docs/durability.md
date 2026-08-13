@@ -10,11 +10,11 @@ the SQLite files live, but RPA Core does not yet ship alternate transaction
 persistence adapters for databases such as PostgreSQL or MySQL.
 
 The storage contract is still kept explicit and portable so a future backend can
-preserve the same transaction semantics without changing how skills are written.
+preserve the same transaction semantics without changing how steps are written.
 
 ## Durable State and Resources
 
-`Transaction.state` is the durable, transaction-owned state mapping. Skills
+`Transaction.state` is the durable, transaction-owned state mapping. Steps
 access it through `ProcessContext.state`, and queue item payload initializes it
 when `run_queue_loop()` builds an item context.
 
@@ -24,7 +24,7 @@ logs the collision at warning level with the overlapping keys.
 
 Durable transaction data must be JSON-safe: dictionaries with string keys,
 lists, strings, numbers, booleans, or `None`. This contract covers transaction
-state and metadata, skill arguments, and artifact metadata. RPA Core validates
+state and metadata, step arguments, and artifact metadata. RPA Core validates
 the complete durable data model at explicit execution, serialization, recovery,
 and persistence boundaries. Errors include the path to the offending value and
 direct runtime objects toward `ProcessContext.resources` or durable artifact
@@ -36,7 +36,7 @@ sessions, handles, and open files. Resources are never persisted with
 transactions and are not included in reports or notifications.
 
 `Transaction.metadata` is a JSON-safe, transaction-owned mapping for durable
-tags and descriptors used outside skill execution. Metadata is persisted with
+tags and descriptors used outside step execution. Metadata is persisted with
 the transaction, but it is not exposed through `ProcessContext.state` and should
 not be used as mutable workflow state. `save_transaction()` validates metadata
 with the same JSON-safe value rules as transaction state, and validation errors
@@ -61,7 +61,7 @@ causes. Failure codes are empty or lowercase dot-separated ASCII namespaces;
 `rpacore.*` is reserved for framework-owned causes.
 
 `Transaction.artifacts` records generated or captured file paths as durable audit
-records. Skills register artifacts with
+records. Steps register artifacts with
 `ProcessContext.add_artifact(name, path, kind="", metadata=None)`. Each artifact
 has a stable id, name, path, free-form kind, UTC creation timestamp, and
 JSON-safe metadata. Artifact files are not read, hashed, uploaded, or required by
@@ -78,7 +78,7 @@ retries. Transaction schema migrations are forward-only; older code must reject
 a newer artifact schema version rather than silently ignoring artifact rows.
 
 `atomic_output_path(destination)` supports content-agnostic file publication for
-skills that write JSON, CSV, workbooks, or library-owned formats. It yields a
+steps that write JSON, CSV, workbooks, or library-owned formats. It yields a
 temporary path in the destination directory and calls `os.replace()` only after
 the context exits successfully. If writer code raises, the previous destination
 is preserved and the temporary file is removed without masking the original
@@ -117,7 +117,7 @@ One-off transaction lifecycle:
   after `Engine.run()` returns or raises
 - `resource_scope` may yield resources that populate `ctx.resources`
 - the context receives a shallow copy of the resource mapping
-- resource setup failures prevent skill execution
+- resource setup failures prevent step execution
 - resource cleanup failures propagate after the transaction outcome is already
   decided
 - a custom context manager that returns truthy from `__exit__` may suppress an
@@ -132,7 +132,7 @@ migrates transaction storage before claiming work so an old/future schema cannot
 strand a newly claimed item. On the first claim, it builds the transaction,
 seeds queue payload into transaction state, and validates transaction wiring and
 all durable data before writing a transaction row. Only a valid, unstarted
-pending transaction is persisted and bound before skill execution begins.
+pending transaction is persisted and bound before step execution begins.
 Deterministic validation failure terminally fails the queue item without
 creating or binding a durable transaction row. The preflight database and
 current schema may already exist.
@@ -142,7 +142,7 @@ worker label and is not a credential. Binding, renewal, completion, and failure
 require both the label and current token. A reclaimed item receives a different
 token even when the new worker uses the same label. Queue-run transaction
 checkpoints also require the token and the transaction's expected persistence
-revision. The queue guard, revision update, transaction header, skills,
+revision. The queue guard, revision update, transaction header, steps,
 exceptions, history, metadata, and artifacts are committed in one SQLite
 transaction. A stale token or revision raises `TransactionFenceError` before
 child rows are changed, and any later write failure rolls the entire snapshot
@@ -164,9 +164,9 @@ next valid item. Use `list_attempts()` and `list_poison_events()` for focused
 operator inspection.
 
 On a later queue retry, a bound item resumes the same persisted transaction with
-fresh executable skill instances from `build_transaction(item)`. Persisted state
+fresh executable step instances from `build_transaction(item)`. Persisted state
 is authoritative on retry; queue payload is not applied a second time. If the
-bound transaction is missing or cannot be matched to the supplied skills, the
+bound transaction is missing or cannot be matched to the supplied steps, the
 runner fails the item loudly instead of creating a replacement transaction. When
 transaction persistence is not configured, queue retries rebuild work from the
 beginning because no durable transaction binding exists.
@@ -197,7 +197,7 @@ Queue claims are leases, not ownership forever. `SqliteQueue` uses
 `lease_timeout` to decide when an `IN_PROGRESS` item is abandoned and may be
 claimed by another worker. While an item is running, `run_queue_loop()` starts
 one runner-owned heartbeat thread that only calls `queue.renew_lease()`; it does
-not run skill code or user callbacks. The heartbeat starts immediately after
+not run step code or user callbacks. The heartbeat starts immediately after
 claim and remains active through processing, reporting, callbacks, and the final
 queue transition.
 
@@ -214,10 +214,10 @@ they are treated as renewal failures.
 
 If renewal proves the worker no longer owns the item, the runner records a
 `QueueLeaseLostError`, logs the item and worker identifiers, skips the final
-`complete()` or `fail()` call, and claims no further work. A skill already
+`complete()` or `fail()` call, and claims no further work. A step already
 executing when the lease is lost cannot be safely terminated by RPA Core and may
 finish external side effects before the next checkpoint or final transition
-observes the loss. Queue delivery is therefore at least once; skills should be
+observes the loss. Queue delivery is therefore at least once; steps should be
 idempotent when they perform external side effects.
 
 Worker transitions never double as operator overrides. `force_complete()` and
@@ -304,14 +304,14 @@ exceptions, history, and the canonical transaction record. Its `outcome` view
 directly projects the transaction's captured terminal category, retry
 disposition, and optional failure code; it reports `unknown` rather than
 reconstructing missing truth from lifecycle status, history, or queue attempts.
-Canonical transaction format v2 includes the caller-owned definition identity.
-Report format v1 remains frozen and therefore continues to embed its closed
-transaction-v1 snapshot without the identity. `dispatch()` gives each notifier
+Canonical transaction format v3 includes the caller-owned definition identity
+and current step vocabulary. Report format v2 embeds that canonical record.
+`dispatch()` gives each notifier
 a fresh snapshot, so one notifier cannot mutate the transaction, the source
 report, or a later notifier's view. Unsupported arbitrary runtime objects are
 not recursively cloned; they do not belong in durable report data.
 
-Canonical transaction formats v1 and v2 are closed. A framework-owned field may
+Canonical transaction format v3 is closed. A framework-owned field may
 not be added, removed, renamed, retyped, or given a new meaning without a new
 transaction format version. Query-page fields follow the same rule. Query
 cursors are opaque, remain bound to their filters, and must be accepted only by
@@ -328,7 +328,7 @@ relative ordering with another handler could change retry behavior in ways that
 are hard to audit.
 
 If a future workflow cannot be expressed with durable history, structured logs,
-runner callbacks, resource scopes, reports, notifications, or explicit skill
+runner callbacks, resource scopes, reports, notifications, or explicit step
 code, add a narrow extension point for that workflow rather than a broad event
 bus. The extension point must document when it runs, whether ordinary exceptions
 propagate or are swallowed, whether mutation is allowed, and how it orders
@@ -347,17 +347,17 @@ with `started_at`, when a non-successful transaction is explicitly resumed.
 
 `Transaction.history` is an append-only audit trail persisted separately from
 logs. Each `HistoryEntry` has a transaction-local `sequence`, UTC `timestamp`,
-closed `HistoryEvent`, resulting `status`, `retry_number`, and optional skill
+closed `HistoryEvent`, resulting `status`, `retry_number`, and optional step
 identity.
 
-The v0.2.0 history vocabulary is closed:
+The v0.3.0 history vocabulary is closed:
 
 - `transaction_started`
-- `skill_started`
-- `skill_succeeded`
-- `skill_failed`
-- `skill_skipped`
-- `skill_interrupted`
+- `step_started`
+- `step_succeeded`
+- `step_failed`
+- `step_skipped`
+- `step_interrupted`
 - `retry_scheduled`
 - `transaction_resumed`
 - `transaction_completed`
@@ -372,12 +372,12 @@ the automation application. It identifies the automation definition that can
 safely continue an in-progress durable transaction. It is not the RPA Core
 package version, a Git commit, a deployment identifier, or a framework protocol
 version. A compatible framework upgrade or application bug fix can keep the
-same token; an incompatible change to recovery semantics, skill identity, or
+same token; an incompatible change to recovery semantics, step identity, or
 durable state interpretation must use a new token and start a new transaction.
 
 The value is optional only for legacy, completed, or inspection-only records.
 Persistent `execute_transaction()` runs and durable queue-created transactions
-require a non-empty identity before any user skill runs. An identity is at most
+require a non-empty identity before any user step runs. An identity is at most
 255 characters, has no leading or trailing whitespace, and contains no Unicode
 control characters.
 
@@ -392,28 +392,28 @@ is empty.
 ## Resume Behavior
 
 `resume_transaction()` reloads a persisted transaction and reattaches executable
-skill instances supplied by the caller. For a non-successful transaction, the
+step instances supplied by the caller. For a non-successful transaction, the
 caller must also supply the exact persisted `definition_identity`. Missing,
 unidentified, or mismatched identities raise `DefinitionIdentityError` before
-skill/status validation or in-memory recovery mutation. Successful transactions
+step/status validation or in-memory recovery mutation. Successful transactions
 are returned unchanged as an idempotent no-op and do not require an identity
-match. Successful skills remain successful. Persisted `IN_PROGRESS` transaction
-or skill state remains visible after `load_transaction()` and is recovered only
+match. Successful steps remain successful. Persisted `IN_PROGRESS` transaction
+or step state remains visible after `load_transaction()` and is recovered only
 when `resume_transaction()` is called.
 
 For interrupted transactions, `resume_transaction()` preserves successful and
-skipped skills, resets interrupted or pending work to `PENDING`, and keeps
+skipped steps, resets interrupted or pending work to `PENDING`, and keeps
 durable state from the last successful checkpoint. For ordinary failed
-transactions, failed skills whose latest exception is a `SystemException` are
-reset to `PENDING` so they can be retried after recovery. Failed skills whose
+transactions, failed steps whose latest exception is a `SystemException` are
+reset to `PENDING` so they can be retried after recovery. Failed steps whose
 latest exception is a `BusinessException` remain `FAILED`; bad input or
 business-rule failures are terminal until user code or durable state is changed
 explicitly. When the resumed transaction is passed to `Engine.run()`, those
-recovered business-failed skills are not re-executed.
+recovered business-failed steps are not re-executed.
 
-When a persisted `BusinessException(stop=True)` caused the engine to skip
-downstream skills, those causal skips also remain `SKIPPED`. Recovery requires
-the corresponding persisted `skill_skipped` history; it does not infer causality
+When a persisted `BusinessException(halts_remaining_steps=True)` caused the engine to skip
+downstream steps, those causal skips also remain `SKIPPED`. Recovery requires
+the corresponding persisted `step_skipped` history; it does not infer causality
 from status and execution order alone. Passing `retry_business_failures=True`
 explicitly resets both the stopping failure and its causal downstream skips to
 `PENDING`.
@@ -521,7 +521,7 @@ The current transaction persistence component is recorded as:
 
 ```text
 component = "transactions"
-version   = 9
+version   = 10
 ```
 
 The SQLite queue records its own component version:
@@ -543,7 +543,7 @@ transaction schema and never migrates.
 ## Migrations
 
 Transaction schema migrations are explicit and sequential. The current latest
-transaction schema is version 9.
+transaction schema is version 10.
 
 Version 1 stores:
 
@@ -595,18 +595,25 @@ write transaction, so a failed migration rolls back its schema changes and
 component version marker together.
 
 Version 8 adds transaction `outcome_category`, `retry_disposition`, and
-`failure_code`, plus the optional `code` on persisted skill exceptions. All
+`failure_code`, plus the optional `code` on persisted exceptions. All
 new fields default to `unknown` or empty rather than inferring missing terminal
 truth from prior status, messages, or retries.
 
 Version 9 adds immutable transaction `definition_identity`. Existing records
 migrate with an empty identity because a compatible automation definition
-cannot be inferred from framework version, source history, skill names, or
-execution history. They remain readable and exportable, but a non-successful
-unidentified record cannot be resumed.
+cannot be inferred from framework version, source history, execution-unit
+names, or execution history. They remain readable and exportable, but a
+non-successful unidentified record cannot be resumed.
+
+Version 10 performs the one-way execution-vocabulary migration: `skills`
+becomes `steps`; exception ownership/timestamp/halt columns become `step_id`,
+`occurred_at`, and `halts_remaining_steps`; and history identity columns and
+event values become `step_*`. The migration rebuilds constrained tables in one
+transaction, preserves all row values other than those explicit names, and
+rolls back the schema and version marker together on failure.
 
 Private-development databases created before component schema versions are still
-readable. When opened, they are migrated to transaction schema version 9 by
+readable. When opened, they are migrated to transaction schema version 10 by
 adding missing columns and recording the component version.
 
 Migration defaults must not invent execution history. Current legacy defaults
@@ -661,8 +668,8 @@ Engine().run(ctx, checkpoint=lambda tx: save_transaction(tx, db_path))
 ```
 
 When configured, the engine validates durable transaction state and calls the
-checkpoint after each transaction or skill state transition, including the
-`skill_started` checkpoint before user skill code begins. Checkpoint failures
+checkpoint after each transaction or step state transition, including the
+`step_started` checkpoint before user step code begins. Checkpoint failures
 propagate and stop execution. They are not converted into successful outcomes.
 
 For ordinary non-queue runs, `execute_transaction()` provides the same strict
@@ -678,25 +685,25 @@ Its built-in SQLite checkpoint retries match the same short-lived `locked` or
 
 The queue runner supplies its claim-and-revision-fenced SQLite checkpoint when
 `transaction_db_path` is configured. This means a process that exits after a
-skill succeeds leaves that skill status, durable state, timestamps, and history
-saved before downstream skills begin. Public `save_transaction()` remains an
+step succeeds leaves that step status, durable state, timestamps, and history
+saved before downstream steps begin. Public `save_transaction()` remains an
 unconditional non-queue API. If it is deliberately used on a queue-bound
 transaction, it advances the revision so an older runner snapshot fails closed
 instead of overwriting that manual save.
 
 Checkpoint failures prevent queue completion. If the failure happens after a
-successful, skipped, or terminal business-failed skill outcome, the runner marks
+successful, skipped, or terminal business-failed step outcome, the runner marks
 the queue item failed without automatic retry to avoid replaying side effects
 that already occurred. Earlier checkpoint failures remain retryable.
 
 After any checkpoint failure, treat the in-memory `Transaction` object as a
 diagnostic snapshot of the interrupted run. For durable recovery, reload the
-persisted transaction and call `resume_transaction()` with fresh skill
+persisted transaction and call `resume_transaction()` with fresh step
 instances and the exact persisted definition identity instead of retrying the
 same partially mutated object.
 
 Runner retry has two separate layers. `Engine(max_retries=...)` owns in-process
-skill retry passes for `SystemException` failures inside one claimed queue item;
+step retry passes for `SystemException` failures inside one claimed queue item;
 it increments `Transaction.retry_count`. The queue owns item delivery retry:
 `SqliteQueue(max_retries=...)` increments `QueueItem.retry_count` only when
 `run_queue_loop()` calls `queue.fail(..., retry=True)`. These counters are not
@@ -725,14 +732,14 @@ Deterministic input and wiring failures are terminal queue outcomes. Invalid
 transaction wiring, invalid queue payload/state JSON, and invalid durable data
 are failed after one delivery attempt without queue retry. Initial validation
 applies queue payload precedence first, then validates wiring, state, transaction
-metadata, artifact metadata, and skill arguments before any transaction database
+metadata, artifact metadata, and step arguments before any transaction database
 write or queue binding. System failures and unexpected processing errors remain
 retryable unless a checkpoint boundary proves retry would risk replaying already
 completed or terminal business-failed work.
 
 An unavoidable boundary remains: external side effects can happen just before
-the checkpoint that records their success. Skills should still be idempotent
+the checkpoint that records their success. Steps should still be idempotent
 where practical.
 
-When loading persisted data, any `IN_PROGRESS` transaction or skill remains
+When loading persisted data, any `IN_PROGRESS` transaction or step remains
 visible as `IN_PROGRESS` until explicit recovery.

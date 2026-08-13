@@ -7,7 +7,7 @@ artifact contents.
 
 ## Trust Model
 
-User projects run ordinary Python. A skill can read files, call services, open
+User projects run ordinary Python. A step can read files, call services, open
 desktop applications, mutate external systems, and import any dependency
 available in its environment. Run RPA Core projects only in environments where
 the automation code and its dependencies are trusted.
@@ -15,7 +15,7 @@ the automation code and its dependencies are trusted.
 RPA Core itself keeps control flow deterministic and auditable, but it does not
 make external side effects reversible. Queue delivery is at least once, and a
 worker that loses a queue lease cannot safely terminate already-running user
-skill code.
+step code.
 
 ## Sensitive Data Surfaces
 
@@ -24,7 +24,7 @@ content:
 
 - `config.toml` and `rpacore.toml`
 - transaction state and metadata
-- skill arguments
+- step arguments
 - exception messages
 - text and JSON logs
 - text and HTML reports
@@ -93,8 +93,8 @@ controls. Avoid placing transaction, queue, log, report, export, or screenshot
 files in shared directories unless every reader is trusted.
 
 Durable transaction fields are validated as JSON-safe data before execution and
-persistence. Loading also rejects malformed or non-object persisted skill
-arguments with transaction and skill identifiers so operators can repair the
+persistence. Loading also rejects malformed or non-object persisted step
+arguments with transaction and step identifiers so operators can repair the
 database explicitly; RPA Core does not silently normalize corrupt records.
 
 RPA Core rejects blank and `:memory:` durable database paths. Transaction CLI
@@ -124,7 +124,7 @@ Email notifications can attach screenshots referenced by reports when
 Reports and notification payloads include artifact records and paths, not
 artifact file contents.
 
-The optional `notification.webhook.include_report` payload is report format v1
+The optional `notification.webhook.include_report` payload is report format v2
 and includes the existing report diagnostic surfaces: metadata, artifact paths,
 and exception messages/actions/screenshot paths. It is disabled by default;
 enable it only for a trusted endpoint with an appropriate retention policy.

@@ -18,7 +18,7 @@ Development and release dependencies are declared under the `dev` optional extra
 in `pyproject.toml` and are not installed by default.
 
 New runtime dependencies require a documented decision explaining the
-correctness guarantee, Windows behavior, transitive cost, and impact on skill
+correctness guarantee, Windows behavior, transitive cost, and impact on step
 authors.
 
 ## Release Artifact Checks

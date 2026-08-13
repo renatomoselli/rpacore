@@ -9,6 +9,7 @@ import pytest
 
 import rpacore.persistence as persistence_module
 from rpacore.context import ProcessContext
+from rpacore.engine import Engine
 from rpacore.exceptions import (
     BusinessException,
     DefinitionIdentityError,
@@ -27,7 +28,8 @@ from rpacore.persistence import (
     query_transactions,
     save_transaction,
 )
-from rpacore.skill import Skill
+from rpacore.recovery import resume_transaction
+from rpacore.step import Step
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEvent, Transaction
 
@@ -87,28 +89,28 @@ def transaction_storage_snapshot(db_path: str, transaction_id: str) -> dict[str,
     """Return every persisted row owned by one transaction."""
     conn = sqlite3.connect(db_path)
     try:
-        skill_ids = [
+        step_ids = [
             row[0]
             for row in conn.execute(
-                "SELECT id FROM skills WHERE transaction_id = ? ORDER BY id",
+                "SELECT id FROM steps WHERE transaction_id = ? ORDER BY id",
                 (transaction_id,),
             ).fetchall()
         ]
-        placeholders = ", ".join("?" for _ in skill_ids)
+        placeholders = ", ".join("?" for _ in step_ids)
         exceptions = (
             conn.execute(
-                f"SELECT * FROM exceptions WHERE skill_id IN ({placeholders}) ORDER BY id",
-                skill_ids,
+                f"SELECT * FROM exceptions WHERE step_id IN ({placeholders}) ORDER BY id",
+                step_ids,
             ).fetchall()
-            if skill_ids
+            if step_ids
             else []
         )
         return {
             "transactions": conn.execute(
                 "SELECT * FROM transactions WHERE id = ?", (transaction_id,)
             ).fetchall(),
-            "skills": conn.execute(
-                "SELECT * FROM skills WHERE transaction_id = ? ORDER BY id",
+            "steps": conn.execute(
+                "SELECT * FROM steps WHERE transaction_id = ? ORDER BY id",
                 (transaction_id,),
             ).fetchall(),
             "exceptions": exceptions,
@@ -332,6 +334,101 @@ def create_v4_db(db_path: str) -> str:
     return transaction_id
 
 
+def downgrade_current_db_to_v9(db_path: str) -> None:
+    """Translate a disposable current database back to the released v9 schema."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("ALTER TABLE steps RENAME TO skills")
+        conn.execute("ALTER TABLE exceptions RENAME COLUMN step_id TO skill_id")
+        conn.execute(
+            "ALTER TABLE exceptions RENAME COLUMN occurred_at TO datetime_occurred"
+        )
+        conn.execute(
+            "ALTER TABLE exceptions RENAME COLUMN halts_remaining_steps TO stops_execution"
+        )
+        conn.execute(
+            """
+            CREATE TABLE transaction_history_v9 (
+                transaction_id          TEXT NOT NULL,
+                sequence                INTEGER NOT NULL,
+                timestamp               TEXT NOT NULL,
+                event                   TEXT NOT NULL CHECK (
+                    event IN (
+                        'transaction_started',
+                        'skill_started',
+                        'skill_succeeded',
+                        'skill_failed',
+                        'skill_skipped',
+                        'skill_interrupted',
+                        'retry_scheduled',
+                        'transaction_resumed',
+                        'transaction_completed'
+                    )
+                ),
+                status                  TEXT NOT NULL CHECK (
+                    status IN ('pending', 'in_progress', 'successful', 'failed', 'skipped')
+                ),
+                retry_number            INTEGER NOT NULL,
+                skill_name              TEXT NOT NULL DEFAULT '',
+                skill_execution_order   INTEGER,
+                PRIMARY KEY (transaction_id, sequence),
+                FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO transaction_history_v9 "
+            "SELECT transaction_id, sequence, timestamp, "
+            "CASE event "
+            "WHEN 'step_started' THEN 'skill_started' "
+            "WHEN 'step_succeeded' THEN 'skill_succeeded' "
+            "WHEN 'step_failed' THEN 'skill_failed' "
+            "WHEN 'step_skipped' THEN 'skill_skipped' "
+            "WHEN 'step_interrupted' THEN 'skill_interrupted' "
+            "ELSE event END, status, retry_number, step_name, step_execution_order "
+            "FROM transaction_history"
+        )
+        conn.execute("DROP TABLE transaction_history")
+        conn.execute("ALTER TABLE transaction_history_v9 RENAME TO transaction_history")
+        conn.execute(
+            "UPDATE rpacore_schema_versions SET version = 9 WHERE component = 'transactions'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_versioned_db(db_path: str, version: int) -> str:
+    """Create the exact historical transaction schema requested for migration proof."""
+    early_factories = {
+        1: create_v1_db,
+        2: create_v2_db,
+        3: create_v3_db,
+        4: create_v4_db,
+    }
+    if version in early_factories:
+        return early_factories[version](db_path)
+    transaction_id = create_v4_db(db_path)
+    conn = persistence_module._connect(db_path)
+    try:
+        with conn:
+            migrations = (
+                persistence_module._migrate_transactions_to_v5,
+                persistence_module._migrate_transactions_to_v6,
+                persistence_module._migrate_transactions_to_v7,
+                persistence_module._migrate_transactions_to_v8,
+                persistence_module._migrate_transactions_to_v9,
+            )
+            for migration_version, migration in enumerate(migrations, start=5):
+                if migration_version > version:
+                    break
+                migration(conn)
+    finally:
+        conn.close()
+    return transaction_id
+
+
 class TestSaveAndLoad:
     def test_roundtrip_empty_transaction(self, db_path) -> None:
         tx = make_transaction()
@@ -341,7 +438,7 @@ class TestSaveAndLoad:
         assert loaded.reference == tx.reference
         assert loaded.status is Status.PENDING
         assert loaded.retry_count == 0
-        assert loaded.skills == []
+        assert loaded.steps == []
 
     def test_roundtrip_preserves_definition_identity(self, db_path) -> None:
         transaction = make_transaction(
@@ -381,9 +478,9 @@ class TestSaveAndLoad:
         assert loaded.retry_count == 3
 
     def test_roundtrip_preserves_outcome_and_failure_codes(self, db_path) -> None:
-        skill = Skill("validate", 1)
-        skill.status = Status.FAILED
-        skill.exceptions.append(
+        step = Step("validate", 1)
+        step.status = Status.FAILED
+        step.exceptions.append(
             BusinessException("missing invoice", code="acme.invoice.missing_number")
         )
         tx = make_transaction(
@@ -391,7 +488,7 @@ class TestSaveAndLoad:
             outcome_category=OutcomeCategory.BUSINESS_FAILED,
             retry_disposition=RetryDisposition.NOT_REQUESTED,
             failure_code="acme.invoice.missing_number",
-            skills=[skill],
+            steps=[step],
         )
 
         save_transaction(tx, db_path)
@@ -400,7 +497,7 @@ class TestSaveAndLoad:
         assert loaded.outcome_category is OutcomeCategory.BUSINESS_FAILED
         assert loaded.retry_disposition is RetryDisposition.NOT_REQUESTED
         assert loaded.failure_code == "acme.invoice.missing_number"
-        assert loaded.skills[0].exceptions[0].code == "acme.invoice.missing_number"
+        assert loaded.steps[0].exceptions[0].code == "acme.invoice.missing_number"
 
     def test_roundtrip_preserves_transaction_state(self, db_path) -> None:
         tx = make_transaction(state={"invoice": {"id": 42}, "tags": ["new", "vip"]})
@@ -576,14 +673,14 @@ class TestSaveAndLoad:
 
         assert not db_path.exists()
 
-    def test_save_rejects_tuple_skill_arguments_before_database_creation(
+    def test_save_rejects_tuple_step_arguments_before_database_creation(
         self,
         tmp_path,
     ) -> None:
         db_path = tmp_path / "invalid-arguments.db"
         transaction = Transaction(
             reference="tuple-arguments",
-            skills=[Skill("tuple", 1, arguments={"value": (1, 2)})],
+            steps=[Step("tuple", 1, arguments={"value": (1, 2)})],
         )
 
         with pytest.raises(TypeError, match=r"arguments\['value'\]"):
@@ -690,17 +787,17 @@ class TestSaveAndLoad:
         assert "transaction.state expected JSON object" in str(exc_info.value)
 
     @pytest.mark.parametrize("stored_arguments", ["not-json", "[]"])
-    def test_load_rejects_corrupt_skill_arguments(
+    def test_load_rejects_corrupt_step_arguments(
         self,
         db_path,
         stored_arguments: str,
     ) -> None:
-        transaction = make_transaction(skills=[Skill("submit", 1)])
+        transaction = make_transaction(steps=[Step("submit", 1)])
         save_transaction(transaction, db_path)
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(
-                "UPDATE skills SET arguments = ? WHERE transaction_id = ?",
+                "UPDATE steps SET arguments = ? WHERE transaction_id = ?",
                 (stored_arguments, transaction.id),
             )
             conn.commit()
@@ -710,12 +807,12 @@ class TestSaveAndLoad:
         with pytest.raises(SystemException) as exc_info:
             load_transaction(transaction.id, db_path)
 
-        assert "Persisted skill arguments are invalid" in str(exc_info.value)
+        assert "Persisted step arguments are invalid" in str(exc_info.value)
         assert transaction.id in str(exc_info.value)
         assert "submit" in str(exc_info.value)
         assert (
             exc_info.value.action
-            == "repair skill arguments in the persistence database"
+            == "repair step arguments in the persistence database"
         )
 
     def test_load_rejects_corrupt_transaction_timestamp(self, db_path) -> None:
@@ -742,7 +839,7 @@ class TestSaveAndLoad:
             conn.execute("PRAGMA ignore_check_constraints = ON")
             conn.execute(
                 "INSERT INTO transaction_history "
-                "(transaction_id, sequence, timestamp, event, status, retry_number, skill_name, skill_execution_order) "
+                "(transaction_id, sequence, timestamp, event, status, retry_number, step_name, step_execution_order) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (tx.id, 1, "not-a-date", "transaction_started", "pending", 0, "", None),
             )
@@ -830,7 +927,7 @@ class TestSaveAndLoad:
             with pytest.raises(sqlite3.IntegrityError):
                 conn.execute(
                     "INSERT INTO transaction_history "
-                    "(transaction_id, sequence, timestamp, event, status, retry_number, skill_name, skill_execution_order) "
+                    "(transaction_id, sequence, timestamp, event, status, retry_number, step_name, step_execution_order) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         tx.id,
@@ -847,7 +944,7 @@ class TestSaveAndLoad:
             with pytest.raises(sqlite3.IntegrityError):
                 conn.execute(
                     "INSERT INTO transaction_history "
-                    "(transaction_id, sequence, timestamp, event, status, retry_number, skill_name, skill_execution_order) "
+                    "(transaction_id, sequence, timestamp, event, status, retry_number, step_name, step_execution_order) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         tx.id,
@@ -863,106 +960,111 @@ class TestSaveAndLoad:
         finally:
             conn.close()
 
-    def test_roundtrip_preserves_skills(self, db_path) -> None:
-        s1 = Skill("login", 1)
+    def test_roundtrip_preserves_steps(self, db_path) -> None:
+        s1 = Step("login", 1)
         s1.status = Status.SUCCESSFUL
-        s2 = Skill("fetch", 2)
+        s2 = Step("fetch", 2)
         s2.status = Status.FAILED
-        tx = make_transaction(skills=[s1, s2])
+        tx = make_transaction(steps=[s1, s2])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert len(loaded.skills) == 2
-        assert loaded.skills[0].name == "login"
-        assert loaded.skills[0].status is Status.SUCCESSFUL
-        assert loaded.skills[1].name == "fetch"
-        assert loaded.skills[1].status is Status.FAILED
+        assert len(loaded.steps) == 2
+        assert loaded.steps[0].name == "login"
+        assert loaded.steps[0].status is Status.SUCCESSFUL
+        assert loaded.steps[1].name == "fetch"
+        assert loaded.steps[1].status is Status.FAILED
 
-    def test_roundtrip_preserves_skill_execution_order(self, db_path) -> None:
-        s1 = Skill("a", 3)
-        s2 = Skill("b", 1)
-        tx = make_transaction(skills=[s1, s2])
+    def test_roundtrip_preserves_step_execution_order(self, db_path) -> None:
+        s1 = Step("a", 3)
+        s2 = Step("b", 1)
+        tx = make_transaction(steps=[s1, s2])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert loaded.skills[0].name == "b"
-        assert loaded.skills[0].execution_order == 1
-        assert loaded.skills[1].name == "a"
-        assert loaded.skills[1].execution_order == 3
+        assert loaded.steps[0].name == "b"
+        assert loaded.steps[0].execution_order == 1
+        assert loaded.steps[1].name == "a"
+        assert loaded.steps[1].execution_order == 3
 
     def test_roundtrip_preserves_business_exception(self, db_path) -> None:
-        skill = Skill("validate", 1)
+        step = Step("validate", 1)
         exc = BusinessException("bad data", action="validate", retry_number=0)
-        skill.exceptions.append(exc)
-        skill.status = Status.FAILED
-        tx = make_transaction(skills=[skill])
+        step.exceptions.append(exc)
+        step.status = Status.FAILED
+        tx = make_transaction(steps=[step])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert len(loaded.skills[0].exceptions) == 1
-        loaded_exc = loaded.skills[0].exceptions[0]
+        assert len(loaded.steps[0].exceptions) == 1
+        loaded_exc = loaded.steps[0].exceptions[0]
         assert isinstance(loaded_exc, BusinessException)
         assert str(loaded_exc) == "bad data"
         assert loaded_exc.action == "validate"
         assert loaded_exc.retry_number == 0
 
     def test_roundtrip_preserves_stopping_business_exception(self, db_path) -> None:
-        skill = Skill("validate", 1)
-        exc = BusinessException("bad data", action="validate", retry_number=0, stop=True)
-        skill.exceptions.append(exc)
-        skill.status = Status.FAILED
-        tx = make_transaction(skills=[skill])
+        step = Step("validate", 1)
+        exc = BusinessException(
+            "bad data",
+            action="validate",
+            retry_number=0,
+            halts_remaining_steps=True,
+        )
+        step.exceptions.append(exc)
+        step.status = Status.FAILED
+        tx = make_transaction(steps=[step])
 
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
 
-        loaded_exc = loaded.skills[0].exceptions[0]
+        loaded_exc = loaded.steps[0].exceptions[0]
         assert isinstance(loaded_exc, BusinessException)
-        assert loaded_exc.stop is True
-        assert loaded_exc.stops_execution is True
+        assert loaded_exc.halts_remaining_steps is True
+        assert loaded_exc.halts_remaining_steps is True
 
     def test_roundtrip_preserves_system_exception(self, db_path) -> None:
-        skill = Skill("connect", 1)
+        step = Step("connect", 1)
         exc = SystemException("timeout", action="connect", retry_number=1)
-        skill.exceptions.append(exc)
-        skill.status = Status.FAILED
-        tx = make_transaction(skills=[skill])
+        step.exceptions.append(exc)
+        step.status = Status.FAILED
+        tx = make_transaction(steps=[step])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        loaded_exc = loaded.skills[0].exceptions[0]
+        loaded_exc = loaded.steps[0].exceptions[0]
         assert isinstance(loaded_exc, SystemException)
         assert str(loaded_exc) == "timeout"
         assert loaded_exc.retry_number == 1
 
     def test_roundtrip_preserves_multiple_exceptions(self, db_path) -> None:
-        skill = Skill("connect", 1)
-        skill.exceptions.append(SystemException("timeout", action="connect", retry_number=0))
-        skill.exceptions.append(SystemException("timeout", action="connect", retry_number=1))
-        skill.status = Status.FAILED
-        tx = make_transaction(skills=[skill])
+        step = Step("connect", 1)
+        step.exceptions.append(SystemException("timeout", action="connect", retry_number=0))
+        step.exceptions.append(SystemException("timeout", action="connect", retry_number=1))
+        step.status = Status.FAILED
+        tx = make_transaction(steps=[step])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert len(loaded.skills[0].exceptions) == 2
-        assert loaded.skills[0].exceptions[0].retry_number == 0
-        assert loaded.skills[0].exceptions[1].retry_number == 1
+        assert len(loaded.steps[0].exceptions) == 2
+        assert loaded.steps[0].exceptions[0].retry_number == 0
+        assert loaded.steps[0].exceptions[1].retry_number == 1
 
     def test_roundtrip_preserves_screenshot_path(self, db_path) -> None:
-        skill = Skill("capture", 1)
-        skill.status = Status.FAILED
+        step = Step("capture", 1)
+        step.status = Status.FAILED
         exc = SystemException("crash", action="capture", screenshot_path="/tmp/shot.png")
-        skill.exceptions.append(exc)
-        tx = make_transaction(skills=[skill])
+        step.exceptions.append(exc)
+        tx = make_transaction(steps=[step])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        loaded_exc = loaded.skills[0].exceptions[0]
+        loaded_exc = loaded.steps[0].exceptions[0]
         assert loaded_exc.screenshot_path == "/tmp/shot.png"
 
     def test_roundtrip_preserves_empty_screenshot_path(self, db_path) -> None:
-        skill = Skill("noscreenshot", 1)
-        skill.status = Status.FAILED
+        step = Step("noscreenshot", 1)
+        step.status = Status.FAILED
         exc = BusinessException("bad data", action="noscreenshot")
-        skill.exceptions.append(exc)
-        tx = make_transaction(skills=[skill])
+        step.exceptions.append(exc)
+        tx = make_transaction(steps=[step])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        loaded_exc = loaded.skills[0].exceptions[0]
+        loaded_exc = loaded.steps[0].exceptions[0]
         assert loaded_exc.screenshot_path == ""
 
     def test_not_found_raises_key_error(self, db_path) -> None:
@@ -986,29 +1088,29 @@ class TestSaveAndLoad:
         assert loaded.status is Status.SUCCESSFUL
         assert loaded.retry_count == 2
 
-    def test_removed_skill_deleted_on_resave(self, db_path) -> None:
-        s1 = Skill("a", 1)
-        s2 = Skill("b", 2)
-        tx = make_transaction(skills=[s1, s2])
+    def test_removed_step_deleted_on_resave(self, db_path) -> None:
+        s1 = Step("a", 1)
+        s2 = Step("b", 2)
+        tx = make_transaction(steps=[s1, s2])
         save_transaction(tx, db_path)
-        tx.skills.remove(s2)
+        tx.steps.remove(s2)
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert len(loaded.skills) == 1
-        assert loaded.skills[0].name == "a"
+        assert len(loaded.steps) == 1
+        assert loaded.steps[0].name == "a"
 
     def test_roundtrip_preserves_arguments(self, db_path) -> None:
-        skill = Skill("login", 1, arguments={"user": "admin", "timeout": 30})
-        tx = make_transaction(skills=[skill])
+        step = Step("login", 1, arguments={"user": "admin", "timeout": 30})
+        tx = make_transaction(steps=[step])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert loaded.skills[0].arguments == {"user": "admin", "timeout": 30}
+        assert loaded.steps[0].arguments == {"user": "admin", "timeout": 30}
 
-    def test_duplicate_skill_name_and_order_raises(self, db_path) -> None:
-        s1 = Skill("dup", 1)
-        s2 = Skill("dup", 1)
-        tx = make_transaction(skills=[s1, s2])
-        with pytest.raises(ExecutionValidationError, match="skill.name must be unique"):
+    def test_duplicate_step_name_and_order_raises(self, db_path) -> None:
+        s1 = Step("dup", 1)
+        s2 = Step("dup", 1)
+        tx = make_transaction(steps=[s1, s2])
+        with pytest.raises(ExecutionValidationError, match="step.name must be unique"):
             save_transaction(tx, db_path)
 
         assert not Path(db_path).exists()
@@ -1338,7 +1440,7 @@ class TestQueueClaimFencing:
             reference="fenced",
             metadata={"source": "initial"},
             artifacts=[Artifact(name="initial", path="initial.txt")],
-            skills=[Skill("step", 1)],
+            steps=[Step("step", 1)],
         )
         revision = _save_queue_transaction_fenced(
             transaction,
@@ -1374,8 +1476,8 @@ class TestQueueClaimFencing:
         transaction.state["stale"] = True
         transaction.metadata = {"source": "stale"}
         transaction.artifacts = [Artifact(name="stale", path="stale.txt")]
-        transaction.skills[0].status = Status.SUCCESSFUL
-        transaction.append_history(HistoryEvent.SKILL_SUCCEEDED, skill=transaction.skills[0])
+        transaction.steps[0].status = Status.SUCCESSFUL
+        transaction.append_history(HistoryEvent.STEP_SUCCEEDED, step=transaction.steps[0])
         before = transaction_storage_snapshot(transaction_db, transaction.id)
 
         with pytest.raises(TransactionFenceError, match="claim is stale"):
@@ -1409,7 +1511,7 @@ class TestQueueClaimFencing:
         queue.add(QueueItem(reference="revision", payload={}))
         claim = queue.next_item("worker")
         assert claim is not None
-        transaction = Transaction(reference="revision", skills=[Skill("step", 1)])
+        transaction = Transaction(reference="revision", steps=[Step("step", 1)])
         revision = _save_queue_transaction_fenced(
             transaction,
             db_path=transaction_db,
@@ -1453,7 +1555,7 @@ class TestQueueClaimFencing:
         queue.add(QueueItem(reference="rollback", payload={}))
         claim = queue.next_item("worker")
         assert claim is not None
-        transaction = Transaction(reference="rollback", skills=[Skill("step", 1)])
+        transaction = Transaction(reference="rollback", steps=[Step("step", 1)])
         revision = _save_queue_transaction_fenced(
             transaction,
             db_path=transaction_db,
@@ -1487,13 +1589,13 @@ class TestQueueClaimFencing:
 
 
 class TestCrashRecovery:
-    def test_in_progress_skill_loaded_faithfully(self, db_path) -> None:
-        skill = Skill("process", 1)
-        skill.status = Status.IN_PROGRESS
-        tx = make_transaction(skills=[skill])
+    def test_in_progress_step_loaded_faithfully(self, db_path) -> None:
+        step = Step("process", 1)
+        step.status = Status.IN_PROGRESS
+        tx = make_transaction(steps=[step])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert loaded.skills[0].status is Status.IN_PROGRESS
+        assert loaded.steps[0].status is Status.IN_PROGRESS
 
     def test_in_progress_transaction_loaded_faithfully(self, db_path) -> None:
         tx = make_transaction(status=Status.IN_PROGRESS)
@@ -1501,45 +1603,45 @@ class TestCrashRecovery:
         loaded = load_transaction(tx.id, db_path)
         assert loaded.status is Status.IN_PROGRESS
 
-    def test_successful_skills_not_changed_by_faithful_load(self, db_path) -> None:
-        s1 = Skill("login", 1)
+    def test_successful_steps_not_changed_by_faithful_load(self, db_path) -> None:
+        s1 = Step("login", 1)
         s1.status = Status.SUCCESSFUL
-        s2 = Skill("process", 2)
+        s2 = Step("process", 2)
         s2.status = Status.IN_PROGRESS
-        tx = make_transaction(skills=[s1, s2])
+        tx = make_transaction(steps=[s1, s2])
         save_transaction(tx, db_path)
         loaded = load_transaction(tx.id, db_path)
-        assert loaded.skills[0].status is Status.SUCCESSFUL
-        assert loaded.skills[1].status is Status.IN_PROGRESS
+        assert loaded.steps[0].status is Status.SUCCESSFUL
+        assert loaded.steps[1].status is Status.IN_PROGRESS
 
 
 class TestResumeScenario:
-    def test_resume_skips_successful_skills(self, db_path) -> None:
+    def test_resume_skips_successful_steps(self, db_path) -> None:
         from rpacore.engine import Engine
 
-        # Save a transaction where skill "a" already succeeded and "b" is pending.
-        s1 = Skill("a", 1)
+        # Save a transaction where step "a" already succeeded and "b" is pending.
+        s1 = Step("a", 1)
         s1.status = Status.SUCCESSFUL
-        s2 = Skill("b", 2)
+        s2 = Step("b", 2)
         s2.status = Status.PENDING
 
-        tx = make_transaction(skills=[s1, s2])
+        tx = make_transaction(steps=[s1, s2])
         save_transaction(tx, db_path)
 
         # Reload and run with a concrete subclass wired to the same names.
         counts: dict[str, int] = {"a": 0, "b": 0}
 
-        class TrackSkill(Skill):
+        class TrackStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 counts[self.name] += 1
 
         loaded = load_transaction(tx.id, db_path)
-        # Replace plain Skill instances with executable ones, preserving status.
-        for i, skill in enumerate(loaded.skills):
-            track = TrackSkill(skill.name, skill.execution_order)
-            track.status = skill.status
-            track.exceptions = skill.exceptions
-            loaded.skills[i] = track
+        # Replace plain Step instances with executable ones, preserving status.
+        for i, step in enumerate(loaded.steps):
+            track = TrackStep(step.name, step.execution_order)
+            track.status = step.status
+            track.exceptions = step.exceptions
+            loaded.steps[i] = track
 
         from rpacore.engine import Engine
         Engine().run(ProcessContext(transaction=loaded))
@@ -2023,7 +2125,277 @@ class TestTransactionQuery:
 
 
 class TestSchemaMigration:
-    def test_legacy_schema_loads_existing_transaction_skill_and_exception(self, db_path) -> None:
+    @pytest.mark.parametrize("source_version", range(1, 10))
+    def test_every_supported_transaction_schema_migrates_to_v10(
+        self, db_path, source_version: int
+    ) -> None:
+        transaction_id = create_versioned_db(db_path, source_version)
+
+        loaded = load_transaction(transaction_id, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions WHERE component = 'transactions'"
+            ).fetchone()[0]
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert loaded.id == transaction_id
+        assert version == 10
+        assert "steps" in tables
+        assert "skills" not in tables
+
+    def test_v9_to_v10_migration_preserves_rows_and_translates_vocabulary(
+        self, db_path
+    ) -> None:
+        occurred_at = datetime(2026, 7, 20, 10, 2, tzinfo=timezone.utc)
+        step = Step("validate", 2, arguments={"invoice": 42})
+        step.status = Status.FAILED
+        step.exceptions.append(
+            BusinessException(
+                "missing field",
+                action="validate",
+                retry_number=2,
+                occurred_at=occurred_at,
+                screenshot_path="evidence/shot.png",
+                halts_remaining_steps=True,
+                code="tests.invoice.missing_field",
+            )
+        )
+        transaction = Transaction(
+            id="v9-complete-record",
+            reference="invoice-42",
+            definition_identity="tests.persistence/v9",
+            status=Status.FAILED,
+            retry_count=2,
+            created_at=datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+            started_at=datetime(2026, 7, 20, 10, 1, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 7, 20, 10, 3, tzinfo=timezone.utc),
+            state={"invoice": 42},
+            metadata={"customer": "acme"},
+            artifacts=[
+                Artifact(
+                    id="artifact-42",
+                    name="invoice",
+                    path="output/invoice.pdf",
+                    kind="pdf",
+                    created_at=datetime(2026, 7, 20, 10, 2, tzinfo=timezone.utc),
+                    metadata={"pages": 1},
+                )
+            ],
+            steps=[step],
+            outcome_category=OutcomeCategory.BUSINESS_FAILED,
+            retry_disposition=RetryDisposition.NOT_REQUESTED,
+            failure_code="tests.invoice.missing_field",
+        )
+        transaction.append_history(
+            HistoryEvent.STEP_STARTED,
+            status=Status.IN_PROGRESS,
+            retry_number=2,
+            step=step,
+            timestamp=datetime(2026, 7, 20, 10, 1, tzinfo=timezone.utc),
+        )
+        transaction.append_history(
+            HistoryEvent.STEP_FAILED,
+            status=Status.FAILED,
+            retry_number=2,
+            step=step,
+            timestamp=occurred_at,
+        )
+        save_transaction(transaction, db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE transactions SET revision = 7, queue_item_id = ?, claim_token = ? "
+                "WHERE id = ?",
+                ("queue-item-42", "claim-token-42", transaction.id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        downgrade_current_db_to_v9(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            transaction_before = conn.execute(
+                "SELECT * FROM transactions WHERE id = ?", (transaction.id,)
+            ).fetchone()
+            step_before = conn.execute(
+                "SELECT id, transaction_id, name, execution_order, status, arguments "
+                "FROM skills"
+            ).fetchone()
+            exception_before = conn.execute(
+                "SELECT id, skill_id, exception_type, message, action, retry_number, "
+                "datetime_occurred, screenshot_path, stops_execution, code FROM exceptions"
+            ).fetchone()
+            history_before = conn.execute(
+                "SELECT transaction_id, sequence, timestamp, event, status, retry_number, "
+                "skill_name, skill_execution_order FROM transaction_history ORDER BY sequence"
+            ).fetchall()
+            metadata_before = conn.execute(
+                "SELECT * FROM transaction_metadata ORDER BY key"
+            ).fetchall()
+            artifacts_before = conn.execute(
+                "SELECT * FROM transaction_artifacts ORDER BY sequence"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        loaded = load_transaction(transaction.id, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            assert conn.execute(
+                "SELECT * FROM transactions WHERE id = ?", (transaction.id,)
+            ).fetchone() == transaction_before
+            assert conn.execute(
+                "SELECT id, transaction_id, name, execution_order, status, arguments "
+                "FROM steps"
+            ).fetchone() == step_before
+            assert conn.execute(
+                "SELECT id, step_id, exception_type, message, action, retry_number, "
+                "occurred_at, screenshot_path, halts_remaining_steps, code FROM exceptions"
+            ).fetchone() == exception_before
+            translated_history = [
+                (*row[:3], row[3].replace("skill_", "step_"), *row[4:])
+                for row in history_before
+            ]
+            assert conn.execute(
+                "SELECT transaction_id, sequence, timestamp, event, status, retry_number, "
+                "step_name, step_execution_order FROM transaction_history ORDER BY sequence"
+            ).fetchall() == translated_history
+            assert conn.execute(
+                "SELECT * FROM transaction_metadata ORDER BY key"
+            ).fetchall() == metadata_before
+            assert conn.execute(
+                "SELECT * FROM transaction_artifacts ORDER BY sequence"
+            ).fetchall() == artifacts_before
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions WHERE component = 'transactions'"
+            ).fetchone()[0]
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        finally:
+            conn.close()
+
+        assert "steps" in tables
+        assert "skills" not in tables
+        assert version == 10
+        assert violations == []
+        assert loaded.definition_identity == "tests.persistence/v9"
+        assert loaded.steps[0].arguments == {"invoice": 42}
+        assert loaded.steps[0].exceptions[0].occurred_at == occurred_at
+        assert loaded.steps[0].exceptions[0].halts_remaining_steps is True
+        assert loaded.steps[0].exceptions[0].code == "tests.invoice.missing_field"
+
+    def test_v9_to_v10_migration_rolls_back_schema_rows_and_marker(
+        self, db_path, monkeypatch
+    ) -> None:
+        transaction = make_transaction(steps=[Step("validate", 1)])
+        save_transaction(transaction, db_path)
+        downgrade_current_db_to_v9(db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            schema_before = conn.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            ).fetchall()
+            rows_before = conn.execute("SELECT * FROM skills").fetchall()
+        finally:
+            conn.close()
+
+        record_version = persistence_module._record_component_schema_version
+
+        def fail_before_v10_marker(
+            conn: sqlite3.Connection, component: str, version: int
+        ) -> None:
+            if component == "transactions" and version == 10:
+                raise RuntimeError("forced v10 migration failure")
+            record_version(conn, component, version)
+
+        monkeypatch.setattr(
+            persistence_module,
+            "_record_component_schema_version",
+            fail_before_v10_marker,
+        )
+
+        with pytest.raises(RuntimeError, match="forced v10 migration failure"):
+            load_transaction(transaction.id, db_path)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            schema_after = conn.execute(
+                "SELECT type, name, tbl_name, sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            ).fetchall()
+            rows_after = conn.execute("SELECT * FROM skills").fetchall()
+            version = conn.execute(
+                "SELECT version FROM rpacore_schema_versions WHERE component = 'transactions'"
+            ).fetchone()[0]
+            has_steps = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'steps'"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert schema_after == schema_before
+        assert rows_after == rows_before
+        assert version == 9
+        assert has_steps is None
+
+    def test_migrated_interrupted_transaction_resumes_with_equivalent_steps(
+        self, db_path
+    ) -> None:
+        executions: dict[str, int] = {}
+
+        class TrackingStep(Step):
+            def execute(self, ctx: ProcessContext) -> None:
+                executions[self.name] = executions.get(self.name, 0) + 1
+
+        completed = Step("completed", 1)
+        completed.status = Status.SUCCESSFUL
+        interrupted = Step("interrupted", 2)
+        interrupted.status = Status.IN_PROGRESS
+        transaction = make_transaction(
+            status=Status.IN_PROGRESS,
+            state={"completed": True},
+            steps=[completed, interrupted],
+        )
+        save_transaction(transaction, db_path)
+        downgrade_current_db_to_v9(db_path)
+
+        resumed = resume_transaction(
+            transaction.id,
+            [
+                TrackingStep("completed", 1),
+                TrackingStep("interrupted", 2),
+            ],
+            definition_identity=transaction.definition_identity,
+            db_path=db_path,
+        )
+        Engine().run(ProcessContext(transaction=resumed))
+
+        assert executions == {"interrupted": 1}
+        assert resumed.state == {"completed": True}
+        assert resumed.status is Status.SUCCESSFUL
+        assert [step.status for step in resumed.steps] == [
+            Status.SUCCESSFUL,
+            Status.SUCCESSFUL,
+        ]
+
+    def test_legacy_schema_loads_existing_transaction_step_and_exception(self, db_path) -> None:
         transaction_id = create_legacy_db(db_path)
 
         loaded = load_transaction(transaction_id, db_path)
@@ -2037,19 +2409,19 @@ class TestSchemaMigration:
         assert loaded.finished_at is None
         assert loaded.state == {}
         assert loaded.history == []
-        assert len(loaded.skills) == 1
-        assert loaded.skills[0].name == "validate"
-        assert loaded.skills[0].status is Status.FAILED
-        assert loaded.skills[0].arguments == {"invoice": 42}
-        assert len(loaded.skills[0].exceptions) == 1
-        assert isinstance(loaded.skills[0].exceptions[0], BusinessException)
-        assert str(loaded.skills[0].exceptions[0]) == "missing field"
-        assert loaded.skills[0].exceptions[0].screenshot_path == "shot.png"
-        assert loaded.skills[0].exceptions[0].stops_execution is False
+        assert len(loaded.steps) == 1
+        assert loaded.steps[0].name == "validate"
+        assert loaded.steps[0].status is Status.FAILED
+        assert loaded.steps[0].arguments == {"invoice": 42}
+        assert len(loaded.steps[0].exceptions) == 1
+        assert isinstance(loaded.steps[0].exceptions[0], BusinessException)
+        assert str(loaded.steps[0].exceptions[0]) == "missing field"
+        assert loaded.steps[0].exceptions[0].screenshot_path == "shot.png"
+        assert loaded.steps[0].exceptions[0].halts_remaining_steps is False
         assert loaded.outcome_category is OutcomeCategory.UNKNOWN
         assert loaded.retry_disposition is RetryDisposition.UNKNOWN
         assert loaded.failure_code == ""
-        assert loaded.skills[0].exceptions[0].code == ""
+        assert loaded.steps[0].exceptions[0].code == ""
 
     def test_legacy_schema_gets_created_at_column(self, db_path) -> None:
         create_legacy_db(db_path)
@@ -2063,7 +2435,7 @@ class TestSchemaMigration:
             conn.close()
         assert "created_at" in columns
 
-    def test_legacy_schema_gets_exception_stops_execution_column(self, db_path) -> None:
+    def test_legacy_schema_gets_exception_halts_remaining_steps_column(self, db_path) -> None:
         create_legacy_db(db_path)
 
         list_transactions(db_path)
@@ -2073,7 +2445,7 @@ class TestSchemaMigration:
             columns = {row[1] for row in conn.execute("PRAGMA table_info(exceptions)")}
         finally:
             conn.close()
-        assert "stops_execution" in columns
+        assert "halts_remaining_steps" in columns
 
     def test_v1_schema_gets_state_column(self, db_path) -> None:
         create_v1_db(db_path)
@@ -2257,7 +2629,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
         assert "definition_identity" in columns
-        assert version == 9
+        assert version == 10
 
     def test_component_schema_version_is_recorded_after_migration(self, db_path) -> None:
         create_legacy_db(db_path)
@@ -2271,7 +2643,7 @@ class TestSchemaMigration:
             ).fetchone()[0]
         finally:
             conn.close()
-        assert version == 9
+        assert version == 10
 
     def test_transaction_and_queue_schema_versions_can_share_database(self, db_path) -> None:
         from rpacore.queue import QueueItem, SqliteQueue
@@ -2288,7 +2660,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 4), ("transactions", 9)]
+        assert rows == [("queue", 4), ("transactions", 10)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)
@@ -2299,13 +2671,13 @@ class TestSchemaMigration:
             )
             conn.execute(
                 "INSERT INTO rpacore_schema_versions (component, version) VALUES (?, ?)",
-                ("transactions", 10),
+                ("transactions", 11),
             )
             conn.commit()
         finally:
             conn.close()
 
-        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 10"):
+        with pytest.raises(RuntimeError, match="Unsupported transaction schema version 11"):
             list_transactions(db_path)
 
     @pytest.mark.parametrize("readonly", [False, True])

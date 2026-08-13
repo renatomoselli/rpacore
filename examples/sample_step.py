@@ -1,13 +1,13 @@
 """Example automation: greet a user by writing their name to a file.
 
-This module contains three Skill subclasses that form a complete automation
+This module contains three Step subclasses that form a complete automation
 scenario. It is user-space code — not framework code — and is intended to show
 the pattern a developer would follow when building their own automation on top
 of rpacore.
 
 Scenario
 --------
-Given a name in the skill's arguments, the automation:
+Given a name in the step's arguments, the automation:
   1. Validates that the name is present and non-empty.
   2. Writes "Hello, {name}" to an output file (idempotent: ensures desired state).
   3. Confirms that the output file exists and contains the expected content.
@@ -19,14 +19,14 @@ from pathlib import Path
 
 from rpacore.context import ProcessContext
 from rpacore.exceptions import BusinessException, SystemException
-from rpacore.skill import Skill
+from rpacore.step import Step
 
 
-class ValidateInput(Skill):
+class ValidateInput(Step):
     """Ensure the 'name' argument is present and non-empty.
 
     Raises BusinessException if validation fails. Execution continues to the
-    next skill because BusinessException does not stop the engine.
+    next step because BusinessException does not stop the engine.
     """
 
     def execute(self, ctx: ProcessContext) -> None:
@@ -38,10 +38,10 @@ class ValidateInput(Skill):
             )
 
 
-class WriteGreeting(Skill):
+class WriteGreeting(Step):
     """Write "Hello, {name}" to the output file.
 
-    Idempotent: if the file already contains the correct greeting, the skill
+    Idempotent: if the file already contains the correct greeting, the step
     does nothing. If the file is absent or contains stale content, it is
     written. This demonstrates "ensure desired state" rather than "skip on
     existence."
@@ -64,7 +64,7 @@ class WriteGreeting(Skill):
         output_path.write_text(desired_content, encoding="utf-8")
 
 
-class ConfirmOutput(Skill):
+class ConfirmOutput(Step):
     """Confirm that the output file exists and contains the expected greeting.
 
     Raises SystemException if the file is missing or its content is wrong.

@@ -172,7 +172,7 @@ class TestLoadProjectManifest:
         manifest.write_text(
             "[project]\nentrypoint = \"main:main\"\n"
             "[storage]\ntransaction_db_path = \"rpacore.db\"\n"
-            "[pipeline]\nskills = []\n",
+            "[pipeline]\nsteps = []\n",
             encoding="utf-8",
         )
 
@@ -182,12 +182,12 @@ class TestLoadProjectManifest:
     def test_unknown_project_key_raises(self, tmp_path: Path) -> None:
         manifest = tmp_path / "rpacore.toml"
         manifest.write_text(
-            "[project]\nentrypoint = \"main:main\"\nskills = []\n"
+            "[project]\nentrypoint = \"main:main\"\nsteps = []\n"
             "[storage]\ntransaction_db_path = \"rpacore.db\"\n",
             encoding="utf-8",
         )
 
-        with pytest.raises(KeyError, match="project.skills"):
+        with pytest.raises(KeyError, match="project.steps"):
             load_project_manifest(manifest)
 
 

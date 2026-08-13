@@ -5,37 +5,21 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from rpacore.exceptions import BusinessException
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.transaction import Artifact, HistoryEntry, Transaction
 
 
-TRANSACTION_FORMAT_VERSION = 2
+TRANSACTION_FORMAT_VERSION = 3
 
 
 def serialize_transaction(transaction: Transaction) -> dict[str, object]:
     """Return a canonical record after durable-data, but not wiring, validation."""
-    return _serialize_transaction(transaction, format_version=TRANSACTION_FORMAT_VERSION)
-
-
-def _serialize_transaction_v1(transaction: Transaction) -> dict[str, object]:
-    """Return the frozen transaction-v1 record embedded by report format v1."""
-    return _serialize_transaction(transaction, format_version=1)
-
-
-def _serialize_transaction(
-    transaction: Transaction,
-    *,
-    format_version: int,
-) -> dict[str, object]:
     transaction.validate_durable_data()
-    identity: dict[str, object] = {}
-    if format_version == 2:
-        identity["definition_identity"] = transaction.definition_identity
     return {
-        "transaction_format_version": format_version,
+        "transaction_format_version": TRANSACTION_FORMAT_VERSION,
         "id": transaction.id,
         "reference": transaction.reference,
-        **identity,
+        "definition_identity": transaction.definition_identity,
         "status": str(transaction.status),
         "retry_count": transaction.retry_count,
         "created_at": _timestamp(transaction.created_at, path="transaction.created_at"),
@@ -43,7 +27,7 @@ def _serialize_transaction(
         "finished_at": _timestamp(transaction.finished_at, path="transaction.finished_at"),
         "state": _copy_json_value(transaction.state),
         "metadata": _copy_json_value(transaction.metadata),
-        "skills": [_skill_record(skill) for skill in transaction.ordered_skills()],
+        "steps": [_step_record(step) for step in transaction.ordered_steps()],
         "history": [_history_record(entry) for entry in transaction.history],
         "artifacts": [
             _artifact_record(artifact, index)
@@ -52,28 +36,28 @@ def _serialize_transaction(
     }
 
 
-def _skill_record(skill: Skill) -> dict[str, object]:
+def _step_record(step: Step) -> dict[str, object]:
     return {
-        "name": skill.name,
-        "execution_order": skill.execution_order,
-        "status": str(skill.status),
-        "arguments": _copy_json_value(skill.arguments),
-        "exceptions": [_exception_record(exc, skill) for exc in skill.exceptions],
+        "name": step.name,
+        "execution_order": step.execution_order,
+        "status": str(step.status),
+        "arguments": _copy_json_value(step.arguments),
+        "exceptions": [_exception_record(exc, step) for exc in step.exceptions],
     }
 
 
-def _exception_record(exc: BaseException, skill: Skill) -> dict[str, object]:
+def _exception_record(exc: BaseException, step: Step) -> dict[str, object]:
     return {
         "type": "business" if isinstance(exc, BusinessException) else "system",
         "message": str(exc),
         "action": str(getattr(exc, "action", "")),
         "retry_number": int(getattr(exc, "retry_number", 0)),
-        "datetime_occurred": _timestamp(
-            getattr(exc, "datetime_occurred", None),
-            path=f"transaction.skills[{skill.name!r}].exceptions.datetime_occurred",
+        "occurred_at": _timestamp(
+            getattr(exc, "occurred_at", None),
+            path=f"transaction.steps[{step.name!r}].exceptions.occurred_at",
         ),
         "screenshot_path": str(getattr(exc, "screenshot_path", "")),
-        "stops_execution": bool(getattr(exc, "stops_execution", True)),
+        "halts_remaining_steps": bool(getattr(exc, "halts_remaining_steps", True)),
     }
 
 
@@ -84,8 +68,8 @@ def _history_record(entry: HistoryEntry) -> dict[str, object]:
         "event": str(entry.event),
         "status": str(entry.status),
         "retry_number": entry.retry_number,
-        "skill_name": entry.skill_name,
-        "skill_execution_order": entry.skill_execution_order,
+        "step_name": entry.step_name,
+        "step_execution_order": entry.step_execution_order,
     }
 
 

@@ -35,7 +35,7 @@ rpacore/              # Framework core
   __init__.py
   exceptions.py    # BusinessException, SystemException
   status.py        # Status enum
-  skill.py         # Skill base class
+  step.py          # Step base class
   transaction.py   # Transaction model
   engine.py        # Execution engine
   persistence.py   # SQLite persistence
@@ -74,8 +74,8 @@ All automation must behave predictably. No runtime AI decision-making.
 
 Each transaction carries:
 
-- a list of skills
-- status per skill
+- a list of steps
+- status per step
 - exception tracking
 - persistence
 
@@ -88,7 +88,7 @@ The system must resume from failure and only re-execute failed steps.
 - Framework core in `rpacore/` stays independent from user automation code
 - Sample automation in `examples/` exists for repo-side integration coverage,
   not as part of the installed package
-- Skills are modular and reusable
+- Steps are modular and reusable
 - Configuration is externalized in `config.toml`
 
 ### Enterprise-Oriented Design
@@ -105,7 +105,7 @@ The system must resume from failure and only re-execute failed steps.
 ```text
 load_config/config.toml
   ->
-Transaction + Skill list
+Transaction + Step list
   ->
 ProcessContext
   ->
@@ -127,21 +127,21 @@ build_transaction(item)
 Engine / Persistence / Reporting / Notifications
 ```
 
-## Skills
+## Steps
 
-A skill is a unit of work.
+A step is a unit of work.
 
-Each skill should:
+Each step should:
 
 - have a clear input/output
 - be idempotent where possible
 - handle its own domain logic cleanly
 - expose status through the framework lifecycle
 
-Users create skills by subclassing `Skill` and implementing
+Users create steps by subclassing `Step` and implementing
 `execute(ctx: ProcessContext)`.
 
-The repo includes `examples/sample_skill.py` and `examples/sample_main.py` as
+The repo includes `examples/sample_step.py` and `examples/sample_main.py` as
 small integration fixtures for test coverage. User-facing, fuller automation
 examples belong in the separate `rpacore-examples` repository.
 
@@ -169,8 +169,8 @@ All exceptions should be logged and persisted.
 - The test layout mirrors `rpacore/` where practical
 - Run `pytest` from the project root
 - Each commit should pass the full test suite
-- Skill testing guidance lives in `docs/testing.md`; RPA Core uses normal pytest
-  tests instead of a custom `SkillTestCase` base class.
+- Step testing guidance lives in `docs/testing.md`; RPA Core uses normal pytest
+  tests instead of a custom framework-specific base class.
 - Core validation migration decisions live in `docs/core-validation-audit.md`.
 - Public import and compatibility boundaries live in `docs/api.md` and
   `docs/public-submodules.md`.

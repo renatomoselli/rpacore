@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from copy import deepcopy
 
 from rpacore.outcome import OutcomeCategory
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.transaction import HistoryEntry, HistoryEvent, Transaction
 from rpacore.transition import (
     EXECUTION_TRANSITION_SCHEMA_VERSION,
@@ -45,18 +45,18 @@ class _TransitionEmitter:
         transaction: Transaction,
         event: HistoryEvent,
         *,
-        skill: Skill | None = None,
+        step: Step | None = None,
         include_checkpoint_state: bool = True,
     ) -> HistoryEntry:
         """Append history, then synchronously publish its immutable transition."""
-        entry = transaction.append_history(event, skill=skill)
+        entry = transaction.append_history(event, step=step)
         if self._sink is None:
             return entry
         self._sink(
             self._build_transition(
                 transaction,
                 entry,
-                skill=skill,
+                step=step,
                 include_checkpoint_state=include_checkpoint_state,
             )
         )
@@ -67,7 +67,7 @@ class _TransitionEmitter:
         transaction: Transaction,
         entry: HistoryEntry,
         *,
-        skill: Skill | None,
+        step: Step | None,
         include_checkpoint_state: bool,
     ) -> ExecutionTransition:
         checkpoint_state: dict[str, object] = {}
@@ -99,9 +99,9 @@ class _TransitionEmitter:
             definition_identity=transaction.definition_identity,
             transaction_status=transaction.status.value,
             execution_pass=entry.retry_number,
-            skill_name=entry.skill_name,
-            skill_execution_order=entry.skill_execution_order,
-            skill_status="" if skill is None else skill.status.value,
+            step_name=entry.step_name,
+            step_execution_order=entry.step_execution_order,
+            step_status="" if step is None else step.status.value,
             outcome_category=transaction.outcome_category.value,
             failure_code=transaction.failure_code,
             retry_recommended=retry_recommended,

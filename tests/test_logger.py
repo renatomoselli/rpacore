@@ -16,7 +16,6 @@ from rpacore.engine import Engine
 from rpacore.exceptions import BusinessException
 from rpacore.logger import (
     LOG_FORMAT_VERSION,
-    LOG_FORMAT_VERSION_V2,
     JsonFormatter,
     TextFormatter,
     bind_log_context,
@@ -24,17 +23,17 @@ from rpacore.logger import (
     get_logger,
 )
 from rpacore.runner import run_queue_loop
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.status import Status
 from rpacore.transaction import Transaction
 
 
-class SuccessSkill(Skill):
+class SuccessStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         ctx.state[self.name] = "done"
 
 
-class BusinessFailSkill(Skill):
+class BusinessFailStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         raise BusinessException("rule violated", action=self.name)
 
@@ -138,17 +137,17 @@ class TestConfigureLogger:
         stream = io.StringIO()
         logger = configure_logger(name="rpacore.test.json", fmt="json", stream=stream)
         logger.info(
-            "Skill started",
-            extra={"event": "skill_started", "skill_name": "login"},
+            "Step started",
+            extra={"event": "step_started", "step_name": "login"},
         )
 
         payload = json.loads(stream.getvalue())
         assert payload["log_format_version"] == LOG_FORMAT_VERSION
         assert datetime.fromisoformat(payload["timestamp"]).tzinfo is not None
-        assert payload["level"] == "info"
-        assert payload["message"] == "Skill started"
-        assert payload["event"] == "skill_started"
-        assert payload["skill_name"] == "login"
+        assert payload["severity"] == "info"
+        assert payload["message"] == "Step started"
+        assert payload["event"] == "rpacore.step.started"
+        assert payload["attributes"]["step_name"] == "login"
 
     def test_json_format_defaults_event_and_redacts_runtime_objects(self) -> None:
         stream = io.StringIO()
@@ -166,30 +165,30 @@ class TestConfigureLogger:
         )
 
         payload = json.loads(stream.getvalue())
-        assert payload["event"] == "log"
-        assert "config" not in payload
-        assert "credentials" not in payload
-        assert "resources" not in payload
-        assert payload["runtime_object"] == "object"
-        assert payload["labels"] == ["alpha", "beta"]
-        assert payload["mixed"] == ["a", 1]
+        assert payload["event"] == "rpacore.log"
+        attributes = payload["attributes"]
+        assert "config" not in attributes
+        assert "credentials" not in attributes
+        assert "resources" not in attributes
+        assert attributes["runtime_object"] == "object"
+        assert attributes["labels"] == ["alpha", "beta"]
+        assert attributes["mixed"] == ["a", 1]
 
-    def test_json_v2_uses_protected_envelope_and_correlation_context(self) -> None:
+    def test_json_v3_uses_protected_envelope_and_correlation_context(self) -> None:
         stream = io.StringIO()
         logger = configure_logger(
-            name="rpacore.test.json.v2",
+            name="rpacore.test.json.v3",
             fmt="json",
-            json_version=LOG_FORMAT_VERSION_V2,
             stream=stream,
         )
 
         with bind_log_context(transaction_id="tx-1", retry_number=2):
             logger.info(
-                "Skill started",
+                "Step started",
                 extra={
-                    "event": "skill_started",
+                    "event": "step_started",
                     "transaction_id": "forged",
-                    "skill_name": "login",
+                    "step_name": "login",
                     "config": {"token": "secret"},
                     "details": {"metadata": {"secret": "also-hidden"}},
                     "severity": "critical",
@@ -199,21 +198,21 @@ class TestConfigureLogger:
             )
 
         payload = json.loads(stream.getvalue())
-        assert payload["log_format_version"] == LOG_FORMAT_VERSION_V2
-        assert payload["event"] == "rpacore.skill.started"
+        assert payload["log_format_version"] == LOG_FORMAT_VERSION
+        assert payload["event"] == "rpacore.step.started"
         assert payload["severity"] == "info"
-        assert payload["logger"] == "rpacore.test.json.v2"
+        assert payload["logger"] == "rpacore.test.json.v3"
         assert payload["attributes"] == {
             "details": {},
             "retry_number": 2,
-            "skill_name": "login",
+            "step_name": "login",
             "transaction_id": "tx-1",
         }
         assert "config" not in payload["attributes"]
 
-    def test_json_v2_context_is_scoped_and_validated(self) -> None:
+    def test_json_v3_context_is_scoped_and_validated(self) -> None:
         assert public_bind_log_context is bind_log_context
-        formatter = JsonFormatter(version=LOG_FORMAT_VERSION_V2)
+        formatter = JsonFormatter()
         logger = logging.getLogger("rpacore.test.context")
         record = logger.makeRecord(
             logger.name,
@@ -243,8 +242,8 @@ class TestConfigureLogger:
             with bind_log_context(retry_number=-1):
                 pass
 
-    def test_json_v2_uses_v2_exception_and_stack_names(self) -> None:
-        logger = logging.getLogger("rpacore.test.v2.exception")
+    def test_json_v3_uses_structured_exception_and_stack_names(self) -> None:
+        logger = logging.getLogger("rpacore.test.v3.exception")
         try:
             raise RuntimeError("diagnostic detail")
         except RuntimeError:
@@ -260,7 +259,7 @@ class TestConfigureLogger:
             extra={"event": "operation_failed"},
         )
 
-        payload = json.loads(JsonFormatter(version=LOG_FORMAT_VERSION_V2).format(record))
+        payload = json.loads(JsonFormatter().format(record))
 
         assert payload["exception"]["type"] == "RuntimeError"
         assert payload["exception"]["message"] == "diagnostic detail"
@@ -280,7 +279,7 @@ class TestConfigureLogger:
             child = get_logger("example.automation")
             child.info("child event", extra={"event": "child_event"})
             assert child.name == "rpacore.application.example.automation"
-            assert json.loads(stream.getvalue())["event"] == "child_event"
+            assert json.loads(stream.getvalue())["event"] == "rpacore.child.event"
         finally:
             for handler in root.handlers:
                 handler.close()
@@ -288,7 +287,7 @@ class TestConfigureLogger:
             root.setLevel(previous_level)
             root.propagate = previous_propagate
 
-    def test_invalid_json_version_preserves_working_logger(self) -> None:
+    def test_removed_json_version_keyword_is_rejected_without_reconfiguration(self) -> None:
         stream = io.StringIO()
         logger = configure_logger(
             name="rpacore.test.json-version",
@@ -296,7 +295,7 @@ class TestConfigureLogger:
             stream=stream,
         )
         handlers = list(logger.handlers)
-        with pytest.raises(ValueError, match="JSON log version must be 1 or 2"):
+        with pytest.raises(TypeError, match="unexpected keyword argument 'json_version'"):
             configure_logger(
                 name="rpacore.test.json-version",
                 fmt="json",
@@ -311,7 +310,7 @@ class TestConfigureLogger:
 
         assert logger is get_logger("example.automation")
         logger.info("configured child", extra={"event": "child_event"})
-        assert json.loads(stream.getvalue())["event"] == "child_event"
+        assert json.loads(stream.getvalue())["event"] == "rpacore.child.event"
 
     def test_text_and_json_formats_include_exception_diagnostics(self) -> None:
         logger = logging.getLogger("rpacore.test.exception-format")
@@ -337,7 +336,7 @@ class TestConfigureLogger:
         assert "Traceback (most recent call last)" in text
         assert payload["exception"]["type"] == "RuntimeError"
         assert payload["exception"]["message"] == "diagnostic detail"
-        assert "RuntimeError: diagnostic detail" in payload["exception"]["traceback"]
+        assert "RuntimeError: diagnostic detail" in payload["exception"]["stacktrace"]
 
     def test_text_and_json_formats_include_stack_information(self) -> None:
         record = logging.makeLogRecord(
@@ -353,7 +352,7 @@ class TestConfigureLogger:
         payload = json.loads(JsonFormatter().format(record))
 
         assert "operator.py:10" in text
-        assert "operator.py:10" in payload["stack"]
+        assert "operator.py:10" in payload["stacktrace"]
 
     def test_text_and_json_formats_share_sensitive_extra_redaction(self) -> None:
         record = logging.makeLogRecord(
@@ -383,7 +382,7 @@ class TestConfigureLogger:
             assert secret not in text
             assert secret not in structured
         assert "visible" in text
-        assert json.loads(structured)["details"] == {"visible": "ok"}
+        assert json.loads(structured)["attributes"]["details"] == {"visible": "ok"}
 
     def test_json_extras_cannot_replace_canonical_envelope(self) -> None:
         record = logging.makeLogRecord(
@@ -404,10 +403,12 @@ class TestConfigureLogger:
 
         assert payload["log_format_version"] == LOG_FORMAT_VERSION
         assert datetime.fromisoformat(payload["timestamp"]).tzinfo is not None
-        assert payload["level"] == "info"
-        assert payload["event"] == "operation_completed"
+        assert payload["severity"] == "info"
+        assert payload["event"] == "rpacore.operation.completed"
         assert "exception" not in payload
-        assert "stack" not in payload
+        assert "stacktrace" not in payload
+        assert payload["attributes"]["level"] == "critical"
+        assert payload["attributes"]["stack"] == "forged"
 
     def test_invalid_format_raises(self) -> None:
         with pytest.raises(ValueError, match="fmt must be 'text' or 'json'"):
@@ -467,15 +468,14 @@ class TestConfigureLogger:
 
 
 class TestEngineLogging:
-    def test_v2_engine_events_include_transaction_correlation(self) -> None:
+    def test_v3_engine_events_include_transaction_correlation(self) -> None:
         stream = io.StringIO()
         logger = configure_logger(
-            name="rpacore.test.engine.v2",
+            name="rpacore.test.engine.v3",
             fmt="json",
-            json_version=LOG_FORMAT_VERSION_V2,
             stream=stream,
         )
-        tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
+        tx = Transaction(reference="T1", steps=[SuccessStep("a", 1)])
 
         Engine(logger=logger).run(ProcessContext(transaction=tx))
 
@@ -487,14 +487,21 @@ class TestEngineLogging:
     def test_checkpoint_event_is_runtime_log_not_history(self) -> None:
         stream = io.StringIO()
         logger = configure_logger(name="rpacore.test.engine.checkpoint", fmt="json", stream=stream)
-        tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
+        tx = Transaction(reference="T1", steps=[SuccessStep("a", 1)])
 
         Engine(logger=logger).run(ProcessContext(transaction=tx), checkpoint=lambda tx: None)
 
         records = [json.loads(line) for line in stream.getvalue().splitlines()]
-        checkpoint = next(record for record in records if record["event"] == "transaction_checkpoint")
-        assert checkpoint["transaction_id"] == tx.id
-        assert checkpoint["transaction_status"] in {Status.IN_PROGRESS, Status.SUCCESSFUL}
+        checkpoint = next(
+            record
+            for record in records
+            if record["event"] == "rpacore.transaction.checkpoint"
+        )
+        assert checkpoint["attributes"]["transaction_id"] == tx.id
+        assert checkpoint["attributes"]["transaction_status"] in {
+            Status.IN_PROGRESS,
+            Status.SUCCESSFUL,
+        }
         assert "transaction_checkpoint" not in [str(entry.event) for entry in tx.history]
 
     def test_success_flow_emits_standardized_events(self) -> None:
@@ -502,56 +509,57 @@ class TestEngineLogging:
         logger = configure_logger(name="rpacore.test.engine.success", fmt="json", stream=stream)
         tx = Transaction(
             reference="T1",
-            skills=[SuccessSkill("a", 1), SuccessSkill("b", 2)],
+            steps=[SuccessStep("a", 1), SuccessStep("b", 2)],
         )
 
         Engine(logger=logger).run(ProcessContext(transaction=tx))
 
         events = [json.loads(line)["event"] for line in stream.getvalue().splitlines()]
         assert events == [
-            "transaction_started",
-            "skill_started",
-            "skill_completed",
-            "skill_started",
-            "skill_completed",
-            "transaction_completed",
+            "rpacore.transaction.started",
+            "rpacore.step.started",
+            "rpacore.step.completed",
+            "rpacore.step.started",
+            "rpacore.step.completed",
+            "rpacore.transaction.completed",
         ]
 
-    def test_failed_skill_event_contains_failure_details(self) -> None:
+    def test_failed_step_event_contains_failure_details(self) -> None:
         stream = io.StringIO()
         logger = configure_logger(name="rpacore.test.engine.fail", fmt="json", stream=stream)
-        tx = Transaction(reference="T1", skills=[BusinessFailSkill("validate", 1)])
+        tx = Transaction(reference="T1", steps=[BusinessFailStep("validate", 1)])
 
         Engine(logger=logger).run(ProcessContext(transaction=tx))
 
         records = [json.loads(line) for line in stream.getvalue().splitlines()]
-        failed = next(record for record in records if record["event"] == "skill_failed")
+        failed = next(
+            record for record in records if record["event"] == "rpacore.step.failed"
+        )
 
-        assert failed["skill_name"] == "validate"
-        assert failed["skill_status"] == Status.FAILED
-        assert failed["exception_type"] == "BusinessException"
-        assert failed["retry_number"] == 0
+        assert failed["attributes"]["step_name"] == "validate"
+        assert failed["attributes"]["step_status"] == Status.FAILED
+        assert failed["attributes"]["exception_type"] == "BusinessException"
+        assert failed["attributes"]["retry_number"] == 0
 
     def test_transaction_completed_event_reports_final_status(self) -> None:
         stream = io.StringIO()
         logger = configure_logger(name="rpacore.test.engine.complete", fmt="json", stream=stream)
-        tx = Transaction(reference="T1", skills=[SuccessSkill("a", 1)])
+        tx = Transaction(reference="T1", steps=[SuccessStep("a", 1)])
 
         Engine(logger=logger).run(ProcessContext(transaction=tx))
 
         records = [json.loads(line) for line in stream.getvalue().splitlines()]
         completed = records[-1]
-        assert completed["event"] == "transaction_completed"
-        assert completed["transaction_status"] == Status.SUCCESSFUL
+        assert completed["event"] == "rpacore.transaction.completed"
+        assert completed["attributes"]["transaction_status"] == Status.SUCCESSFUL
 
 
 class TestRunnerLogging:
-    def test_v2_queue_run_completion_has_summary_attributes(self) -> None:
+    def test_v3_queue_run_completion_has_summary_attributes(self) -> None:
         stream = io.StringIO()
         logger = configure_logger(
-            name="rpacore.test.runner.v2",
+            name="rpacore.test.runner.v3",
             fmt="json",
-            json_version=LOG_FORMAT_VERSION_V2,
             stream=stream,
         )
 
@@ -592,7 +600,7 @@ class TestRunnerLogging:
             engine=Engine(logger=logger),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[SuccessSkill("a", 1)],
+                steps=[SuccessStep("a", 1)],
             ),
             config={"token": "secret"},
             credentials=EnvCredentialProvider(),
@@ -603,16 +611,20 @@ class TestRunnerLogging:
 
         records = [json.loads(line) for line in stream.getvalue().splitlines()]
         acquired = next(
-            record for record in records if record["event"] == "resource_scope_acquired"
+            record
+            for record in records
+            if record["event"] == "rpacore.resource.scope.acquired"
         )
         released = next(
-            record for record in records if record["event"] == "resource_scope_released"
+            record
+            for record in records
+            if record["event"] == "rpacore.resource.scope.released"
         )
-        assert acquired["resource_names"] == ["browser"]
-        assert acquired["resource_count"] == 1
-        assert released["resource_names"] == ["browser"]
-        assert "resources" not in acquired
-        assert "config" not in acquired
+        assert acquired["attributes"]["resource_names"] == ["browser"]
+        assert acquired["attributes"]["resource_count"] == 1
+        assert released["attributes"]["resource_names"] == ["browser"]
+        assert "resources" not in acquired["attributes"]
+        assert "config" not in acquired["attributes"]
 
     def test_resource_scope_suppressed_exception_returns_summary(self) -> None:
         stream = io.StringIO()
@@ -642,4 +654,7 @@ class TestRunnerLogging:
         assert summary.processed == 1
         assert summary.failed == 0
         records = [json.loads(line) for line in stream.getvalue().splitlines()]
-        assert any(record["event"] == "resource_scope_released" for record in records)
+        assert any(
+            record["event"] == "rpacore.resource.scope.released"
+            for record in records
+        )

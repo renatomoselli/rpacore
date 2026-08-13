@@ -18,7 +18,7 @@ from rpacore.exceptions import (
 )
 from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.persistence import load_transaction, save_transaction
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.status import Status
 from rpacore.transaction import HistoryEvent, Transaction
 
@@ -34,9 +34,9 @@ _RECORD_FIELDS = {
     "definition_identity",
     "transaction_status",
     "execution_pass",
-    "skill_name",
-    "skill_execution_order",
-    "skill_status",
+    "step_name",
+    "step_execution_order",
+    "step_status",
     "outcome_category",
     "failure_code",
     "retry_recommended",
@@ -44,13 +44,13 @@ _RECORD_FIELDS = {
 }
 
 
-class _SetStateSkill(Skill):
+class _SetStateStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         ctx.state["public"] = "done"
         ctx.state["secret"] = "must-not-be-emitted"
 
 
-class _SystemFailureSkill(Skill):
+class _SystemFailureStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         raise SystemException(
             "sensitive failure text",
@@ -67,10 +67,10 @@ def _ctx(transaction: Transaction) -> ProcessContext:
     )
 
 
-def _transaction(*skills: Skill) -> Transaction:
+def _transaction(*steps: Step) -> Transaction:
     return Transaction(
         reference="transition-test",
-        skills=list(skills),
+        steps=list(steps),
         definition_identity="tests.transition/v1",
         metadata={"metadata_only": "not-a-transition"},
     )
@@ -89,8 +89,8 @@ def _normalized(transitions: list[ExecutionTransition]) -> list[dict[str, object
 def test_transition_facts_are_storage_neutral_with_or_without_checkpoint(
     tmp_path: Path,
 ) -> None:
-    persisted_tx = _transaction(_SetStateSkill("set-state", 1))
-    memory_tx = _transaction(_SetStateSkill("set-state", 1))
+    persisted_tx = _transaction(_SetStateStep("set-state", 1))
+    memory_tx = _transaction(_SetStateStep("set-state", 1))
     persisted: list[ExecutionTransition] = []
     in_memory: list[ExecutionTransition] = []
     database = tmp_path / "transactions.db"
@@ -111,15 +111,15 @@ def test_transition_facts_are_storage_neutral_with_or_without_checkpoint(
     assert load_transaction(persisted_tx.id, str(database)).status is Status.SUCCESSFUL
     assert [item.event for item in in_memory] == [
         HistoryEvent.TRANSACTION_STARTED,
-        HistoryEvent.SKILL_STARTED,
-        HistoryEvent.SKILL_SUCCEEDED,
+        HistoryEvent.STEP_STARTED,
+        HistoryEvent.STEP_SUCCEEDED,
         HistoryEvent.TRANSACTION_COMPLETED,
     ]
 
 
 def test_transition_is_minimized_allowlisted_and_detached_from_mutable_state() -> None:
     transitions: list[ExecutionTransition] = []
-    tx = _transaction(_SetStateSkill("set-state", 1))
+    tx = _transaction(_SetStateStep("set-state", 1))
     nested_state = {"items": ["original"]}
     tx.state["nested"] = nested_state
     Engine().run(
@@ -162,7 +162,7 @@ def test_transition_is_minimized_allowlisted_and_detached_from_mutable_state() -
 
 def test_system_failure_recommends_retry_without_claiming_coordinator_truth() -> None:
     transitions: list[ExecutionTransition] = []
-    tx = _transaction(_SystemFailureSkill("fail", 1))
+    tx = _transaction(_SystemFailureStep("fail", 1))
     Engine(max_retries=0).run(_ctx(tx), transition_sink=transitions.append)
 
     terminal = transitions[-1].to_record()
@@ -177,22 +177,24 @@ def test_system_failure_recommends_retry_without_claiming_coordinator_truth() ->
 
 def test_business_validation_interruption_retry_and_skip_facts_are_closed() -> None:
     business: list[ExecutionTransition] = []
-    business_tx = _transaction(Skill("unused", 1), Skill("downstream", 2))
-    business_tx.skills[0].execute = lambda ctx: (_ for _ in ()).throw(  # type: ignore[method-assign]
-        BusinessException("business", action="unused", stop=True)
+    business_tx = _transaction(Step("unused", 1), Step("downstream", 2))
+    business_tx.steps[0].execute = lambda ctx: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        BusinessException(
+            "business", action="unused", halts_remaining_steps=True
+        )
     )
     Engine().run(_ctx(business_tx), transition_sink=business.append)
     assert business[-1].retry_recommended is False
     assert [item.event for item in business] == [
         HistoryEvent.TRANSACTION_STARTED,
-        HistoryEvent.SKILL_STARTED,
-        HistoryEvent.SKILL_FAILED,
-        HistoryEvent.SKILL_SKIPPED,
+        HistoryEvent.STEP_STARTED,
+        HistoryEvent.STEP_FAILED,
+        HistoryEvent.STEP_SKIPPED,
         HistoryEvent.TRANSACTION_COMPLETED,
     ]
 
     invalid: list[ExecutionTransition] = []
-    invalid_tx = _transaction(Skill("same", 1), Skill("same", 2))
+    invalid_tx = _transaction(Step("same", 1), Step("same", 2))
     with pytest.raises(ExecutionValidationError):
         Engine().run(
             _ctx(invalid_tx),
@@ -204,19 +206,19 @@ def test_business_validation_interruption_retry_and_skip_facts_are_closed() -> N
     assert invalid[0].checkpoint_state == {}
 
     interrupted: list[ExecutionTransition] = []
-    interrupted_tx = _transaction(Skill("interrupt", 1))
-    interrupted_tx.skills[0].execute = lambda ctx: (_ for _ in ()).throw(  # type: ignore[method-assign]
+    interrupted_tx = _transaction(Step("interrupt", 1))
+    interrupted_tx.steps[0].execute = lambda ctx: (_ for _ in ()).throw(  # type: ignore[method-assign]
         MemoryError("interrupt")
     )
     with pytest.raises(MemoryError):
         Engine().run(_ctx(interrupted_tx), transition_sink=interrupted.append)
-    assert HistoryEvent.SKILL_INTERRUPTED in [item.event for item in interrupted]
+    assert HistoryEvent.STEP_INTERRUPTED in [item.event for item in interrupted]
     assert interrupted[-1].outcome_category == OutcomeCategory.INTERRUPTED.value
     assert interrupted[-1].retry_recommended is None
 
     calls = 0
 
-    class _FlakySkill(Skill):
+    class _FlakyStep(Step):
         def execute(self, ctx: ProcessContext) -> None:
             nonlocal calls
             calls += 1
@@ -225,7 +227,7 @@ def test_business_validation_interruption_retry_and_skip_facts_are_closed() -> N
 
     retried: list[ExecutionTransition] = []
     Engine(max_retries=1).run(
-        _ctx(_transaction(_FlakySkill("flaky", 1))),
+        _ctx(_transaction(_FlakyStep("flaky", 1))),
         transition_sink=retried.append,
     )
     assert HistoryEvent.RETRY_SCHEDULED in [item.event for item in retried]
@@ -233,7 +235,7 @@ def test_business_validation_interruption_retry_and_skip_facts_are_closed() -> N
 
 
 def test_no_sink_keeps_ordinary_engine_behavior() -> None:
-    tx = _transaction(_SetStateSkill("set-state", 1))
+    tx = _transaction(_SetStateStep("set-state", 1))
     Engine().run(_ctx(tx))
     assert tx.status is Status.SUCCESSFUL
     assert tx.state == {
@@ -281,7 +283,7 @@ def test_transition_options_fail_before_transaction_mutation() -> None:
     ]
 
     for kwargs, error, message in cases:
-        tx = _transaction(_SetStateSkill("set-state", 1))
+        tx = _transaction(_SetStateStep("set-state", 1))
         with pytest.raises(error, match=message):
             Engine().run(_ctx(tx), **kwargs)  # type: ignore[arg-type]
         assert tx.status is Status.PENDING
@@ -292,7 +294,7 @@ def test_transition_sink_precedes_checkpoint_and_checkpoint_failure() -> None:
     effects = 0
     observed: list[tuple[str, str]] = []
 
-    class _EffectSkill(Skill):
+    class _EffectStep(Step):
         def execute(self, ctx: ProcessContext) -> None:
             nonlocal effects
             effects += 1
@@ -303,10 +305,10 @@ def test_transition_sink_precedes_checkpoint_and_checkpoint_failure() -> None:
     def checkpoint(transaction: Transaction) -> None:
         event = transaction.history[-1].event.value
         observed.append(("checkpoint", event))
-        if event == HistoryEvent.SKILL_STARTED.value:
+        if event == HistoryEvent.STEP_STARTED.value:
             raise RuntimeError("checkpoint failed after sink")
 
-    tx = _transaction(_EffectSkill("effect", 1))
+    tx = _transaction(_EffectStep("effect", 1))
     with pytest.raises(RuntimeError, match="checkpoint failed after sink"):
         Engine().run(
             _ctx(tx),
@@ -318,29 +320,29 @@ def test_transition_sink_precedes_checkpoint_and_checkpoint_failure() -> None:
     assert observed == [
         ("sink", HistoryEvent.TRANSACTION_STARTED.value),
         ("checkpoint", HistoryEvent.TRANSACTION_STARTED.value),
-        ("sink", HistoryEvent.SKILL_STARTED.value),
-        ("checkpoint", HistoryEvent.SKILL_STARTED.value),
+        ("sink", HistoryEvent.STEP_STARTED.value),
+        ("checkpoint", HistoryEvent.STEP_STARTED.value),
     ]
 
 
-def test_sink_failure_before_effect_stops_execution_and_checkpoint() -> None:
+def test_sink_failure_before_effect_halts_remaining_steps_and_checkpoint() -> None:
     effects = 0
     delivered: list[str] = []
     checkpoints: list[str] = []
 
-    class _EffectSkill(Skill):
+    class _EffectStep(Step):
         def execute(self, ctx: ProcessContext) -> None:
             nonlocal effects
             effects += 1
 
     def fail_before_effect(transition: ExecutionTransition) -> None:
-        if transition.event == HistoryEvent.SKILL_STARTED.value:
+        if transition.event == HistoryEvent.STEP_STARTED.value:
             raise RuntimeError("transition unavailable")
         delivered.append(transition.event)
 
     with pytest.raises(RuntimeError, match="transition unavailable"):
         Engine().run(
-            _ctx(_transaction(_EffectSkill("effect", 1))),
+            _ctx(_transaction(_EffectStep("effect", 1))),
             transition_sink=fail_before_effect,
             checkpoint=lambda transaction: checkpoints.append(
                 transaction.history[-1].event.value
@@ -355,27 +357,27 @@ def test_sink_failure_after_effect_propagates_without_reexecution() -> None:
     effects = 0
     delivered: list[str] = []
 
-    class _EffectSkill(Skill):
+    class _EffectStep(Step):
         def execute(self, ctx: ProcessContext) -> None:
             nonlocal effects
             effects += 1
 
     def fail_after_effect(transition: ExecutionTransition) -> None:
-        if transition.event == HistoryEvent.SKILL_SUCCEEDED.value:
+        if transition.event == HistoryEvent.STEP_SUCCEEDED.value:
             raise RuntimeError("after-effect transition unavailable")
         delivered.append(transition.event)
 
-    tx = _transaction(_EffectSkill("effect", 1))
+    tx = _transaction(_EffectStep("effect", 1))
     with pytest.raises(RuntimeError, match="after-effect transition unavailable"):
         Engine().run(_ctx(tx), transition_sink=fail_after_effect)
 
     assert effects == 1
     assert tx.status is Status.IN_PROGRESS
-    assert tx.skills[0].status is Status.SUCCESSFUL
-    assert tx.history[-1].event is HistoryEvent.SKILL_SUCCEEDED
+    assert tx.steps[0].status is Status.SUCCESSFUL
+    assert tx.history[-1].event is HistoryEvent.STEP_SUCCEEDED
     assert delivered == [
         HistoryEvent.TRANSACTION_STARTED.value,
-        HistoryEvent.SKILL_STARTED.value,
+        HistoryEvent.STEP_STARTED.value,
     ]
 
 
@@ -383,7 +385,7 @@ def test_retry_scheduled_sink_failure_stops_before_retry_pass() -> None:
     calls = 0
     observed: list[str] = []
 
-    class _FlakySkill(Skill):
+    class _FlakyStep(Step):
         def execute(self, ctx: ProcessContext) -> None:
             nonlocal calls
             calls += 1
@@ -394,28 +396,28 @@ def test_retry_scheduled_sink_failure_stops_before_retry_pass() -> None:
         if transition.event == HistoryEvent.RETRY_SCHEDULED.value:
             raise RuntimeError("retry transition unavailable")
 
-    tx = _transaction(_FlakySkill("flaky", 1))
+    tx = _transaction(_FlakyStep("flaky", 1))
     with pytest.raises(RuntimeError, match="retry transition unavailable"):
         Engine(max_retries=1).run(_ctx(tx), transition_sink=fail_on_retry)
 
     assert calls == 1
     assert tx.status is Status.IN_PROGRESS
     assert tx.retry_count == 1
-    assert tx.skills[0].status is Status.PENDING
+    assert tx.steps[0].status is Status.PENDING
     assert tx.history[-1].event is HistoryEvent.RETRY_SCHEDULED
     assert observed[-1] == HistoryEvent.RETRY_SCHEDULED.value
 
 
-def test_skipped_skill_sink_failure_exposes_exact_partial_state() -> None:
-    first = Skill("first", 1)
-    second = Skill("second", 2)
-    third = Skill("third", 3)
+def test_skipped_step_sink_failure_exposes_exact_partial_state() -> None:
+    first = Step("first", 1)
+    second = Step("second", 2)
+    third = Step("third", 3)
     first.execute = lambda ctx: (_ for _ in ()).throw(  # type: ignore[method-assign]
-        BusinessException("stop", action="first", stop=True)
+        BusinessException("stop", action="first", halts_remaining_steps=True)
     )
 
     def fail_on_skip(transition: ExecutionTransition) -> None:
-        if transition.event == HistoryEvent.SKILL_SKIPPED.value:
+        if transition.event == HistoryEvent.STEP_SKIPPED.value:
             raise RuntimeError("skip transition unavailable")
 
     tx = _transaction(first, second, third)
@@ -423,13 +425,13 @@ def test_skipped_skill_sink_failure_exposes_exact_partial_state() -> None:
         Engine().run(_ctx(tx), transition_sink=fail_on_skip)
 
     assert tx.status is Status.IN_PROGRESS
-    assert [skill.status for skill in tx.skills] == [
+    assert [step.status for step in tx.steps] == [
         Status.FAILED,
         Status.SKIPPED,
         Status.PENDING,
     ]
-    assert tx.history[-1].event is HistoryEvent.SKILL_SKIPPED
-    assert tx.history[-1].skill_name == "second"
+    assert tx.history[-1].event is HistoryEvent.STEP_SKIPPED
+    assert tx.history[-1].step_name == "second"
 
 
 def test_validation_sink_failure_supersedes_validation_error_after_mutation() -> None:
@@ -440,7 +442,7 @@ def test_validation_sink_failure_supersedes_validation_error_after_mutation() ->
         observed.append(transition)
         raise RuntimeError("validation transition unavailable")
 
-    tx = _transaction(Skill("same", 1), Skill("same", 2))
+    tx = _transaction(Step("same", 1), Step("same", 2))
     with pytest.raises(RuntimeError, match="validation transition unavailable"):
         Engine().run(
             _ctx(tx),
@@ -469,7 +471,7 @@ def test_terminal_sink_failure_keeps_terminal_state_and_skips_checkpoint() -> No
         if transition.event == HistoryEvent.TRANSACTION_COMPLETED.value:
             raise RuntimeError("terminal transition unavailable")
 
-    tx = _transaction(_SetStateSkill("set-state", 1))
+    tx = _transaction(_SetStateStep("set-state", 1))
     with pytest.raises(RuntimeError, match="terminal transition unavailable"):
         Engine().run(
             _ctx(tx),
@@ -485,4 +487,4 @@ def test_terminal_sink_failure_keeps_terminal_state_and_skips_checkpoint() -> No
     assert tx.history[-1].event is HistoryEvent.TRANSACTION_COMPLETED
     assert observed[-1] is HistoryEvent.TRANSACTION_COMPLETED
     assert HistoryEvent.TRANSACTION_COMPLETED not in checkpoints
-    assert checkpoints[-1] is HistoryEvent.SKILL_SUCCEEDED
+    assert checkpoints[-1] is HistoryEvent.STEP_SUCCEEDED

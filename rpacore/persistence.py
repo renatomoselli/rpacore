@@ -1,4 +1,4 @@
-"""Persistence — SQLite-backed save/load for transactions and skills."""
+"""Persistence — SQLite-backed save/load for transactions and steps."""
 
 import base64
 import binascii
@@ -24,7 +24,7 @@ from rpacore._sqlite import (
 )
 from rpacore.exceptions import BusinessException, DefinitionIdentityError, SystemException
 from rpacore.outcome import OutcomeCategory, RetryDisposition
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
 
@@ -329,6 +329,153 @@ def _migrate_transactions_to_v9(conn: sqlite3.Connection) -> None:
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 9)
 
 
+def _migrate_transactions_to_v10(conn: sqlite3.Connection) -> None:
+    """Translate the retired Skill persistence vocabulary to Step vocabulary."""
+    # A caller may repair an older schema marker after the physical vocabulary
+    # migration has already completed. Keep that recovery path idempotent while
+    # refusing the ambiguous case where both generations of tables exist.
+    has_steps = _table_exists(conn, "steps")
+    has_skills = _table_exists(conn, "skills")
+    if has_steps and has_skills:
+        raise RuntimeError("Conflicting transaction tables: both steps and skills exist")
+    if has_steps:
+        exception_columns = _table_columns(conn, "exceptions")
+        history_columns = _table_columns(conn, "transaction_history")
+        history_sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("transaction_history",),
+        ).fetchone()
+        history_sql = "" if history_sql_row is None else str(history_sql_row["sql"])
+        if not {
+            "step_id",
+            "occurred_at",
+            "halts_remaining_steps",
+        }.issubset(exception_columns) or not {
+            "step_name",
+            "step_execution_order",
+        }.issubset(history_columns) or "skill_" in history_sql:
+            raise RuntimeError(
+                "Conflicting transaction schema: steps table has legacy child columns"
+            )
+        _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 10)
+        return
+    if not has_skills:
+        raise RuntimeError("Cannot migrate transaction schema v9: skills table is missing")
+
+    conn.execute("""
+        CREATE TABLE steps (
+            id              TEXT PRIMARY KEY,
+            transaction_id  TEXT NOT NULL,
+            name            TEXT NOT NULL,
+            execution_order INTEGER NOT NULL,
+            status          TEXT NOT NULL,
+            arguments       TEXT NOT NULL DEFAULT '{}',
+            UNIQUE (transaction_id, name, execution_order),
+            FOREIGN KEY (transaction_id) REFERENCES transactions(id)
+        )
+    """)
+    conn.execute(
+        "INSERT INTO steps "
+        "(id, transaction_id, name, execution_order, status, arguments) "
+        "SELECT id, transaction_id, name, execution_order, status, arguments FROM skills"
+    )
+    conn.execute("""
+        CREATE TABLE exceptions_v10 (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            step_id               TEXT NOT NULL,
+            exception_type        TEXT NOT NULL,
+            message               TEXT NOT NULL,
+            action                TEXT NOT NULL,
+            retry_number          INTEGER NOT NULL,
+            occurred_at           TEXT NOT NULL,
+            screenshot_path       TEXT NOT NULL DEFAULT '',
+            halts_remaining_steps INTEGER NOT NULL DEFAULT 0,
+            code                  TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY (step_id) REFERENCES steps(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute(
+        "INSERT INTO exceptions_v10 "
+        "(id, step_id, exception_type, message, action, retry_number, occurred_at, "
+        "screenshot_path, halts_remaining_steps, code) "
+        "SELECT id, skill_id, exception_type, message, action, retry_number, "
+        "datetime_occurred, screenshot_path, stops_execution, code FROM exceptions"
+    )
+    conn.execute("""
+        CREATE TABLE transaction_history_v10 (
+            transaction_id      TEXT NOT NULL,
+            sequence            INTEGER NOT NULL,
+            timestamp           TEXT NOT NULL,
+            event               TEXT NOT NULL CHECK (
+                event IN (
+                    'transaction_started',
+                    'step_started',
+                    'step_succeeded',
+                    'step_failed',
+                    'step_skipped',
+                    'step_interrupted',
+                    'retry_scheduled',
+                    'transaction_resumed',
+                    'transaction_completed'
+                )
+            ),
+            status               TEXT NOT NULL CHECK (
+                status IN ('pending', 'in_progress', 'successful', 'failed', 'skipped')
+            ),
+            retry_number         INTEGER NOT NULL,
+            step_name            TEXT NOT NULL DEFAULT '',
+            step_execution_order INTEGER,
+            PRIMARY KEY (transaction_id, sequence),
+            FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute(
+        "INSERT INTO transaction_history_v10 "
+        "(transaction_id, sequence, timestamp, event, status, retry_number, "
+        "step_name, step_execution_order) "
+        "SELECT transaction_id, sequence, timestamp, "
+        "CASE event "
+        "WHEN 'skill_started' THEN 'step_started' "
+        "WHEN 'skill_succeeded' THEN 'step_succeeded' "
+        "WHEN 'skill_failed' THEN 'step_failed' "
+        "WHEN 'skill_skipped' THEN 'step_skipped' "
+        "WHEN 'skill_interrupted' THEN 'step_interrupted' "
+        "ELSE event END, status, retry_number, skill_name, skill_execution_order "
+        "FROM transaction_history"
+    )
+    for legacy_table, migrated_table in (
+        ("skills", "steps"),
+        ("exceptions", "exceptions_v10"),
+        ("transaction_history", "transaction_history_v10"),
+    ):
+        legacy_count = int(
+            conn.execute(f"SELECT count(*) FROM {legacy_table}").fetchone()[0]
+        )
+        migrated_count = int(
+            conn.execute(f"SELECT count(*) FROM {migrated_table}").fetchone()[0]
+        )
+        if migrated_count != legacy_count:
+            raise RuntimeError(
+                f"Transaction schema v10 migration row-count mismatch for "
+                f"{legacy_table}: expected {legacy_count}, copied {migrated_count}"
+            )
+    for migrated_table in ("steps", "exceptions_v10", "transaction_history_v10"):
+        violations = conn.execute(
+            f"PRAGMA foreign_key_check({migrated_table})"
+        ).fetchall()
+        if violations:
+            raise RuntimeError(
+                f"Transaction schema v10 migration created invalid foreign keys "
+                f"in {migrated_table}"
+            )
+    conn.execute("DROP TABLE exceptions")
+    conn.execute("DROP TABLE skills")
+    conn.execute("DROP TABLE transaction_history")
+    conn.execute("ALTER TABLE exceptions_v10 RENAME TO exceptions")
+    conn.execute("ALTER TABLE transaction_history_v10 RENAME TO transaction_history")
+    _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 10)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run explicit transaction schema migrations through one write transaction."""
     # sqlite3's connection context manager does not begin a transaction for
@@ -377,6 +524,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 9:
             _migrate_transactions_to_v9(conn)
             current_version = 9
+        if current_version < 10:
+            _migrate_transactions_to_v10(conn)
+            current_version = 10
         if current_version != _TRANSACTION_SCHEMA_VERSION:
             raise RuntimeError(
                 "Unsupported transaction schema version "
@@ -389,8 +539,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
-def _skill_id(transaction_id: str, skill: Skill) -> str:
-    return f"{transaction_id}:{skill.name}:{skill.execution_order}"
+def _step_id(transaction_id: str, step: Step) -> str:
+    return f"{transaction_id}:{step.name}:{step.execution_order}"
 
 
 def _load_transaction_state(row: sqlite3.Row) -> dict[str, object]:
@@ -405,22 +555,22 @@ def _load_transaction_state(row: sqlite3.Row) -> dict[str, object]:
     return state
 
 
-def _load_skill_arguments(
+def _load_step_arguments(
     transaction_id: str,
     row: sqlite3.Row,
 ) -> dict[str, object]:
-    """Load one Skill argument mapping or raise actionable repair guidance."""
+    """Load one Step argument mapping or raise actionable repair guidance."""
     try:
         arguments = json.loads(row["arguments"])
         validate_json_object(
             arguments,
-            path=f"transaction.skills[{row['name']!r}].arguments",
+            path=f"transaction.steps[{row['name']!r}].arguments",
         )
     except (json.JSONDecodeError, TypeError) as exc:
         raise SystemException(
-            f"Persisted skill arguments are invalid for transaction "
-            f"{transaction_id!r} skill {row['name']!r}: {exc}",
-            action="repair skill arguments in the persistence database",
+            f"Persisted step arguments are invalid for transaction "
+            f"{transaction_id!r} step {row['name']!r}: {exc}",
+            action="repair step arguments in the persistence database",
         ) from exc
     return arguments
 
@@ -585,8 +735,8 @@ def _load_history(transaction_id: str, rows: list[sqlite3.Row]) -> list[HistoryE
                     event=HistoryEvent(row["event"]),
                     status=Status(row["status"]),
                     retry_number=row["retry_number"],
-                    skill_name=row["skill_name"],
-                    skill_execution_order=row["skill_execution_order"],
+                    step_name=row["step_name"],
+                    step_execution_order=row["step_execution_order"],
                 )
             )
         except (TypeError, ValueError) as exc:
@@ -729,27 +879,27 @@ def _write_transaction_rows(
                 f"Transaction {transaction.id!r} revision {expected_revision} is stale"
             )
 
-    conn.execute("DELETE FROM skills WHERE transaction_id = ?", (transaction.id,))
-    for skill in transaction.skills:
-        sid = _skill_id(transaction.id, skill)
+    conn.execute("DELETE FROM steps WHERE transaction_id = ?", (transaction.id,))
+    for step in transaction.steps:
+        sid = _step_id(transaction.id, step)
         conn.execute(
-            "INSERT INTO skills "
+            "INSERT INTO steps "
             "(id, transaction_id, name, execution_order, status, arguments) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 sid,
                 transaction.id,
-                skill.name,
-                skill.execution_order,
-                skill.status,
-                json.dumps(skill.arguments),
+                step.name,
+                step.execution_order,
+                step.status,
+                json.dumps(step.arguments),
             ),
         )
-        for exc in skill.exceptions:
+        for exc in step.exceptions:
             conn.execute(
                 "INSERT INTO exceptions "
-                "(skill_id, exception_type, message, action, retry_number, "
-                "datetime_occurred, screenshot_path, stops_execution, code) "
+                "(step_id, exception_type, message, action, retry_number, "
+                "occurred_at, screenshot_path, halts_remaining_steps, code) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     sid,
@@ -757,9 +907,9 @@ def _write_transaction_rows(
                     str(exc),
                     exc.action,
                     exc.retry_number,
-                    exc.datetime_occurred.isoformat(),
+                    exc.occurred_at.isoformat(),
                     exc.screenshot_path,
-                    1 if exc.stops_execution else 0,
+                    1 if exc.halts_remaining_steps else 0,
                     exc.code,
                 ),
             )
@@ -767,7 +917,7 @@ def _write_transaction_rows(
         conn.execute(
             "INSERT OR IGNORE INTO transaction_history "
             "(transaction_id, sequence, timestamp, event, status, retry_number, "
-            "skill_name, skill_execution_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "step_name, step_execution_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 transaction.id,
                 entry.sequence,
@@ -775,8 +925,8 @@ def _write_transaction_rows(
                 entry.event,
                 entry.status,
                 entry.retry_number,
-                entry.skill_name,
-                entry.skill_execution_order,
+                entry.step_name,
+                entry.step_execution_order,
             ),
         )
     conn.execute("DELETE FROM transaction_metadata WHERE transaction_id = ?", (transaction.id,))
@@ -993,12 +1143,12 @@ def _delete_unbound_pending_transaction(
                     f"{transaction_id!r}; expected pending status with no history"
                 )
             conn.execute(
-                "DELETE FROM exceptions WHERE skill_id IN "
-                "(SELECT id FROM skills WHERE transaction_id = ?)",
+                "DELETE FROM exceptions WHERE step_id IN "
+                "(SELECT id FROM steps WHERE transaction_id = ?)",
                 (transaction_id,),
             )
             conn.execute(
-                "DELETE FROM skills WHERE transaction_id = ?",
+                "DELETE FROM steps WHERE transaction_id = ?",
                 (transaction_id,),
             )
             conn.execute(
@@ -1050,37 +1200,37 @@ def load_transaction(
             raise KeyError(f"Transaction not found: {transaction_id!r}")
         transaction_state = _load_transaction_state(row)
 
-        skill_rows = conn.execute(
-                "SELECT id, name, execution_order, status, arguments FROM skills "
+        step_rows = conn.execute(
+                "SELECT id, name, execution_order, status, arguments FROM steps "
             "WHERE transaction_id = ? ORDER BY execution_order",
             (transaction_id,),
         ).fetchall()
 
-        skills: list[Skill] = []
-        for sr in skill_rows:
-            skill = Skill(
+        steps: list[Step] = []
+        for sr in step_rows:
+            step = Step(
                 sr["name"],
                 sr["execution_order"],
-                arguments=_load_skill_arguments(transaction_id, sr),
+                arguments=_load_step_arguments(transaction_id, sr),
             )
-            skill.status = Status(sr["status"])
+            step.status = Status(sr["status"])
 
             exc_rows = conn.execute(
-                "SELECT exception_type, message, action, retry_number, datetime_occurred, "
-                "screenshot_path, stops_execution, code FROM exceptions WHERE skill_id = ? ORDER BY id",
+                "SELECT exception_type, message, action, retry_number, occurred_at, "
+                "screenshot_path, halts_remaining_steps, code FROM exceptions WHERE step_id = ? ORDER BY id",
                 (sr["id"],),
             ).fetchall()
             for er in exc_rows:
-                dt = datetime.fromisoformat(er["datetime_occurred"])
+                dt = datetime.fromisoformat(er["occurred_at"])
                 screenshot = er["screenshot_path"]
                 if er["exception_type"] == "business":
                     exc: BusinessException | SystemException = BusinessException(
                         er["message"],
                         action=er["action"],
                         retry_number=er["retry_number"],
-                        datetime_occurred=dt,
+                        occurred_at=dt,
                         screenshot_path=screenshot,
-                        stop=bool(er["stops_execution"]),
+                        halts_remaining_steps=bool(er["halts_remaining_steps"]),
                         code=er["code"],
                     )
                 else:
@@ -1088,18 +1238,18 @@ def load_transaction(
                         er["message"],
                         action=er["action"],
                         retry_number=er["retry_number"],
-                        datetime_occurred=dt,
+                        occurred_at=dt,
                         screenshot_path=screenshot,
                         code=er["code"],
                     )
-                skill.exceptions.append(exc)
-            skills.append(skill)
+                step.exceptions.append(exc)
+            steps.append(step)
 
         tx_status = Status(row["status"])
 
         history_rows = conn.execute(
             "SELECT sequence, timestamp, event, status, retry_number, "
-            "skill_name, skill_execution_order FROM transaction_history "
+            "step_name, step_execution_order FROM transaction_history "
             "WHERE transaction_id = ? ORDER BY sequence",
             (transaction_id,),
         ).fetchall()
@@ -1137,7 +1287,7 @@ def load_transaction(
             state=transaction_state,
             metadata=metadata,
             artifacts=artifacts,
-            skills=skills,
+            steps=steps,
             history=history,
             definition_identity=row["definition_identity"],
         )

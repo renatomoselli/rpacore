@@ -146,7 +146,7 @@ class TestProcessContextCredentials:
         )
         assert isinstance(ctx.credentials, KeyringCredentialProvider)
 
-    def test_skill_can_access_credential_via_ctx(self) -> None:
+    def test_step_can_access_credential_via_ctx(self) -> None:
         from rpacore.context import ProcessContext
         from rpacore.transaction import Transaction
 

@@ -50,7 +50,7 @@ class TestProcessContextStateSharing:
         tx = Transaction(reference="T1")
         ctx = ProcessContext(transaction=tx)
 
-        # Simulate two skills sharing ctx
+        # Simulate two steps sharing ctx
         ctx.state["result"] = "step1_done"
         assert tx.state["result"] == "step1_done"
 

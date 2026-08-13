@@ -1,1 +1,1 @@
-"""Sample automation skills and entry point for development/testing."""
+"""Sample automation steps and entry point for development/testing."""

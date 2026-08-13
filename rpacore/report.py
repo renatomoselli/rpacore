@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING
 
 from rpacore.exceptions import BusinessException, SystemException
 from rpacore.outcome import OutcomeCategory, RetryDisposition
-from rpacore.serialization import _serialize_transaction_v1
+from rpacore.serialization import serialize_transaction
 from rpacore.status import Status
 
 if TYPE_CHECKING:
-    from rpacore.skill import Skill
+    from rpacore.step import Step
     from rpacore.transaction import HistoryEntry, Transaction
 
 
@@ -26,12 +26,12 @@ _ICONS: dict[Status, str] = {
     Status.PENDING: "⏸",
     Status.IN_PROGRESS: "⏸",
 }
-REPORT_FORMAT_VERSION = 1
+REPORT_FORMAT_VERSION = 2
 
 
 @dataclass
-class SkillReport:
-    """Reporting view of a single skill's execution outcome."""
+class StepReport:
+    """Reporting view of a single step's execution outcome."""
 
     name: str
     execution_order: int
@@ -70,7 +70,7 @@ class OutcomeReport:
 class ReportRecord:
     """Immutable JSON-safe report record.
 
-    ``payload_json`` is the canonical v1 representation. ``to_dict()`` returns
+    ``payload_json`` is the canonical v2 representation. ``to_dict()`` returns
     a fresh mutable view for consumers that need to inspect it.
     """
 
@@ -90,7 +90,7 @@ class TransactionReport:
     reference: str
     status: Status
     retry_count: int
-    skills: list[SkillReport]
+    steps: list[StepReport]
     outcome: OutcomeReport = field(default_factory=OutcomeReport)
     created_at: datetime | None = None
     started_at: datetime | None = None
@@ -106,18 +106,18 @@ class TransactionReport:
 def generate_report(transaction: Transaction) -> TransactionReport:
     """Build a TransactionReport from a completed transaction.
 
-    Reports preserve every diagnostic attempt recorded on each skill. Operator
+    Reports preserve every diagnostic attempt recorded on each step. Operator
     views should not hide earlier retry failures by default.
     """
-    skill_reports: list[SkillReport] = []
-    for skill in transaction.ordered_skills():
-        skill_reports.append(
-            SkillReport(
-                name=skill.name,
-                execution_order=skill.execution_order,
-                status=skill.status,
-                icon=_ICONS.get(skill.status, "?"),
-                exceptions=[copy(exc) for exc in skill.exceptions],
+    step_reports: list[StepReport] = []
+    for step in transaction.ordered_steps():
+        step_reports.append(
+            StepReport(
+                name=step.name,
+                execution_order=step.execution_order,
+                status=step.status,
+                icon=_ICONS.get(step.status, "?"),
+                exceptions=[copy(exc) for exc in step.exceptions],
             )
         )
     artifact_reports = [
@@ -132,7 +132,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         for artifact in transaction.artifacts
     ]
     try:
-        transaction_record = _serialize_transaction_v1(transaction)
+        transaction_record = serialize_transaction(transaction)
     except (TypeError, ValueError):
         transaction_record = {}
 
@@ -141,7 +141,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         reference=transaction.reference,
         status=transaction.status,
         retry_count=transaction.retry_count,
-        skills=skill_reports,
+        steps=step_reports,
         outcome=_project_transaction_outcome(transaction),
         created_at=transaction.created_at,
         started_at=transaction.started_at,
@@ -156,7 +156,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
 
 
 def _build_report_record(report: TransactionReport) -> ReportRecord:
-    """Build the immutable report-v1 record without changing work truth."""
+    """Build the immutable report-v2 record without changing work truth."""
     serialization_error = ""
     transaction_record: dict[str, object] | None = report.transaction_record
     if not transaction_record:
@@ -186,11 +186,11 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
                 "failure_code": report.outcome.failure_code,
             },
         },
-        "skills": [
+        "steps": [
             {
-                "name": skill.name,
-                "execution_order": skill.execution_order,
-                "status": str(skill.status),
+                "name": step.name,
+                "execution_order": step.execution_order,
+                "status": str(step.status),
                 "exceptions": [
                     {
                         "type": type(exc).__name__,
@@ -198,12 +198,12 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
                         "retry_number": exc.retry_number,
                         "action": exc.action,
                         "screenshot_path": exc.screenshot_path,
-                        "stops_execution": exc.stops_execution,
+                        "halts_remaining_steps": exc.halts_remaining_steps,
                     }
-                    for exc in skill.exceptions
+                    for exc in step.exceptions
                 ],
             }
-            for skill in report.skills
+            for step in report.steps
         ],
         "artifacts": [
             {
@@ -223,8 +223,8 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
                 "event": str(entry.event),
                 "status": str(entry.status),
                 "retry_number": entry.retry_number,
-                "skill_name": entry.skill_name,
-                "skill_execution_order": entry.skill_execution_order,
+                "step_name": entry.step_name,
+                "step_execution_order": entry.step_execution_order,
             }
             for entry in report.history
         ],
@@ -259,7 +259,7 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
                         "failure_code": report.outcome.failure_code,
                     },
                 },
-                "skills": [],
+                "steps": [],
                 "artifacts": [],
                 "history": [],
                 "transaction_record": None,
@@ -272,14 +272,14 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
 
 
 def render_json(report: TransactionReport) -> str:
-    """Render the immutable report-v1 record as canonical JSON."""
+    """Render the immutable report-v2 record as canonical JSON."""
     if report.record is None:
         return _build_report_record(report).payload_json
     return report.record.payload_json
 
 
 def _record_payload(report: TransactionReport) -> dict[str, object]:
-    """Return the immutable report-v1 payload used by renderers."""
+    """Return the immutable report-v2 payload used by renderers."""
     return json.loads(render_json(report))
 
 
@@ -299,15 +299,15 @@ def _snapshot_report(report: TransactionReport) -> TransactionReport:
         reference=report.reference,
         status=report.status,
         retry_count=report.retry_count,
-        skills=[
-            SkillReport(
-                name=skill.name,
-                execution_order=skill.execution_order,
-                status=skill.status,
-                icon=skill.icon,
-                exceptions=[copy(exc) for exc in skill.exceptions],
+        steps=[
+            StepReport(
+                name=step.name,
+                execution_order=step.execution_order,
+                status=step.status,
+                icon=step.icon,
+                exceptions=[copy(exc) for exc in step.exceptions],
             )
-            for skill in report.skills
+            for step in report.steps
         ],
         outcome=report.outcome,
         created_at=report.created_at,
@@ -389,26 +389,30 @@ def render_text(report: TransactionReport) -> str:
         f"Generated:   {payload['generated_at']}",
         "",
     ])
-    skills = payload["skills"]
-    assert isinstance(skills, list)
-    for skill in skills:
-        assert isinstance(skill, dict)
-        status = str(skill["status"])
+    steps = payload["steps"]
+    assert isinstance(steps, list)
+    for step in steps:
+        assert isinstance(step, dict)
+        status = str(step["status"])
         try:
             icon = _ICONS.get(Status(status), "?")
         except ValueError:
             icon = "?"
         lines.append(
-            f"  [{icon}] {skill['name']} (order {skill['execution_order']}) — {status}"
+            f"  [{icon}] {step['name']} (order {step['execution_order']}) — {status}"
         )
-        exceptions = skill["exceptions"]
+        exceptions = step["exceptions"]
         assert isinstance(exceptions, list)
         for exc in exceptions:
             assert isinstance(exc, dict)
             kind = "BIZ" if exc["type"] == "BusinessException" else "SYS"
-            stop_text = " stop=true" if exc["stops_execution"] else ""
+            halt_text = (
+                " halts_remaining_steps=true"
+                if exc["halts_remaining_steps"]
+                else ""
+            )
             lines.append(
-                f"      [{kind}] retry={exc['retry_number']}{stop_text}: {exc['message']}"
+                f"      [{kind}] retry={exc['retry_number']}{halt_text}: {exc['message']}"
             )
             if exc["action"]:
                 lines.append(f"             action: {exc['action']}")
@@ -442,12 +446,12 @@ def render_text(report: TransactionReport) -> str:
         lines.extend(["", "History:"])
         for entry in history:
             assert isinstance(entry, dict)
-            skill = ""
-            if entry["skill_name"]:
-                skill = f" skill={entry['skill_name']} order={entry['skill_execution_order']}"
+            step = ""
+            if entry["step_name"]:
+                step = f" step={entry['step_name']} order={entry['step_execution_order']}"
             lines.append(
                 f"  #{entry['sequence']} {entry['timestamp']} "
-                f"{entry['event']} status={entry['status']} retry={entry['retry_number']}{skill}"
+                f"{entry['event']} status={entry['status']} retry={entry['retry_number']}{step}"
             )
     return "\n".join(lines)
 
@@ -462,7 +466,7 @@ _HTML_TEMPLATE = string.Template(
 <style>
 body{font-family:monospace;padding:1rem;max-width:900px;margin:auto}
 h2{margin-bottom:.25rem}
-.skill{margin:.5rem 0;padding:.5rem;border:1px solid #ccc;border-radius:4px}
+.step{margin:.5rem 0;padding:.5rem;border:1px solid #ccc;border-radius:4px}
 .successful{border-color:#4caf50}.failed{border-color:#f44336}
 .skipped{border-color:#9e9e9e}.pending{border-color:#ff9800}
 .in-progress{border-color:#2196f3}
@@ -479,7 +483,7 @@ h2{margin-bottom:.25rem}
 <p>Outcome: <strong>$outcome_category</strong> &nbsp; Retry disposition: $retry_disposition</p>$failure_code_html$report_error_html
 <p>Created: $created_at &nbsp; Started: $started_at &nbsp; Finished: $finished_at</p>
 <p>ID: <code>$transaction_id</code></p>
-$skills_html
+$steps_html
 $metadata_html
 $artifacts_html
 $history_html
@@ -487,9 +491,9 @@ $history_html
 </html>"""
 )
 
-_SKILL_TEMPLATE = string.Template(
+_STEP_TEMPLATE = string.Template(
     """\
-<div class="skill $css_class">
+<div class="step $css_class">
   <strong>$icon $name</strong> (order $execution_order) &mdash; $status
   $exceptions_html
 </div>"""
@@ -513,7 +517,7 @@ $history_items
 
 _HISTORY_ITEM_TEMPLATE = string.Template(
     """\
-    <li><code>#$sequence</code> $timestamp $event status=$status retry=$retry_number$skill</li>"""
+    <li><code>#$sequence</code> $timestamp $event status=$status retry=$retry_number$step</li>"""
 )
 
 
@@ -575,19 +579,23 @@ def render_html(report: TransactionReport) -> str:
         for error in errors
         if isinstance(error, dict) and error.get("code")
     ]
-    skills_parts: list[str] = []
-    skills = payload["skills"]
-    assert isinstance(skills, list)
-    for skill in skills:
-        assert isinstance(skill, dict)
+    steps_parts: list[str] = []
+    steps = payload["steps"]
+    assert isinstance(steps, list)
+    for step in steps:
+        assert isinstance(step, dict)
         exc_parts: list[str] = []
-        exceptions = skill["exceptions"]
+        exceptions = step["exceptions"]
         assert isinstance(exceptions, list)
         for exc in exceptions:
             assert isinstance(exc, dict)
             kind = "BIZ" if exc["type"] == "BusinessException" else "SYS"
             exc_class = "biz" if kind == "BIZ" else "sys"
-            stop_html = " stop=true" if exc["stops_execution"] else ""
+            halt_html = (
+                " halts_remaining_steps=true"
+                if exc["halts_remaining_steps"]
+                else ""
+            )
             action_html = (
                 f" &mdash; action: {_esc(str(exc['action']))}" if exc["action"] else ""
             )
@@ -601,24 +609,24 @@ def render_html(report: TransactionReport) -> str:
                 _EXC_TEMPLATE.substitute(
                     exc_class=exc_class,
                     kind=kind,
-                    retry_number=f"{exc['retry_number']}{stop_html}",
+                    retry_number=f"{exc['retry_number']}{halt_html}",
                     message=_esc(str(exc["message"])),
                     action_html=action_html,
                     screenshot_html=screenshot_html,
                 )
             )
-        status = str(skill["status"])
+        status = str(step["status"])
         try:
             icon = _ICONS.get(Status(status), "?")
         except ValueError:
             icon = "?"
         css_class = status.replace("_", "-")
-        skills_parts.append(
-            _SKILL_TEMPLATE.substitute(
+        steps_parts.append(
+            _STEP_TEMPLATE.substitute(
                 css_class=css_class,
                 icon=icon,
-                name=_esc(str(skill["name"])),
-                execution_order=skill["execution_order"],
+                name=_esc(str(step["name"])),
+                execution_order=step["execution_order"],
                 status=status,
                 exceptions_html="\n  ".join(exc_parts),
             )
@@ -630,11 +638,11 @@ def render_html(report: TransactionReport) -> str:
         items: list[str] = []
         for entry in history:
             assert isinstance(entry, dict)
-            skill = ""
-            if entry["skill_name"]:
-                skill = (
-                    f" skill={_esc(str(entry['skill_name']))}"
-                    f" order={entry['skill_execution_order']}"
+            step = ""
+            if entry["step_name"]:
+                step = (
+                    f" step={_esc(str(entry['step_name']))}"
+                    f" order={entry['step_execution_order']}"
                 )
             items.append(
                 _HISTORY_ITEM_TEMPLATE.substitute(
@@ -643,7 +651,7 @@ def render_html(report: TransactionReport) -> str:
                     event=_esc(str(entry["event"])),
                     status=_esc(str(entry["status"])),
                     retry_number=entry["retry_number"],
-                    skill=skill,
+                    step=step,
                 )
             )
         history_html = _HISTORY_TEMPLATE.substitute(history_items="\n".join(items))
@@ -709,7 +717,7 @@ def render_html(report: TransactionReport) -> str:
         started_at=_esc(str(transaction["started_at"])),
         finished_at=_esc(str(transaction["finished_at"])),
         transaction_id=_esc(str(transaction["id"])),
-        skills_html="\n".join(skills_parts),
+        steps_html="\n".join(steps_parts),
         metadata_html=metadata_html,
         artifacts_html=artifacts_html,
         history_html=history_html,

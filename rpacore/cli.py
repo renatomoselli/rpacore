@@ -25,7 +25,8 @@ from rpacore.transaction import Transaction
 USAGE_ERROR = 2
 EXECUTION_ERROR = 1
 SUCCESS = 0
-EXPORT_FORMAT_VERSION = 1
+CLI_TRANSACTION_SCHEMA_VERSION = 2
+EXPORT_FORMAT_VERSION = 2
 _NDJSON_EXPORT_KEYS = frozenset(
     {"export_format_version", "framework_version", "exported_at"}
 )
@@ -169,7 +170,7 @@ def _init_project(project_dir: Path) -> int:
 
     try:
         project_dir.mkdir(parents=True)
-        (project_dir / "skills").mkdir()
+        (project_dir / "steps").mkdir()
         (project_dir / "tests").mkdir()
         _write_project_files(project_dir)
     except Exception as exc:
@@ -196,7 +197,7 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
             if args.json:
                 _write_json(
                     {
-                        "schema_version": 1,
+                        "schema_version": CLI_TRANSACTION_SCHEMA_VERSION,
                         "command": "transaction:list",
                         "limit": args.limit,
                         "transactions": [
@@ -217,7 +218,7 @@ def _inspect_transactions(args: argparse.Namespace) -> int:
             if args.json:
                 _write_json(
                     {
-                        "schema_version": 1,
+                        "schema_version": CLI_TRANSACTION_SCHEMA_VERSION,
                         "command": "transaction:show",
                         "transaction": serialize_transaction(transaction),
                     }
@@ -317,17 +318,17 @@ def _write_transaction_detail(transaction: Transaction) -> None:
     print(f"Created:     {_format_optional_datetime(transaction.created_at)}")
     print(f"Started:     {_format_optional_datetime(transaction.started_at)}")
     print(f"Finished:    {_format_optional_datetime(transaction.finished_at)}")
-    print(f"Skills:      {len(transaction.skills)}")
-    for skill in transaction.ordered_skills():
-        print(f"  {skill.execution_order}. {skill.name}: {skill.status}")
-        for exc in skill.exceptions:
+    print(f"Steps:      {len(transaction.steps)}")
+    for step in transaction.ordered_steps():
+        print(f"  {step.execution_order}. {step.name}: {step.status}")
+        for exc in step.exceptions:
             print(f"     - {_exception_kind(exc)}: {exc}")
     print(f"History:     {len(transaction.history)}")
     for entry in transaction.history:
-        skill_label = "" if not entry.skill_name else f" skill={entry.skill_name}"
+        step_label = "" if not entry.step_name else f" step={entry.step_name}"
         print(
             f"  {entry.sequence}. {entry.event} status={entry.status} "
-            f"retry={entry.retry_number}{skill_label}"
+            f"retry={entry.retry_number}{step_label}"
         )
     print(f"Artifacts:   {len(transaction.artifacts)}")
     for artifact in transaction.artifacts:
@@ -432,9 +433,9 @@ def _write_project_files(project_dir: Path) -> None:
         "rpacore.toml": _rpacore_toml(),
         "config.toml": _config_toml(),
         "main.py": _main_py(),
-        "skills/__init__.py": "",
-        "skills/greeting.py": _greeting_skill_py(),
-        "tests/test_greeting_skill.py": _skill_test_py(),
+        "steps/__init__.py": "",
+        "steps/greeting.py": _greeting_step_py(),
+        "tests/test_greeting_step.py": _step_test_py(),
         ".gitignore": _gitignore(),
     }
     for relative_path, content in files.items():
@@ -490,7 +491,7 @@ def _main_py() -> str:
             load_config,
             load_project_manifest,
         )
-        from skills.greeting import WriteGreeting
+        from steps.greeting import WriteGreeting
 
 
         def main() -> int:
@@ -500,7 +501,7 @@ def _main_py() -> str:
             transaction = Transaction(
                 reference="generated-greeting",
                 definition_identity="generated-greeting/v1",
-                skills=[
+                steps=[
                     WriteGreeting(
                         name="write_greeting",
                         execution_order=1,
@@ -528,16 +529,16 @@ def _main_py() -> str:
         """)
 
 
-def _greeting_skill_py() -> str:
+def _greeting_step_py() -> str:
     return textwrap.dedent("""\
         from __future__ import annotations
 
         from pathlib import Path
 
-        from rpacore import BusinessException, ProcessContext, Skill
+        from rpacore import BusinessException, ProcessContext, Step
 
 
-        class WriteGreeting(Skill):
+        class WriteGreeting(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 name = self.arguments.get("name")
                 if not isinstance(name, str) or not name.strip():
@@ -555,7 +556,7 @@ def _greeting_skill_py() -> str:
         """)
 
 
-def _skill_test_py() -> str:
+def _step_test_py() -> str:
     return textwrap.dedent("""\
         from __future__ import annotations
 
@@ -564,19 +565,19 @@ def _skill_test_py() -> str:
         import pytest
 
         from rpacore import BusinessException, ProcessContext, Transaction
-        from skills.greeting import WriteGreeting
+        from steps.greeting import WriteGreeting
 
 
-        def test_write_greeting_skill(tmp_path: Path) -> None:
+        def test_write_greeting_step(tmp_path: Path) -> None:
             output = tmp_path / "greeting.txt"
-            skill = WriteGreeting(
+            step = WriteGreeting(
                 name="write_greeting",
                 execution_order=1,
                 arguments={"name": "Alice", "output_path": str(output)},
             )
-            transaction = Transaction(reference="test", skills=[skill])
+            transaction = Transaction(reference="test", steps=[step])
 
-            skill.execute(ProcessContext(transaction=transaction))
+            step.execute(ProcessContext(transaction=transaction))
 
             assert output.read_text(encoding="utf-8") == "Hello, Alice\\n"
             assert transaction.state["greeting_path"] == str(output)
@@ -588,15 +589,15 @@ def _skill_test_py() -> str:
 
         def test_write_greeting_rejects_missing_name(tmp_path: Path) -> None:
             output = tmp_path / "greeting.txt"
-            skill = WriteGreeting(
+            step = WriteGreeting(
                 name="write_greeting",
                 execution_order=1,
                 arguments={"name": "", "output_path": str(output)},
             )
-            transaction = Transaction(reference="test", skills=[skill])
+            transaction = Transaction(reference="test", steps=[step])
 
             with pytest.raises(BusinessException, match="non-empty string"):
-                skill.execute(ProcessContext(transaction=transaction))
+                step.execute(ProcessContext(transaction=transaction))
 
             assert not output.exists()
             assert transaction.state == {}

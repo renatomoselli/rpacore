@@ -1,7 +1,8 @@
 {
-  "transaction_format_version": 1,
-  "id": "transaction-v1",
+  "transaction_format_version": 3,
+  "id": "transaction-v3",
   "reference": "fixture",
+  "definition_identity": "fixture/v3",
   "status": "successful",
   "retry_count": 0,
   "created_at": "2026-07-27T12:00:00+00:00",
@@ -9,7 +10,7 @@
   "finished_at": null,
   "state": {"invoice": "001"},
   "metadata": {"customer": "acme"},
-  "skills": [],
+  "steps": [],
   "history": [],
   "artifacts": []
 }

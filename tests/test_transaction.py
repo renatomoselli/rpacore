@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from rpacore.exceptions import ExecutionValidationError
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
 
@@ -38,9 +38,9 @@ class TestTransactionFreshState:
         tx = Transaction(reference="INV-001")
         assert tx.retry_count == 0
 
-    def test_skills_defaults_to_empty_list(self) -> None:
+    def test_steps_defaults_to_empty_list(self) -> None:
         tx = Transaction(reference="INV-001")
-        assert tx.skills == []
+        assert tx.steps == []
 
     def test_state_defaults_to_empty_dict(self) -> None:
         tx = Transaction(reference="INV-001")
@@ -72,11 +72,11 @@ class TestTransactionFreshState:
         tx = Transaction(reference="INV-001")
         assert tx.definition_identity == ""
 
-    def test_skills_not_shared_between_instances(self) -> None:
+    def test_steps_not_shared_between_instances(self) -> None:
         a = Transaction(reference="A")
         b = Transaction(reference="B")
-        a.skills.append(Skill("login", 1))
-        assert len(b.skills) == 0
+        a.steps.append(Step("login", 1))
+        assert len(b.steps) == 0
 
     def test_state_not_shared_between_instances(self) -> None:
         a = Transaction(reference="A")
@@ -170,12 +170,12 @@ class TestTransactionCustomValues:
         assert str(parsed) == artifact.id
 
     def test_artifact_metadata_does_not_keep_reference(self) -> None:
-        metadata = {"source": "skill"}
+        metadata = {"source": "step"}
 
         artifact = Artifact(name="invoice", path="invoice.pdf", metadata=metadata)
         artifact.metadata["status"] = "created"
 
-        assert metadata == {"source": "skill"}
+        assert metadata == {"source": "step"}
 
     def test_artifact_metadata_accepts_none_as_empty_mapping(self) -> None:
         artifact = Artifact(name="invoice", path="invoice.pdf", metadata=None)  # type: ignore[arg-type]
@@ -219,61 +219,61 @@ class TestTransactionCustomValues:
         with pytest.raises(dataclasses.FrozenInstanceError):
             entry.sequence = 2  # type: ignore[misc]
 
-    def test_custom_skills(self) -> None:
-        skills = [Skill("a", 1), Skill("b", 2)]
-        tx = Transaction(reference="INV-001", skills=skills)
-        assert len(tx.skills) == 2
+    def test_custom_steps(self) -> None:
+        steps = [Step("a", 1), Step("b", 2)]
+        tx = Transaction(reference="INV-001", steps=steps)
+        assert len(tx.steps) == 2
 
-    def test_custom_skills_does_not_keep_reference(self) -> None:
-        skills = [Skill("a", 1)]
-        tx = Transaction(reference="INV-001", skills=skills)
-        skills.append(Skill("b", 2))
-        assert len(tx.skills) == 1
+    def test_custom_steps_does_not_keep_reference(self) -> None:
+        steps = [Step("a", 1)]
+        tx = Transaction(reference="INV-001", steps=steps)
+        steps.append(Step("b", 2))
+        assert len(tx.steps) == 1
 
 
-class TestTransactionOrderedSkills:
-    def test_returns_skills_sorted_by_execution_order(self) -> None:
+class TestTransactionOrderedSteps:
+    def test_returns_steps_sorted_by_execution_order(self) -> None:
         tx = Transaction(
             reference="INV-001",
-            skills=[Skill("c", 3), Skill("a", 1), Skill("b", 2)],
+            steps=[Step("c", 3), Step("a", 1), Step("b", 2)],
         )
-        ordered = tx.ordered_skills()
+        ordered = tx.ordered_steps()
         assert [s.name for s in ordered] == ["a", "b", "c"]
 
     def test_does_not_mutate_original_list(self) -> None:
         tx = Transaction(
             reference="INV-001",
-            skills=[Skill("c", 3), Skill("a", 1)],
+            steps=[Step("c", 3), Step("a", 1)],
         )
-        tx.ordered_skills()
-        assert tx.skills[0].name == "c"
+        tx.ordered_steps()
+        assert tx.steps[0].name == "c"
 
-    def test_empty_skills_returns_empty(self) -> None:
+    def test_empty_steps_returns_empty(self) -> None:
         tx = Transaction(reference="INV-001")
-        assert tx.ordered_skills() == []
+        assert tx.ordered_steps() == []
 
 
-class TestTransactionFailedSkills:
-    def test_returns_only_failed_skills(self) -> None:
-        s1 = Skill("a", 1)
-        s2 = Skill("b", 2)
-        s3 = Skill("c", 3)
+class TestTransactionFailedSteps:
+    def test_returns_only_failed_steps(self) -> None:
+        s1 = Step("a", 1)
+        s2 = Step("b", 2)
+        s3 = Step("c", 3)
         s1.status = Status.SUCCESSFUL
         s2.status = Status.FAILED
         s3.status = Status.FAILED
-        tx = Transaction(reference="INV-001", skills=[s1, s2, s3])
-        failed = tx.failed_skills()
+        tx = Transaction(reference="INV-001", steps=[s1, s2, s3])
+        failed = tx.failed_steps()
         assert [s.name for s in failed] == ["b", "c"]
 
     def test_no_failures_returns_empty(self) -> None:
-        s1 = Skill("a", 1)
+        s1 = Step("a", 1)
         s1.status = Status.SUCCESSFUL
-        tx = Transaction(reference="INV-001", skills=[s1])
-        assert tx.failed_skills() == []
+        tx = Transaction(reference="INV-001", steps=[s1])
+        assert tx.failed_steps() == []
 
-    def test_empty_skills_returns_empty(self) -> None:
+    def test_empty_steps_returns_empty(self) -> None:
         tx = Transaction(reference="INV-001")
-        assert tx.failed_skills() == []
+        assert tx.failed_steps() == []
 
 
 class TestTransactionStatusTransitions:
@@ -295,7 +295,7 @@ class TestTransactionStatusTransitions:
 
 class TestTransactionExecutionValidation:
     def test_valid_transaction_passes(self) -> None:
-        tx = Transaction(reference="INV-001", skills=[Skill("login", 1)])
+        tx = Transaction(reference="INV-001", steps=[Step("login", 1)])
         tx.validate_for_execution()
 
     @pytest.mark.parametrize("reference", ["", "   "])
@@ -310,41 +310,41 @@ class TestTransactionExecutionValidation:
             tx.validate_for_execution()
 
     @pytest.mark.parametrize("name", ["", "   "])
-    def test_blank_skill_name_raises(self, name: str) -> None:
-        tx = Transaction(reference="INV-001", skills=[Skill(name, 1)])
-        with pytest.raises(ExecutionValidationError, match="skill.name"):
+    def test_blank_step_name_raises(self, name: str) -> None:
+        tx = Transaction(reference="INV-001", steps=[Step(name, 1)])
+        with pytest.raises(ExecutionValidationError, match="step.name"):
             tx.validate_for_execution()
 
-    def test_duplicate_skill_name_raises(self) -> None:
-        tx = Transaction(reference="INV-001", skills=[Skill("login", 1), Skill("login", 2)])
-        with pytest.raises(ExecutionValidationError, match="skill.name must be unique"):
+    def test_duplicate_step_name_raises(self) -> None:
+        tx = Transaction(reference="INV-001", steps=[Step("login", 1), Step("login", 2)])
+        with pytest.raises(ExecutionValidationError, match="step.name must be unique"):
             tx.validate_for_execution()
 
     @pytest.mark.parametrize("execution_order", [0, -1])
     def test_non_positive_execution_order_raises(self, execution_order: int) -> None:
-        tx = Transaction(reference="INV-001", skills=[Skill("login", execution_order)])
-        with pytest.raises(ExecutionValidationError, match="skill.execution_order"):
+        tx = Transaction(reference="INV-001", steps=[Step("login", execution_order)])
+        with pytest.raises(ExecutionValidationError, match="step.execution_order"):
             tx.validate_for_execution()
 
     @pytest.mark.parametrize("execution_order", [True, "1"])
     def test_non_integer_execution_order_raises(self, execution_order: object) -> None:
-        tx = Transaction(reference="INV-001", skills=[Skill("login", execution_order)])  # type: ignore[arg-type]
-        with pytest.raises(ExecutionValidationError, match="skill.execution_order"):
+        tx = Transaction(reference="INV-001", steps=[Step("login", execution_order)])  # type: ignore[arg-type]
+        with pytest.raises(ExecutionValidationError, match="step.execution_order"):
             tx.validate_for_execution()
 
     def test_duplicate_execution_order_raises(self) -> None:
-        tx = Transaction(reference="INV-001", skills=[Skill("login", 1), Skill("submit", 1)])
-        with pytest.raises(ExecutionValidationError, match="skill.execution_order must be unique"):
+        tx = Transaction(reference="INV-001", steps=[Step("login", 1), Step("submit", 1)])
+        with pytest.raises(ExecutionValidationError, match="step.execution_order must be unique"):
             tx.validate_for_execution()
 
-    def test_non_json_safe_skill_arguments_raise_before_execution(self) -> None:
+    def test_non_json_safe_step_arguments_raise_before_execution(self) -> None:
         tx = Transaction(
             reference="INV-001",
-            skills=[Skill("submit", 1, arguments={"ids": (1, 2)})],
+            steps=[Step("submit", 1, arguments={"ids": (1, 2)})],
         )
 
         with pytest.raises(
             TypeError,
-            match=r"transaction\.skills\['submit'\]\.arguments\['ids'\]",
+            match=r"transaction\.steps\['submit'\]\.arguments\['ids'\]",
         ):
             tx.validate_for_execution()

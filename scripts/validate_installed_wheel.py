@@ -33,7 +33,7 @@ _FROZEN_PUBLIC_EXPORTS = (
     "ProcessContext", "ProjectManifest", "QueueAdminEvent", "QueueAttempt",
     "QueueAttemptOutcome", "QueueItem", "QueueLeaseLostError", "QueuePoisonEvent",
     "QueueProvider", "QueueRunSummary", "QueueStatus", "ReportRecord",
-    "RetryDisposition", "Skill", "SkillReport", "SqliteQueue", "Status",
+    "RetryDisposition", "SqliteQueue", "Status", "Step", "StepReport",
     "SystemException", "TRANSACTION_FORMAT_VERSION", "Transaction", "TransactionFenceError",
     "TransactionPage", "TransactionReport", "TransactionSummary", "WebhookNotifier",
     "atomic_output_path", "bind_log_context", "build_credential_provider", "build_notifiers",
@@ -44,22 +44,6 @@ _FROZEN_PUBLIC_EXPORTS = (
     "resolve_config_path", "resolve_config_paths", "resolve_project_entrypoint",
     "resume_transaction", "run_queue_loop", "save_transaction", "serialize_transaction",
     "validate_config",
-)
-
-_V011_PUBLIC_EXPORTS = (
-    "Artifact", "ArtifactReport", "BusinessException", "CredentialNotFoundError",
-    "CredentialProvider", "EmailNotifier", "Engine", "EnvCredentialProvider",
-    "ExecutionValidationError", "HistoryEntry", "HistoryEvent", "KeyringCredentialProvider",
-    "Notifier", "ProcessContext", "ProjectManifest", "QueueItem", "QueueLeaseLostError",
-    "QueueProvider", "QueueRunSummary", "QueueStatus", "Skill", "SkillReport",
-    "SqliteQueue", "Status", "SystemException", "TRANSACTION_FORMAT_VERSION",
-    "Transaction", "TransactionReport", "WebhookNotifier", "build_credential_provider",
-    "build_notifiers", "configure_logger", "dispatch", "find_project_manifest",
-    "generate_report", "get_logger", "list_transactions", "load_config",
-    "load_project_manifest", "load_transaction", "optional_config", "render_html",
-    "render_text", "require_config", "require_section", "resolve_config_path",
-    "resolve_config_paths", "resolve_project_entrypoint", "resume_transaction",
-    "run_queue_loop", "save_transaction", "serialize_transaction",
 )
 
 
@@ -133,6 +117,7 @@ def _smoke_code(repo_root: Path) -> str:
     return f"""
 from pathlib import Path
 import io
+import importlib
 import json
 import platform
 import sqlite3
@@ -149,12 +134,13 @@ from rpacore import (
     ProcessContext,
     ReportRecord,
     RetryDisposition,
-    Skill,
+    Step,
     Status,
     Transaction,
     generate_report,
     query_transactions,
     save_transaction,
+    serialize_transaction,
     render_json,
     validate_config,
 )
@@ -167,23 +153,29 @@ if module_path.parent == checkout_package:
 if not module_path.with_name("py.typed").is_file():
     raise SystemExit(f"installed package missing py.typed: {{module_path}}")
 expected_public_exports = {tuple(_FROZEN_PUBLIC_EXPORTS)!r}
-v011_public_exports = {tuple(_V011_PUBLIC_EXPORTS)!r}
 if tuple(rpacore.__all__) != expected_public_exports:
     raise SystemExit(
-        "installed package public exports differ from the frozen v0.2 contract: "
+        "installed package public exports differ from the frozen v0.3 contract: "
         f"{{rpacore.__all__!r}}"
     )
-for public_name in v011_public_exports:
-    getattr(rpacore, public_name)
+for retired_name in ("Skill", "SkillReport"):
+    if hasattr(rpacore, retired_name):
+        raise SystemExit(f"installed package exposes retired symbol: {{retired_name}}")
+try:
+    importlib.import_module("rpacore.skill")
+except ModuleNotFoundError:
+    pass
+else:
+    raise SystemExit("installed package exposes retired module: rpacore.skill")
 
-class OkSkill(Skill):
+class OkStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         ctx.state["ran"] = True
 
 tx = Transaction(
     reference="installed-wheel-smoke",
     definition_identity="installed-wheel-smoke/v1",
-    skills=[OkSkill("ok", 1)],
+    steps=[OkStep("ok", 1)],
 )
 ctx = ProcessContext(transaction=tx)
 transitions: list[ExecutionTransition] = []
@@ -196,23 +188,27 @@ Engine().run(
 assert tx.status is Status.SUCCESSFUL
 assert tx.outcome_category is OutcomeCategory.SUCCESSFUL
 assert tx.retry_disposition is RetryDisposition.NOT_APPLICABLE
-assert tx.skills[0].status is Status.SUCCESSFUL
+assert tx.steps[0].status is Status.SUCCESSFUL
 assert ctx.state == {{"ran": True}}
+transaction_record = serialize_transaction(tx)
+assert transaction_record["transaction_format_version"] == 3
+assert "steps" in transaction_record
+assert "skills" not in transaction_record
 assert transitions
 assert isinstance(transitions[-1], ExecutionTransition)
 assert transitions[-1].to_record()["checkpoint_state"] == {{"ran": True}}
 assert set(transitions[-1].to_record()) == {{
     "schema_version", "transition_id", "sequence", "occurred_at", "event",
     "transaction_id", "transaction_reference", "definition_identity",
-    "transaction_status", "execution_pass", "skill_name",
-    "skill_execution_order", "skill_status", "outcome_category",
+    "transaction_status", "execution_pass", "step_name",
+    "step_execution_order", "step_status", "outcome_category",
     "failure_code", "retry_recommended", "checkpoint_state",
 }}
 report = generate_report(tx)
 assert isinstance(report.outcome, OutcomeReport)
 assert isinstance(report.record, ReportRecord)
 report_payload = json.loads(render_json(report))
-assert report_payload["report_format_version"] == 1
+assert report_payload["report_format_version"] == 2
 assert report_payload["complete"] is True
 assert report.outcome.category is OutcomeCategory.SUCCESSFUL
 assert report.outcome.retry_disposition is RetryDisposition.NOT_APPLICABLE
@@ -229,11 +225,11 @@ query_page = query_transactions("query-smoke.db")
 assert [summary.id for summary in query_page.transactions] == ["query-smoke"]
 assert query_page.format_version == 1
 log_stream = io.StringIO()
-log = configure_logger(fmt="json", json_version=2, stream=log_stream)
+log = configure_logger(fmt="json", stream=log_stream)
 with bind_log_context(transaction_id="installed-wheel-log"):
     log.info("Installed wheel log proof", extra={{"event": "wheel_log_proof"}})
 log_payload = json.loads(log_stream.getvalue())
-assert log_payload["log_format_version"] == 2
+assert log_payload["log_format_version"] == 3
 assert log_payload["event"] == "rpacore.wheel.log.proof"
 assert log_payload["attributes"]["transaction_id"] == "installed-wheel-log"
 print(rpacore.__version__)
@@ -265,7 +261,7 @@ transition_record: dict[str, object] = transitions[-1].to_record()
 
 assert config_retries == state_retries
 assert state_label == label
-assert transition_record["schema_version"] == 1
+assert transition_record["schema_version"] == 2
 """
 
 
@@ -294,8 +290,11 @@ def validate_installed_wheel(
         outside_dir.mkdir(parents=True, exist_ok=True)
 
         if wheel_dir is None:
+            # Build the wheel from the freshly produced sdist. A direct wheel
+            # build can reuse build/lib and accidentally package a source
+            # module that was deleted during an API rename.
             _run(
-                [sys.executable, "-m", "build", "--wheel", "--outdir", str(wheelhouse)],
+                [sys.executable, "-m", "build", "--outdir", str(wheelhouse)],
                 cwd=repo_root,
                 allowed_roots=allowed_run_roots,
             )
@@ -319,6 +318,18 @@ def validate_installed_wheel(
         if generated_project.exists():
             _remove_tree(generated_project)
         _run([str(rpacore_cli), "init", "installed_project"], cwd=outside_dir, allowed_roots=allowed_run_roots)
+        _run(
+            [
+                str(python),
+                "-c",
+                "from pathlib import Path; "
+                "assert Path('steps/greeting.py').is_file(); "
+                "assert Path('tests/test_greeting_step.py').is_file(); "
+                "assert not Path('skills').exists()",
+            ],
+            cwd=generated_project,
+            allowed_roots=allowed_run_roots,
+        )
         _run([str(rpacore_cli), "run"], cwd=generated_project, allowed_roots=allowed_run_roots)
         _run([str(rpacore_cli), "transaction", "list"], cwd=generated_project, allowed_roots=allowed_run_roots)
         _run([str(rpacore_cli), "transaction", "list", "--json"], cwd=generated_project, allowed_roots=allowed_run_roots)

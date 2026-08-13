@@ -9,7 +9,7 @@ from rpacore._validation import type_error, value_error
 
 
 SCHEMA_VERSION_TABLE = "rpacore_schema_versions"
-TRANSACTION_SCHEMA_VERSION = 9
+TRANSACTION_SCHEMA_VERSION = 10
 QUEUE_SCHEMA_VERSION = 4
 _SUPPORTED_SCHEMA_COMPONENTS = {
     "transactions": (TRANSACTION_SCHEMA_VERSION, "transaction"),

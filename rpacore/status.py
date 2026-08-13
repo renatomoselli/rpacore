@@ -1,10 +1,10 @@
-"""Status enum for tracking skill and transaction execution state."""
+"""Status enum for tracking step and transaction execution state."""
 
 from enum import StrEnum
 
 
 class Status(StrEnum):
-    """Execution state of a skill or transaction.
+    """Execution state of a step or transaction.
 
     This tracks *where* something is in its lifecycle, not *why* it failed.
     Exception classification (business vs system) lives on the exception itself.

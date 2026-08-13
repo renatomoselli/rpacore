@@ -14,7 +14,7 @@ published package workflow.
 By the end, you will have a small automation project that:
 
 - installs RPA Core into its own virtual environment
-- defines one custom `Skill`
+- defines one custom `Step`
 - runs a `Transaction`
 - writes output to a file
 - checkpoints the transaction to SQLite during execution
@@ -27,7 +27,7 @@ hello-rpacore/
   .venv/
   config.toml
   main.py
-  skills/
+  steps/
     __init__.py
     greet_user.py
 ```
@@ -45,8 +45,8 @@ You should see Python 3.11 or newer.
 ```powershell
 mkdir hello-rpacore
 cd hello-rpacore
-mkdir skills
-New-Item -ItemType File skills\__init__.py | Out-Null
+mkdir steps
+New-Item -ItemType File steps\__init__.py | Out-Null
 ```
 
 User automations live outside the framework package. This keeps application code
@@ -86,19 +86,19 @@ screenshot_dir = ""
 credential_provider = "env"
 ```
 
-## Step 6: Create Your First Skill
+## Step 6: Create Your First Step
 
-Create `skills\greet_user.py`:
+Create `steps\greet_user.py`:
 
 ```python
 from __future__ import annotations
 
 from pathlib import Path
 
-from rpacore import BusinessException, ProcessContext, Skill
+from rpacore import BusinessException, ProcessContext, Step
 
 
-class WriteGreeting(Skill):
+class WriteGreeting(Step):
     def execute(self, ctx: ProcessContext) -> None:
         name = self.arguments.get("name")
         if not name or not str(name).strip():
@@ -112,7 +112,7 @@ class WriteGreeting(Skill):
         ctx.state["greeting_path"] = str(output_path)
 ```
 
-The skill reads its arguments, raises a business exception for missing input,
+The step reads its arguments, raises a business exception for missing input,
 writes a file, and stores durable state for later inspection.
 
 ## Step 7: Create `main.py`
@@ -128,7 +128,7 @@ from rpacore import (
     load_config,
 )
 
-from skills.greet_user import WriteGreeting
+from steps.greet_user import WriteGreeting
 
 
 def main() -> None:
@@ -139,7 +139,7 @@ def main() -> None:
         reference="greet-user",
         definition_identity="greet-user/v1",
     )
-    tx.skills = [
+    tx.steps = [
         WriteGreeting(
             name="write_greeting",
             execution_order=1,
@@ -170,7 +170,7 @@ if __name__ == "__main__":
 ```
 
 `execute_transaction()` makes the run crash-durable at engine state boundaries:
-the transaction is saved before user skill code starts and after each status
+the transaction is saved before user step code starts and after each status
 transition. Its definition identity is an application-owned compatibility token,
 not the RPA Core package version. Keep it stable across compatible code fixes;
 change it when a new automation definition must not resume older in-progress
@@ -202,11 +202,11 @@ rpacore transaction export --db .\rpacore.db --format ndjson
 
 Use the transaction id printed by `python .\main.py` or listed by
 `rpacore transaction list`. The JSON form of `transaction show` includes
-`transaction.state.greeting_path`, which was written by the skill and persisted
+`transaction.state.greeting_path`, which was written by the step and persisted
 by the checkpoint callback.
 
 JSON and NDJSON output are intended for tools. Treat exports as sensitive
-business data because they can include state, metadata, skill arguments, and
+business data because they can include state, metadata, step arguments, and
 exception messages.
 
 ## Step 10: Add A CLI Manifest
@@ -230,10 +230,10 @@ rpacore transaction list
 
 ## Next Steps
 
-- Add a second skill with `execution_order=2`.
+- Add a second step with `execution_order=2`.
 - Load an existing transaction with `load_transaction()`.
 - Resume retryable failures with `resume_transaction()` and the exact persisted
   definition identity.
 - Use `ctx.resources` for runtime-only objects that must not be persisted.
 - Read [Durability and Storage](durability.md) for recovery details.
-- Read [Testing Skills](testing.md) for plain pytest examples.
+- Read [Testing Steps](testing.md) for plain pytest examples.

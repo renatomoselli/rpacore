@@ -14,14 +14,14 @@ from rpacore.persistence import list_transactions, load_transaction, save_transa
 from rpacore.report import (
     ArtifactReport,
     ReportRecord,
-    SkillReport,
+    StepReport,
     TransactionReport,
     generate_report,
     render_html,
     render_json,
     render_text,
 )
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEvent, Transaction
 
@@ -30,8 +30,8 @@ from rpacore.transaction import Artifact, HistoryEvent, Transaction
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_skill(name: str, order: int, status: Status = Status.SUCCESSFUL) -> Skill:
-    s = Skill(name, order)
+def make_step(name: str, order: int, status: Status = Status.SUCCESSFUL) -> Step:
+    s = Step(name, order)
     s.status = status
     return s
 
@@ -41,14 +41,14 @@ def biz(
     retry: int = 0,
     action: str = "",
     screenshot: str = "",
-    stop: bool = False,
+    halts_remaining_steps: bool = False,
 ) -> BusinessException:
     return BusinessException(
         message,
         retry_number=retry,
         action=action,
         screenshot_path=screenshot,
-        stop=stop,
+        halts_remaining_steps=halts_remaining_steps,
     )
 
 
@@ -59,12 +59,12 @@ def sys_(message: str, retry: int = 0, action: str = "", screenshot: str = "") -
 def make_transaction(
     retry_count: int = 0,
     status: Status = Status.SUCCESSFUL,
-    skills: list[Skill] | None = None,
+    steps: list[Step] | None = None,
 ) -> Transaction:
     tx = Transaction(reference="ref-test")
     tx.retry_count = retry_count
     tx.status = status
-    tx.skills = skills or []
+    tx.steps = steps or []
     return tx
 
 
@@ -74,26 +74,26 @@ def make_transaction(
 
 class TestGenerateReport:
     def test_all_business_exceptions_included(self):
-        skill = make_skill("s1", 1, Status.FAILED)
-        skill.exceptions = [biz("err1", retry=0), biz("err2", retry=1), biz("err3", retry=2)]
-        tx = make_transaction(retry_count=2, skills=[skill])
+        step = make_step("s1", 1, Status.FAILED)
+        step.exceptions = [biz("err1", retry=0), biz("err2", retry=1), biz("err3", retry=2)]
+        tx = make_transaction(retry_count=2, steps=[step])
 
         report = generate_report(tx)
 
-        assert len(report.skills[0].exceptions) == 3
+        assert len(report.steps[0].exceptions) == 3
 
     def test_all_system_exceptions_included(self):
-        skill = make_skill("s1", 1, Status.FAILED)
-        skill.exceptions = [
+        step = make_step("s1", 1, Status.FAILED)
+        step.exceptions = [
             sys_("early", retry=0),
             sys_("middle", retry=1),
             sys_("last", retry=2),
         ]
-        tx = make_transaction(retry_count=2, skills=[skill])
+        tx = make_transaction(retry_count=2, steps=[step])
 
         report = generate_report(tx)
 
-        assert [str(exc) for exc in report.skills[0].exceptions] == [
+        assert [str(exc) for exc in report.steps[0].exceptions] == [
             "early",
             "middle",
             "last",
@@ -132,9 +132,9 @@ class TestGenerateReport:
 
     def test_report_nested_data_and_exceptions_are_snapshot_isolated(self):
         error = biz("invalid", action="original")
-        skill = make_skill("validate", 1, Status.FAILED)
-        skill.exceptions = [error]
-        tx = make_transaction(status=Status.FAILED, skills=[skill])
+        step = make_step("validate", 1, Status.FAILED)
+        step.exceptions = [error]
+        tx = make_transaction(status=Status.FAILED, steps=[step])
         tx.metadata = {"nested": {"values": ["original"]}}
         tx.artifacts = [
             Artifact(
@@ -147,7 +147,7 @@ class TestGenerateReport:
         report = generate_report(tx)
         report.metadata["nested"]["values"].append("report")
         report.artifacts[0].metadata["nested"]["values"].append("report")
-        report.skills[0].exceptions[0].action = "report"
+        report.steps[0].exceptions[0].action = "report"
 
         assert tx.metadata == {"nested": {"values": ["original"]}}
         assert tx.artifacts[0].metadata == {
@@ -160,10 +160,10 @@ class TestGenerateReport:
 
         report = generate_report(tx)
 
-        assert report.transaction_record["transaction_format_version"] == 1
+        assert report.transaction_record["transaction_format_version"] == 3
         assert report.transaction_record["id"] == tx.id
 
-    def test_report_v1_record_is_immutable_and_json_safe(self):
+    def test_report_v2_record_is_immutable_and_json_safe(self):
         tx = make_transaction()
         tx.metadata = {"nested": {"values": ["original"]}}
 
@@ -171,7 +171,7 @@ class TestGenerateReport:
 
         assert isinstance(report.record, ReportRecord)
         payload = report.record.to_dict()
-        assert payload["report_format_version"] == 1
+        assert payload["report_format_version"] == 2
         assert payload["complete"] is True
         payload["transaction"]["metadata"]["nested"]["values"].append("view")
         assert report.record.to_dict()["transaction"]["metadata"] == {
@@ -179,7 +179,7 @@ class TestGenerateReport:
         }
         assert render_json(report) == report.record.payload_json
 
-    def test_report_v1_record_exposes_transaction_serialization_failure(self):
+    def test_report_v2_record_exposes_transaction_serialization_failure(self):
         tx = make_transaction()
         tx.state = {"runtime": object()}
 
@@ -197,7 +197,7 @@ class TestGenerateReport:
         assert payload["transaction_record"] is None
         assert json.loads(render_json(report))["complete"] is False
 
-    def test_report_v1_record_exposes_json_encoding_failure(self):
+    def test_report_v2_record_exposes_json_encoding_failure(self):
         tx = make_transaction()
         tx.metadata = {"ratio": float("nan")}
 
@@ -217,12 +217,12 @@ class TestGenerateReport:
             reference="manual",
             status=Status.SUCCESSFUL,
             retry_count=0,
-            skills=[],
+            steps=[],
         )
 
         payload = json.loads(render_json(report))
 
-        assert payload["report_format_version"] == 1
+        assert payload["report_format_version"] == 2
         assert payload["transaction"]["id"] == "manual-001"
 
     def test_text_renderer_uses_recorded_transaction_truth(self):
@@ -248,15 +248,15 @@ class TestGenerateReport:
         assert "mutated-after-generation" not in html
 
     def test_renderers_use_recorded_detail_truth(self):
-        skill = make_skill("validate", 1, Status.FAILED)
-        skill.exceptions = [biz("original failure", action="correct input")]
-        tx = make_transaction(status=Status.FAILED, skills=[skill])
+        step = make_step("validate", 1, Status.FAILED)
+        step.exceptions = [biz("original failure", action="correct input")]
+        tx = make_transaction(status=Status.FAILED, steps=[step])
         tx.metadata = {"customer": "original"}
         tx.artifacts = [Artifact(name="audit", path="original.json")]
         tx.append_history(HistoryEvent.TRANSACTION_STARTED)
         report = generate_report(tx)
 
-        report.skills.clear()
+        report.steps.clear()
         report.metadata["customer"] = "mutated"
         report.artifacts.clear()
         report.history.clear()
@@ -286,9 +286,9 @@ class TestGenerateReport:
         assert "rpacore.report.record_serialization_failed" in html
 
     def test_report_projects_captured_outcome_without_reclassifying_history(self):
-        skill = make_skill("save", 1, Status.FAILED)
-        skill.exceptions = [sys_("transport failure")]
-        tx = make_transaction(status=Status.FAILED, skills=[skill])
+        step = make_step("save", 1, Status.FAILED)
+        step.exceptions = [sys_("transport failure")]
+        tx = make_transaction(status=Status.FAILED, steps=[step])
         tx.outcome_category = OutcomeCategory.BUSINESS_FAILED
         tx.retry_disposition = RetryDisposition.NOT_REQUESTED
         tx.failure_code = "acme.invoice.duplicate"
@@ -298,7 +298,7 @@ class TestGenerateReport:
         assert report.outcome.category is OutcomeCategory.BUSINESS_FAILED
         assert report.outcome.retry_disposition is RetryDisposition.NOT_REQUESTED
         assert report.outcome.failure_code == "acme.invoice.duplicate"
-        assert report.transaction_record["transaction_format_version"] == 1
+        assert report.transaction_record["transaction_format_version"] == 3
         assert "outcome_category" not in report.transaction_record
 
     def test_report_defaults_legacy_outcome_to_unknown(self):
@@ -341,69 +341,69 @@ class TestGenerateReport:
         assert report_fields == artifact_fields
 
     def test_system_exception_from_earlier_retry_preserved(self):
-        skill = make_skill("s1", 1, Status.FAILED)
-        skill.exceptions = [sys_("old", retry=0), sys_("current", retry=1)]
-        tx = make_transaction(retry_count=1, skills=[skill])
+        step = make_step("s1", 1, Status.FAILED)
+        step.exceptions = [sys_("old", retry=0), sys_("current", retry=1)]
+        tx = make_transaction(retry_count=1, steps=[step])
 
         report = generate_report(tx)
-        messages = [str(e) for e in report.skills[0].exceptions]
+        messages = [str(e) for e in report.steps[0].exceptions]
 
         assert "old" in messages
         assert "current" in messages
 
     def test_mixed_exceptions_preserve_recorded_order(self):
-        skill = make_skill("s1", 1, Status.FAILED)
-        skill.exceptions = [
+        step = make_step("s1", 1, Status.FAILED)
+        step.exceptions = [
             biz("biz0", retry=0),
             sys_("sys0", retry=0),
             biz("biz2", retry=2),
             sys_("sys2", retry=2),
         ]
-        tx = make_transaction(retry_count=2, skills=[skill])
+        tx = make_transaction(retry_count=2, steps=[step])
 
         report = generate_report(tx)
-        kept = report.skills[0].exceptions
+        kept = report.steps[0].exceptions
 
         assert [str(e) for e in kept] == ["biz0", "sys0", "biz2", "sys2"]
 
     def test_no_exceptions_gives_empty_list(self):
-        skill = make_skill("s1", 1)
-        tx = make_transaction(skills=[skill])
+        step = make_step("s1", 1)
+        tx = make_transaction(steps=[step])
 
         report = generate_report(tx)
 
-        assert report.skills[0].exceptions == []
+        assert report.steps[0].exceptions == []
 
     def test_icon_successful(self):
-        skill = make_skill("s1", 1, Status.SUCCESSFUL)
-        report = generate_report(make_transaction(skills=[skill]))
-        assert report.skills[0].icon == "✓"
+        step = make_step("s1", 1, Status.SUCCESSFUL)
+        report = generate_report(make_transaction(steps=[step]))
+        assert report.steps[0].icon == "✓"
 
     def test_icon_failed(self):
-        skill = make_skill("s1", 1, Status.FAILED)
-        report = generate_report(make_transaction(skills=[skill]))
-        assert report.skills[0].icon == "✗"
+        step = make_step("s1", 1, Status.FAILED)
+        report = generate_report(make_transaction(steps=[step]))
+        assert report.steps[0].icon == "✗"
 
     def test_icon_skipped(self):
-        skill = make_skill("s1", 1, Status.SKIPPED)
-        report = generate_report(make_transaction(skills=[skill]))
-        assert report.skills[0].icon == "⊘"
+        step = make_step("s1", 1, Status.SKIPPED)
+        report = generate_report(make_transaction(steps=[step]))
+        assert report.steps[0].icon == "⊘"
 
     def test_icon_pending(self):
-        skill = make_skill("s1", 1, Status.PENDING)
-        report = generate_report(make_transaction(skills=[skill]))
-        assert report.skills[0].icon == "⏸"
+        step = make_step("s1", 1, Status.PENDING)
+        report = generate_report(make_transaction(steps=[step]))
+        assert report.steps[0].icon == "⏸"
 
-    def test_skills_in_execution_order(self):
-        s3 = make_skill("c", 3)
-        s1 = make_skill("a", 1)
-        s2 = make_skill("b", 2)
-        tx = make_transaction(skills=[s3, s1, s2])
+    def test_steps_in_execution_order(self):
+        s3 = make_step("c", 3)
+        s1 = make_step("a", 1)
+        s2 = make_step("b", 2)
+        tx = make_transaction(steps=[s3, s1, s2])
 
         report = generate_report(tx)
 
-        assert [sr.execution_order for sr in report.skills] == [1, 2, 3]
-        assert [sr.name for sr in report.skills] == ["a", "b", "c"]
+        assert [sr.execution_order for sr in report.steps] == [1, 2, 3]
+        assert [sr.name for sr in report.steps] == ["a", "b", "c"]
 
     def test_report_metadata(self):
         tx = make_transaction(retry_count=3, status=Status.FAILED)
@@ -423,20 +423,20 @@ class TestGenerateReport:
 
 class TestRenderText:
     def _report(self) -> TransactionReport:
-        skill = make_skill("fetch", 1, Status.FAILED)
-        skill.exceptions = [
+        step = make_step("fetch", 1, Status.FAILED)
+        step.exceptions = [
             biz("invoice missing", retry=0, action="skip row", screenshot="sc.png"),
             sys_("timeout", retry=1),
         ]
-        tx = make_transaction(retry_count=1, status=Status.FAILED, skills=[skill])
+        tx = make_transaction(retry_count=1, status=Status.FAILED, steps=[step])
         return generate_report(tx)
 
     def test_contains_reference(self):
         report = self._report()
         report.reference = "order-99"
         # Rebuild with correct reference via generate_report sets reference from tx
-        skill = make_skill("fetch", 1, Status.FAILED)
-        tx = make_transaction(retry_count=1, status=Status.FAILED, skills=[skill])
+        step = make_step("fetch", 1, Status.FAILED)
+        tx = make_transaction(retry_count=1, status=Status.FAILED, steps=[step])
         tx.reference = "order-99"
         report = generate_report(tx)
         assert "order-99" in render_text(report)
@@ -455,7 +455,7 @@ class TestRenderText:
     def test_omits_empty_failure_code(self):
         assert "Failure code:" not in render_text(self._report())
 
-    def test_contains_skill_icon(self):
+    def test_contains_step_icon(self):
         text = render_text(self._report())
         assert "[✗]" in text
 
@@ -476,25 +476,27 @@ class TestRenderText:
         assert "sc.png" in text
 
     def test_no_exceptions_no_exc_lines(self):
-        skill = make_skill("clean", 1, Status.SUCCESSFUL)
-        tx = make_transaction(skills=[skill])
+        step = make_step("clean", 1, Status.SUCCESSFUL)
+        tx = make_transaction(steps=[step])
         report = generate_report(tx)
         text = render_text(report)
         assert "[BIZ]" not in text
         assert "[SYS]" not in text
 
     def test_stopping_business_exception_is_labeled(self):
-        skill = make_skill("validate", 1, Status.FAILED)
-        skill.exceptions = [biz("bad data", retry=0, stop=True)]
-        tx = make_transaction(status=Status.FAILED, skills=[skill])
+        step = make_step("validate", 1, Status.FAILED)
+        step.exceptions = [
+            biz("bad data", retry=0, halts_remaining_steps=True)
+        ]
+        tx = make_transaction(status=Status.FAILED, steps=[step])
 
         text = render_text(generate_report(tx))
 
-        assert "stop=true" in text
+        assert "halts_remaining_steps=true" in text
 
-    def test_skipped_skill_status_is_shown(self):
-        skill = make_skill("write_output", 2, Status.SKIPPED)
-        tx = make_transaction(status=Status.FAILED, skills=[skill])
+    def test_skipped_step_status_is_shown(self):
+        step = make_step("write_output", 2, Status.SKIPPED)
+        tx = make_transaction(status=Status.FAILED, steps=[step])
 
         text = render_text(generate_report(tx))
 
@@ -564,12 +566,12 @@ class TestRenderText:
 
 class TestRenderHTML:
     def _report(self) -> TransactionReport:
-        skill = make_skill("parse", 1, Status.FAILED)
-        skill.exceptions = [
+        step = make_step("parse", 1, Status.FAILED)
+        step.exceptions = [
             biz("bad data", retry=0, action="flag row"),
             sys_("crash", retry=0, screenshot="err.png"),
         ]
-        tx = make_transaction(retry_count=0, status=Status.FAILED, skills=[skill])
+        tx = make_transaction(retry_count=0, status=Status.FAILED, steps=[step])
         tx.reference = "html-ref"
         return generate_report(tx)
 
@@ -597,7 +599,7 @@ class TestRenderHTML:
 
     def test_contains_failed_css_class(self):
         html = render_html(self._report())
-        assert 'class="skill failed"' in html
+        assert 'class="step failed"' in html
 
     def test_contains_biz_kind_label(self):
         html = render_html(self._report())
@@ -612,33 +614,35 @@ class TestRenderHTML:
         assert 'href="err.png"' in html
 
     def test_html_escaped(self):
-        skill = make_skill("xss", 1, Status.FAILED)
-        skill.exceptions = [biz("<script>alert(1)</script>", retry=0)]
-        tx = make_transaction(retry_count=0, status=Status.FAILED, skills=[skill])
+        step = make_step("xss", 1, Status.FAILED)
+        step.exceptions = [biz("<script>alert(1)</script>", retry=0)]
+        tx = make_transaction(retry_count=0, status=Status.FAILED, steps=[step])
         html = render_html(generate_report(tx))
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
 
     def test_successful_css_class(self):
-        skill = make_skill("ok", 1, Status.SUCCESSFUL)
-        tx = make_transaction(skills=[skill])
+        step = make_step("ok", 1, Status.SUCCESSFUL)
+        tx = make_transaction(steps=[step])
         html = render_html(generate_report(tx))
-        assert 'class="skill successful"' in html
+        assert 'class="step successful"' in html
 
     def test_skipped_css_class(self):
-        skill = make_skill("skp", 1, Status.SKIPPED)
-        tx = make_transaction(skills=[skill])
+        step = make_step("skp", 1, Status.SKIPPED)
+        tx = make_transaction(steps=[step])
         html = render_html(generate_report(tx))
-        assert 'class="skill skipped"' in html
+        assert 'class="step skipped"' in html
 
     def test_stopping_business_exception_is_labeled(self):
-        skill = make_skill("validate", 1, Status.FAILED)
-        skill.exceptions = [biz("bad data", retry=0, stop=True)]
-        tx = make_transaction(status=Status.FAILED, skills=[skill])
+        step = make_step("validate", 1, Status.FAILED)
+        step.exceptions = [
+            biz("bad data", retry=0, halts_remaining_steps=True)
+        ]
+        tx = make_transaction(status=Status.FAILED, steps=[step])
 
         html = render_html(generate_report(tx))
 
-        assert "stop=true" in html
+        assert "halts_remaining_steps=true" in html
 
     def test_timestamps_and_history_are_shown(self):
         tx = make_transaction()
@@ -686,7 +690,7 @@ class TestRenderHTML:
                 name="<invoice>",
                 path="/missing/invoice.pdf",
                 kind="pdf",
-                metadata={"source": "<skill>"},
+                metadata={"source": "<step>"},
             )
         ]
 
@@ -695,7 +699,7 @@ class TestRenderHTML:
         assert "<h3>Artifacts</h3>" in html
         assert "&lt;invoice&gt;" in html
         assert "/missing/invoice.pdf" in html
-        assert "&lt;skill&gt;" in html
+        assert "&lt;step&gt;" in html
 
 
 @pytest.mark.parametrize(

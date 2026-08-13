@@ -1,4 +1,4 @@
-"""Skill — the unit of work in rpacore."""
+"""Step — the unit of work in rpacore."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ if TYPE_CHECKING:
     from rpacore.context import ProcessContext
 
 
-class Skill:
+class Step:
     """A single unit of work within a transaction.
 
-    Users subclass Skill and implement execute(ctx: ProcessContext).
+    Users subclass Step and implement execute(ctx: ProcessContext).
     """
 
     def __init__(
@@ -31,10 +31,10 @@ class Skill:
         self.exceptions: list[BusinessException | SystemException] = []
 
     def execute(self, ctx: ProcessContext) -> None:
-        """Execute this skill's logic.
+        """Execute this step's logic.
 
         Subclasses must override this method.
         """
         raise NotImplementedError(
-            f"Skill '{self.name}' must implement execute()"
+            f"Step '{self.name}' must implement execute()"
         )

@@ -1,7 +1,7 @@
 """rpacore entry point — the developer's wiring layer.
 
 This file is the first thing to edit when adapting rpacore to a real automation.
-Replace the example skills and transaction below with your own.
+Replace the example steps and transaction below with your own.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ from rpacore import (
     load_config,
 )
 
-# --- Replace these with your own Skill subclasses ---
-from examples.sample_skill import ConfirmOutput, ValidateInput, WriteGreeting
+# --- Replace these with your own Step subclasses ---
+from examples.sample_step import ConfirmOutput, ValidateInput, WriteGreeting
 
 
 def main(
@@ -36,8 +36,8 @@ def main(
     configure_logger(level=str(config["log_level"]), fmt=str(config["log_format"]))
 
     # 3. Build the transaction.
-    #    Explicitly instantiate skills so the wiring is readable and greppable.
-    #    Replace these with your own skills.
+    #    Explicitly instantiate steps so the wiring is readable and greppable.
+    #    Replace these with your own steps.
     _output_path = output_path if output_path is not None else "greeting.txt"
     arguments = {"name": "Alice", "output_path": _output_path}
 
@@ -45,7 +45,7 @@ def main(
         reference="greet-alice",
         definition_identity="sample-greeting/v1",
     )
-    transaction.skills = [
+    transaction.steps = [
         ValidateInput(name="validate_input", execution_order=1, arguments=arguments),
         WriteGreeting(name="write_greeting", execution_order=2, arguments=arguments),
         ConfirmOutput(name="confirm_output", execution_order=3, arguments=arguments),

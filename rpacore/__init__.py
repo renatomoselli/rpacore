@@ -50,10 +50,10 @@ from rpacore.queue import (
     SqliteQueue,
 )
 from rpacore.recovery import resume_transaction
-from rpacore.report import ArtifactReport, OutcomeReport, ReportRecord, SkillReport, TransactionReport, generate_report, render_html, render_json, render_text
+from rpacore.report import ArtifactReport, OutcomeReport, ReportRecord, StepReport, TransactionReport, generate_report, render_html, render_json, render_text
 from rpacore.runner import QueueRunSummary, run_queue_loop
 from rpacore.serialization import TRANSACTION_FORMAT_VERSION, serialize_transaction
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEntry, HistoryEvent, Transaction
 from rpacore.transition import ExecutionTransition
@@ -90,10 +90,10 @@ __all__ = [
     "QueueStatus",
     "ReportRecord",
     "RetryDisposition",
-    "Skill",
-    "SkillReport",
     "SqliteQueue",
     "Status",
+    "Step",
+    "StepReport",
     "SystemException",
     "TRANSACTION_FORMAT_VERSION",
     "Transaction",

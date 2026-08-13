@@ -1,7 +1,7 @@
 """Screenshot capture for exception evidence.
 
 Uses mss (optional dependency) to capture the screen when an exception
-occurs during skill execution. If mss is not installed, logs a warning
+occurs during step execution. If mss is not installed, logs a warning
 and returns an empty string — the framework continues without screenshots.
 """
 

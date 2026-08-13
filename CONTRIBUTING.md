@@ -20,7 +20,7 @@ On POSIX shells, use `.venv/bin/python` instead of `.venv\Scripts\python`.
 ## Architecture Boundaries
 
 - Framework code belongs in `rpacore/`.
-- User automations belong in generated projects, examples, or a `skills/`
+- User automations belong in generated projects, examples, or a `steps/`
   package outside the framework core.
 - RPA Core has no runtime AI behavior and no runtime AI dependency.
 - Prefer standard library solutions for runtime behavior.

@@ -17,7 +17,7 @@ from rpacore import (
     Artifact,
     BusinessException,
     HistoryEvent,
-    Skill,
+    Step,
     Status,
     Transaction,
     TransactionPage,
@@ -227,9 +227,9 @@ class TestCliInit:
         assert (project / "rpacore.toml").exists()
         assert (project / "config.toml").exists()
         assert (project / "main.py").exists()
-        assert (project / "skills" / "__init__.py").exists()
-        assert (project / "skills" / "greeting.py").exists()
-        assert (project / "tests" / "test_greeting_skill.py").exists()
+        assert (project / "steps" / "__init__.py").exists()
+        assert (project / "steps" / "greeting.py").exists()
+        assert (project / "tests" / "test_greeting_step.py").exists()
         assert (project / ".gitignore").exists()
         assert not (project / "LICENSE").exists()
         assert not (project / "NOTICE").exists()
@@ -251,11 +251,11 @@ class TestCliInit:
         assert len(transactions) == 1
         assert transactions[0].status is Status.SUCCESSFUL
         assert transactions[0].definition_identity == "generated-greeting/v1"
-        assert HistoryEvent.SKILL_SUCCEEDED in [
+        assert HistoryEvent.STEP_SUCCEEDED in [
             entry.event for entry in transactions[0].history
         ]
 
-    def test_generated_project_skill_test_passes(self, tmp_path: Path) -> None:
+    def test_generated_project_step_test_passes(self, tmp_path: Path) -> None:
         init_result = run_cli("init", "demo_project", cwd=tmp_path)
         assert init_result.returncode == 0
         project = tmp_path / "demo_project"
@@ -263,7 +263,7 @@ class TestCliInit:
         env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + str(project)
 
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "tests/test_greeting_skill.py"],
+            [sys.executable, "-m", "pytest", "tests/test_greeting_step.py"],
             cwd=project,
             env=env,
             capture_output=True,
@@ -661,11 +661,11 @@ class TestCliTransaction:
         assert result.returncode == 0
         assert result.stderr == ""
         payload = json.loads(result.stdout)
-        assert payload["schema_version"] == 1
+        assert payload["schema_version"] == 2
         assert payload["command"] == "transaction:list"
         assert payload["limit"] == 100
         assert payload["transactions"][0]["id"] == tx.id
-        assert payload["transactions"][0]["transaction_format_version"] == 2
+        assert payload["transactions"][0]["transaction_format_version"] == 3
         assert payload["transactions"][0]["definition_identity"] == ""
         assert payload["transactions"][0]["status"] == "successful"
         assert payload["transactions"][0]["state"] == {"invoice": "001"}
@@ -723,13 +723,13 @@ class TestCliTransaction:
 
     def test_transaction_show_human_output(self, tmp_path: Path) -> None:
         db_path = tmp_path / "transactions.db"
-        skill = Skill("download", 1, arguments={"invoice": "001"})
-        skill.status = Status.FAILED
-        skill.exceptions.append(BusinessException("bad invoice", action="download"))
-        tx = Transaction(reference="invoice-001", status=Status.FAILED, skills=[skill])
+        step = Step("download", 1, arguments={"invoice": "001"})
+        step.status = Status.FAILED
+        step.exceptions.append(BusinessException("bad invoice", action="download"))
+        tx = Transaction(reference="invoice-001", status=Status.FAILED, steps=[step])
         tx.metadata = {"customer": "acme"}
         tx.artifacts = [Artifact(name="invoice", path="invoice.pdf", kind="pdf")]
-        tx.append_history(skill=skill, event=HistoryEvent.SKILL_FAILED)
+        tx.append_history(step=step, event=HistoryEvent.STEP_FAILED)
         save_transaction(tx, db_path=str(db_path))
 
         result = run_cli("transaction", "show", tx.id, "--db", str(db_path), cwd=tmp_path)
@@ -740,25 +740,25 @@ class TestCliTransaction:
         assert "Definition:  (unidentified)" in result.stdout
         assert "1. download: failed" in result.stdout
         assert "- business: bad invoice" in result.stdout
-        assert "1. skill_failed status=failed retry=0 skill=download" in result.stdout
+        assert "1. step_failed status=failed retry=0 step=download" in result.stdout
         assert "invoice (pdf): invoice.pdf" in result.stdout
         assert "Artifacts:   1" in result.stdout
         assert result.stderr == ""
 
     def test_transaction_show_json_contains_loaded_transaction_details(self, tmp_path: Path) -> None:
         db_path = tmp_path / "transactions.db"
-        skill = Skill("download", 1, arguments={"invoice": "001"})
-        skill.status = Status.FAILED
-        skill.exceptions.append(BusinessException("bad invoice", action="download"))
+        step = Step("download", 1, arguments={"invoice": "001"})
+        step.status = Status.FAILED
+        step.exceptions.append(BusinessException("bad invoice", action="download"))
         tx = Transaction(
             reference="invoice-001",
             status=Status.FAILED,
             state={"invoice": "001"},
             metadata={"customer": "acme"},
-            skills=[skill],
+            steps=[step],
             artifacts=[Artifact(name="invoice", path="invoice.pdf", kind="pdf")],
         )
-        tx.append_history(skill=skill, event=HistoryEvent.SKILL_FAILED)
+        tx.append_history(step=step, event=HistoryEvent.STEP_FAILED)
         save_transaction(tx, db_path=str(db_path))
 
         result = run_cli(
@@ -774,16 +774,16 @@ class TestCliTransaction:
         assert result.returncode == 0
         assert result.stderr == ""
         payload = json.loads(result.stdout)
-        assert payload["schema_version"] == 1
+        assert payload["schema_version"] == 2
         assert payload["command"] == "transaction:show"
         detail = payload["transaction"]
-        assert detail["transaction_format_version"] == 2
+        assert detail["transaction_format_version"] == 3
         assert detail["definition_identity"] == ""
         assert detail["id"] == tx.id
         assert detail["state"] == {"invoice": "001"}
         assert detail["metadata"] == {"customer": "acme"}
-        assert detail["skills"][0]["exceptions"][0]["type"] == "business"
-        assert detail["history"][0]["event"] == "skill_failed"
+        assert detail["steps"][0]["exceptions"][0]["type"] == "business"
+        assert detail["history"][0]["event"] == "step_failed"
         assert detail["artifacts"][0]["path"] == "invoice.pdf"
 
     def test_transaction_export_json_stdout_is_versioned_and_clean(self, tmp_path: Path) -> None:
@@ -825,11 +825,11 @@ class TestCliTransaction:
             "framework_version",
             "transactions",
         }
-        assert payload["export_format_version"] == 1
+        assert payload["export_format_version"] == 2
         assert payload["framework_version"] == cli_module.__version__
         assert payload["exported_at"].endswith("+00:00")
         assert [tx["reference"] for tx in payload["transactions"]] == ["newer", "older"]
-        assert payload["transactions"][1]["transaction_format_version"] == 2
+        assert payload["transactions"][1]["transaction_format_version"] == 3
         assert payload["transactions"][1]["state"] == {"invoice": "001"}
         assert "secret artifact body" not in result.stdout
 
@@ -876,15 +876,15 @@ class TestCliTransaction:
             "metadata",
             "reference",
             "retry_count",
-            "skills",
+            "steps",
             "started_at",
             "state",
             "status",
             "transaction_format_version",
         }
         assert [record["reference"] for record in records] == ["second", "first"]
-        assert {record["export_format_version"] for record in records} == {1}
-        assert {record["transaction_format_version"] for record in records} == {2}
+        assert {record["export_format_version"] for record in records} == {2}
+        assert {record["transaction_format_version"] for record in records} == {3}
         assert {record["framework_version"] for record in records} == {
             cli_module.__version__,
         }

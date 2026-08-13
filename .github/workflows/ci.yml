@@ -127,11 +127,4 @@ jobs:
         if: runner.os == 'Windows'
         run: >
           python -m pytest
-          tests/test_engine.py::TestEngineCheckpointing::test_checkpoint_runs_after_each_state_transition
-          tests/test_engine.py::TestEngineCheckpointing::test_checkpoint_failure_stops_before_skill_code_runs
-          tests/test_engine.py::TestEngineCheckpointing::test_checkpoint_validates_durable_state_before_saving
-          tests/test_engine.py::TestEngineCheckpointing::test_memory_error_is_not_masked_by_checkpoint_error
-          tests/test_engine.py::TestEngineCheckpointing::test_stopping_business_exception_checkpoints_downstream_skips_as_batch
-          tests/test_engine.py::TestEngineCheckpointing::test_in_memory_run_still_works_without_checkpoint
-          tests/test_engine.py::TestEngineCheckpointing::test_subprocess_exit_after_successful_skill_leaves_checkpoint
-          tests/test_engine.py::TestEngineCheckpointing::test_subprocess_resume_after_crash_does_not_repeat_successful_skill
+          tests/test_engine.py::TestEngineCheckpointing

@@ -34,7 +34,7 @@ from rpacore.queue import (
 )
 import rpacore.runner as runner_module
 from rpacore.runner import QueueRunSummary, run_queue_loop
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.status import Status
 from rpacore.transaction import HistoryEvent, Transaction as _Transaction
 
@@ -176,29 +176,29 @@ def _item(ref: str) -> QueueItem:
     return QueueItem(id=ref, reference=ref, payload={})
 
 
-class _SuccessSkill(Skill):
+class _SuccessStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         pass
 
 
-class _BusinessFailSkill(Skill):
+class _BusinessFailStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         raise BusinessException("bad data", action=self.name)
 
 
-class _SystemFailSkill(Skill):
+class _SystemFailStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         raise SystemException("system down", action=self.name)
 
 
-class _StateSkill(Skill):
+class _StateStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         ctx.state[self.name] = "done"
 
 
-def _make_engine_with(skill_cls: type[Skill]) -> tuple[Engine, Transaction]:
-    """Return (engine, transaction) pre-loaded with one skill instance."""
-    tx = Transaction(reference="T", skills=[skill_cls("step", 1)])
+def _make_engine_with(step_cls: type[Step]) -> tuple[Engine, Transaction]:
+    """Return (engine, transaction) pre-loaded with one step instance."""
+    tx = Transaction(reference="T", steps=[step_cls("step", 1)])
     return Engine(), tx
 
 
@@ -218,7 +218,7 @@ class _RecordingClock:
 
 def _run(
     items: list[QueueItem],
-    skill_cls: type[Skill] = _SuccessSkill,
+    step_cls: type[Step] = _SuccessStep,
     *,
     build_raises: Exception | None = None,
     after_item=None,
@@ -242,7 +242,7 @@ def _run(
     def _build(item: QueueItem) -> Transaction:
         if build_raises is not None:
             raise build_raises
-        return Transaction(reference=item.reference, skills=[skill_cls("step", 1)])
+        return Transaction(reference=item.reference, steps=[step_cls("step", 1)])
 
     summary = run_queue_loop(
         queue=queue,
@@ -287,7 +287,7 @@ class TestQueueRunSummary:
     def test_business_fail_counted_as_failed(self) -> None:
         summary, queue = _run(
             [_item("a"), _item("b")],
-            skill_cls=_BusinessFailSkill,
+            step_cls=_BusinessFailStep,
         )
         assert summary.processed == 2
         assert summary.completed == 0
@@ -300,7 +300,7 @@ class TestQueueRunSummary:
     def test_system_fail_retries_queue_item(self) -> None:
         summary, queue = _run(
             [_item("a"), _item("b")],
-            skill_cls=_SystemFailSkill,
+            step_cls=_SystemFailStep,
         )
         assert summary.processed == 2
         assert summary.completed == 0
@@ -313,7 +313,7 @@ class TestQueueRunSummary:
     def test_business_failures_can_use_queue_retry_policy(self) -> None:
         summary, queue = _run(
             [_item("a")],
-            skill_cls=_BusinessFailSkill,
+            step_cls=_BusinessFailStep,
             retry_business_failures=True,
         )
         assert summary.processed == 1
@@ -338,7 +338,7 @@ class TestQueueRunSummary:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_SystemFailSkill("step", 1)],
+                steps=[_SystemFailStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -371,7 +371,7 @@ class TestQueueRunSummary:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_BusinessFailSkill("step", 1)],
+                steps=[_BusinessFailStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -387,7 +387,7 @@ class TestQueueRunSummary:
         db_path = str(tmp_path / "transactions.db")
         attempts = 0
 
-        class _BusinessThenSuccessSkill(Skill):
+        class _BusinessThenSuccessStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 nonlocal attempts
                 attempts += 1
@@ -397,7 +397,7 @@ class TestQueueRunSummary:
         first = _item("a")
         first_summary, first_queue = _run(
             [first],
-            skill_cls=_BusinessThenSuccessSkill,
+            step_cls=_BusinessThenSuccessStep,
             retry_business_failures=True,
             transaction_db_path=db_path,
         )
@@ -406,7 +406,7 @@ class TestQueueRunSummary:
 
         second_summary, second_queue = _run(
             [retry_item],
-            skill_cls=_BusinessThenSuccessSkill,
+            step_cls=_BusinessThenSuccessStep,
             retry_business_failures=True,
             transaction_db_path=db_path,
         )
@@ -433,7 +433,7 @@ class TestQueueRunSummary:
         queue = _FakeQueue([_item("invalid")])
 
         def _build_invalid(item: QueueItem) -> Transaction:
-            return Transaction(reference=item.reference, skills=[Skill("", 1)])
+            return Transaction(reference=item.reference, steps=[Step("", 1)])
 
         summary = run_queue_loop(
             queue=queue,
@@ -467,8 +467,8 @@ class TestQueueRunSummary:
         def build(item: QueueItem) -> Transaction:
             nonlocal calls
             calls += 1
-            skill = _SuccessSkill("step", 1) if item.reference == "ok" else _BusinessFailSkill("step", 1)
-            return Transaction(reference=item.reference, skills=[skill])
+            step = _SuccessStep("step", 1) if item.reference == "ok" else _BusinessFailStep("step", 1)
+            return Transaction(reference=item.reference, steps=[step])
 
         summary = run_queue_loop(
             queue=queue,
@@ -488,9 +488,9 @@ class TestQueueRunSummary:
         def build(item: QueueItem) -> Transaction:
             return Transaction(
                 reference=item.reference,
-                skills=[
-                    _BusinessFailSkill("validate", 1),
-                    _SystemFailSkill("submit", 2),
+                steps=[
+                    _BusinessFailStep("validate", 1),
+                    _SystemFailStep("submit", 2),
                 ],
             )
 
@@ -544,7 +544,7 @@ class TestAfterItem:
         calls: list[tuple] = []
         _run(
             [_item("bad")],
-            skill_cls=_BusinessFailSkill,
+            step_cls=_BusinessFailStep,
             after_item=lambda item, tx, err: calls.append((item, tx, err)),
         )
         item, tx, err = calls[0]
@@ -636,7 +636,7 @@ class TestAfterItem:
             lambda transaction: (_ for _ in ()).throw(RuntimeError("report crash")),
         )
 
-        summary, queue = _run([_item("a")], skill_cls=_BusinessFailSkill)
+        summary, queue = _run([_item("a")], step_cls=_BusinessFailStep)
 
         assert summary.failed == 1
         assert summary.retry_scheduled == 0
@@ -659,7 +659,7 @@ class TestAfterItem:
 
         summary, queue = _run(
             [_item("a"), _item("b")],
-            skill_cls=_BusinessFailSkill,
+            step_cls=_BusinessFailStep,
             after_item=_bad_callback,
         )
         assert summary.processed == 2
@@ -701,7 +701,7 @@ class TestAfterItem:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_SuccessSkill("step", 1)],
+                steps=[_SuccessStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -724,7 +724,7 @@ class TestAfterItem:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_SuccessSkill("step", 1)],
+                steps=[_SuccessStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -764,7 +764,7 @@ class TestAfterItem:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_BusinessFailSkill("step", 1)],
+                steps=[_BusinessFailStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -778,13 +778,13 @@ class TestAfterItem:
     def test_after_item_receives_transaction_but_no_resource_mapping(self) -> None:
         callback_args: list[tuple[QueueItem, Transaction | None, Exception | None]] = []
 
-        class _UseResourceSkill(Skill):
+        class _UseResourceStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 assert ctx.resources["session"] == "shared"
 
         _run(
             [_item("resources")],
-            skill_cls=_UseResourceSkill,
+            step_cls=_UseResourceStep,
             resource_scope=_resource_scope({"session": "shared"}),
             after_item=lambda item, tx, err: callback_args.append((item, tx, err)),
         )
@@ -823,14 +823,14 @@ class TestRunnerManagedTransactionPersistence:
         assert len(transactions) == 1
         assert transactions[0].reference == "ok"
         assert transactions[0].status is Status.SUCCESSFUL
-        assert transactions[0].skills[0].status is Status.SUCCESSFUL
+        assert transactions[0].steps[0].status is Status.SUCCESSFUL
 
     def test_failed_transaction_saved_without_after_item(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
 
         summary, queue = _run(
             [_item("bad")],
-            skill_cls=_BusinessFailSkill,
+            step_cls=_BusinessFailStep,
             transaction_db_path=db_path,
         )
 
@@ -845,8 +845,8 @@ class TestRunnerManagedTransactionPersistence:
         assert len(transactions) == 1
         assert transactions[0].reference == "bad"
         assert transactions[0].status is Status.FAILED
-        assert transactions[0].skills[0].status is Status.FAILED
-        assert isinstance(transactions[0].skills[0].exceptions[0], BusinessException)
+        assert transactions[0].steps[0].status is Status.FAILED
+        assert isinstance(transactions[0].steps[0].exceptions[0], BusinessException)
 
     def test_callback_failure_does_not_prevent_persistence(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
@@ -970,7 +970,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_SuccessSkill("step", 1)],
+                steps=[_SuccessStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -1008,7 +1008,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_SystemFailSkill("step", 1)],
+                steps=[_SystemFailStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -1034,7 +1034,7 @@ class TestRunnerManagedTransactionPersistence:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SuccessSkill("step", 1)],
+                    steps=[_SuccessStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -1054,7 +1054,7 @@ class TestRunnerManagedTransactionPersistence:
         monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 0.01)
         queue = MemoryErrorRenewQueue([_item("memory")])
 
-        class _WaitSkill(Skill):
+        class _WaitStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 deadline = time.monotonic() + 1
                 while time.monotonic() < deadline:
@@ -1066,7 +1066,7 @@ class TestRunnerManagedTransactionPersistence:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_WaitSkill("wait", 1)],
+                    steps=[_WaitStep("wait", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -1088,7 +1088,7 @@ class TestRunnerManagedTransactionPersistence:
         queue = LockedRenewQueue([_item("memory")])
         queue._clock = _FatalSleepClock()
 
-        class _WaitSkill(Skill):
+        class _WaitStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 deadline = time.monotonic() + 1
                 while time.monotonic() < deadline:
@@ -1100,7 +1100,7 @@ class TestRunnerManagedTransactionPersistence:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_WaitSkill("wait", 1)],
+                    steps=[_WaitStep("wait", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -1118,7 +1118,7 @@ class TestRunnerManagedTransactionPersistence:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SuccessSkill("step", 1)],
+                    steps=[_SuccessStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -1138,7 +1138,7 @@ class TestRunnerManagedTransactionPersistence:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SystemFailSkill("step", 1)],
+                    steps=[_SystemFailStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -1191,7 +1191,7 @@ class TestRunnerManagedTransactionPersistence:
         def _fail_after_success(transaction: Transaction, **kwargs) -> int:
             if (
                 transaction.history
-                and transaction.history[-1].event == "skill_succeeded"
+                and transaction.history[-1].event == "step_succeeded"
             ):
                 raise RuntimeError("write failed")
             return real_save_transaction(transaction, **kwargs)
@@ -1226,7 +1226,7 @@ class TestRunnerManagedTransactionPersistence:
         transaction_db = str(tmp_path / "transactions.db")
         executions = 0
 
-        class _InvalidMetadataSkill(Skill):
+        class _InvalidMetadataStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 nonlocal executions
                 executions += 1
@@ -1237,7 +1237,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=Engine(),
             build_transaction=lambda queue_item: Transaction(
                 reference=queue_item.reference,
-                skills=[_InvalidMetadataSkill("invalid", 1)],
+                steps=[_InvalidMetadataStep("invalid", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -1256,14 +1256,14 @@ class TestRunnerManagedTransactionPersistence:
         assert stored.transaction_id
         durable = load_transaction(stored.transaction_id, transaction_db)
         assert durable.status is Status.IN_PROGRESS
-        assert durable.skills[0].status is Status.IN_PROGRESS
+        assert durable.steps[0].status is Status.IN_PROGRESS
         assert durable.metadata == {}
-        assert durable.history[-1].event is HistoryEvent.SKILL_STARTED
+        assert durable.history[-1].event is HistoryEvent.STEP_STARTED
 
     def test_checkpoint_retry_decision_uses_durable_skipped_history(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
         tx = Transaction(reference="skip")
-        tx.append_history(HistoryEvent.SKILL_SKIPPED)
+        tx.append_history(HistoryEvent.STEP_SKIPPED)
         save_transaction(tx, db_path)
 
         assert runner_module._checkpoint_failure_allows_queue_retry(tx, db_path=db_path) is True
@@ -1271,9 +1271,9 @@ class TestRunnerManagedTransactionPersistence:
     def test_checkpoint_retry_decision_uses_newer_in_memory_history(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
         tx = Transaction(reference="checkpoint")
-        tx.append_history(HistoryEvent.SKILL_SUCCEEDED)
+        tx.append_history(HistoryEvent.STEP_SUCCEEDED)
         save_transaction(tx, db_path)
-        tx.append_history(HistoryEvent.SKILL_SUCCEEDED)
+        tx.append_history(HistoryEvent.STEP_SUCCEEDED)
 
         assert runner_module._checkpoint_failure_allows_queue_retry(tx, db_path=db_path) is True
 
@@ -1282,7 +1282,7 @@ class TestRunnerManagedTransactionPersistence:
         monkeypatch,
     ) -> None:
         tx = Transaction(reference="ok")
-        tx.append_history(HistoryEvent.SKILL_SUCCEEDED)
+        tx.append_history(HistoryEvent.STEP_SUCCEEDED)
 
         def fail_load(transaction_id: str, db_path: str) -> Transaction:
             raise sqlite3.OperationalError("database is locked")
@@ -1295,7 +1295,7 @@ class TestRunnerManagedTransactionPersistence:
         def _fail_save(
             transaction: Transaction, *, expected_revision: int, **kwargs
         ) -> int:
-            if transaction.skills[0].status is Status.FAILED:
+            if transaction.steps[0].status is Status.FAILED:
                 raise RuntimeError("write failed")
             return expected_revision + 1
 
@@ -1304,7 +1304,7 @@ class TestRunnerManagedTransactionPersistence:
 
         summary, queue = _run(
             [_item("bad")],
-            skill_cls=_BusinessFailSkill,
+            step_cls=_BusinessFailStep,
             after_item=lambda item, tx, err: errors.append(err),
             transaction_db_path="transactions.db",
         )
@@ -1316,7 +1316,7 @@ class TestRunnerManagedTransactionPersistence:
         assert queue.fail_retries == [False]
         assert isinstance(errors[0], RuntimeError)
 
-    def test_runner_checkpoints_successful_skill_before_later_failure(self, tmp_path) -> None:
+    def test_runner_checkpoints_successful_step_before_later_failure(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
         queue = _RecordingSqliteQueue(
             [_item("checkpoint")],
@@ -1326,7 +1326,7 @@ class TestRunnerManagedTransactionPersistence:
         def build(item: QueueItem) -> Transaction:
             return Transaction(
                 reference=item.reference,
-                skills=[_StateSkill("first", 1), _SystemFailSkill("second", 2)],
+                steps=[_StateStep("first", 1), _SystemFailStep("second", 2)],
             )
 
         summary = run_queue_loop(
@@ -1342,8 +1342,8 @@ class TestRunnerManagedTransactionPersistence:
         loaded = list_transactions(db_path)[0]
         assert summary.failed == 1
         assert queue.failed == ["checkpoint"]
-        assert loaded.skills[0].status is Status.SUCCESSFUL
-        assert loaded.skills[1].status is Status.FAILED
+        assert loaded.steps[0].status is Status.SUCCESSFUL
+        assert loaded.steps[1].status is Status.FAILED
         assert loaded.state == {"first": "done"}
 
     def test_reclaimed_same_label_fences_runner_checkpoint(
@@ -1361,7 +1361,7 @@ class TestRunnerManagedTransactionPersistence:
         replacement_tokens: list[str] = []
         monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 10.0)
 
-        class ReclaimDuringSkill(Skill):
+        class ReclaimDuringStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 conn = sqlite3.connect(queue_db)
                 try:
@@ -1383,7 +1383,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=Engine(),
             build_transaction=lambda queue_item: Transaction(
                 reference=queue_item.reference,
-                skills=[ReclaimDuringSkill("reclaim", 1)],
+                steps=[ReclaimDuringStep("reclaim", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -1398,9 +1398,9 @@ class TestRunnerManagedTransactionPersistence:
         assert stored.claim_token == replacement_tokens[0]
         durable = load_transaction(stored.transaction_id, transaction_db)
         assert "stale-write" not in durable.state
-        assert durable.skills[0].status is Status.IN_PROGRESS
+        assert durable.steps[0].status is Status.IN_PROGRESS
 
-    def test_initial_transaction_is_persisted_and_bound_before_skill_execution(self, tmp_path) -> None:
+    def test_initial_transaction_is_persisted_and_bound_before_step_execution(self, tmp_path) -> None:
         db_path = str(tmp_path / "transactions.db")
         events: list[str] = []
 
@@ -1424,7 +1424,7 @@ class TestRunnerManagedTransactionPersistence:
                     claim_token=claim_token,
                 )
 
-        class RecordingSkill(Skill):
+        class RecordingStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 events.append("execute")
 
@@ -1436,7 +1436,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=Engine(),
             build_transaction=lambda queue_item: Transaction(
                 reference=queue_item.reference,
-                skills=[RecordingSkill("record", 1)],
+                steps=[RecordingStep("record", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -1582,7 +1582,7 @@ class TestRunnerManagedTransactionPersistence:
                 return transaction
             return Transaction(
                 reference="invalid-arguments",
-                skills=[Skill("submit", 1, arguments={"ids": (1, 2)})],
+                steps=[Step("submit", 1, arguments={"ids": (1, 2)})],
             )
 
         summary = run_queue_loop(
@@ -1637,7 +1637,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_SuccessSkill("step", 1)],
+                steps=[_SuccessStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -1701,7 +1701,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=Engine(),
             build_transaction=lambda queue_item: Transaction(
                 reference=queue_item.reference,
-                skills=[_SuccessSkill("step", 1)],
+                steps=[_SuccessStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -1747,7 +1747,7 @@ class TestRunnerManagedTransactionPersistence:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SuccessSkill("step", 1)],
+                    steps=[_SuccessStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -1791,7 +1791,7 @@ class TestRunnerManagedTransactionPersistence:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SuccessSkill("step", 1)],
+                    steps=[_SuccessStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -1879,7 +1879,7 @@ class TestRunnerManagedTransactionPersistence:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SuccessSkill("step", 1)],
+                    steps=[_SuccessStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -1937,7 +1937,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_SuccessSkill("step", 1)],
+                steps=[_SuccessStep("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -1979,7 +1979,7 @@ class TestRunnerManagedTransactionPersistence:
         assert record.__dict__.get("max_attempts") == 7
         assert record.__dict__.get("retry_delay_seconds") == 1.0
 
-    def test_persisted_queue_retry_resumes_same_transaction_and_skips_successful_skills(
+    def test_persisted_queue_retry_resumes_same_transaction_and_skips_successful_steps(
         self,
         tmp_path,
     ) -> None:
@@ -1993,12 +1993,12 @@ class TestRunnerManagedTransactionPersistence:
         counts: dict[str, int] = {"first": 0, "second": 0}
         build_calls = 0
 
-        class FirstSkill(Skill):
+        class FirstStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 counts["first"] += 1
                 ctx.state["first"] = "done"
 
-        class FailsOnceSkill(Skill):
+        class FailsOnceStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 counts["second"] += 1
                 if counts["second"] == 1:
@@ -2009,7 +2009,7 @@ class TestRunnerManagedTransactionPersistence:
             build_calls += 1
             return Transaction(
                 reference=queue_item.reference,
-                skills=[FirstSkill("first", 1), FailsOnceSkill("second", 2)],
+                steps=[FirstStep("first", 1), FailsOnceStep("second", 2)],
             )
 
         summary = run_queue_loop(
@@ -2041,12 +2041,12 @@ class TestRunnerManagedTransactionPersistence:
         tmp_path,
     ) -> None:
         db_path = str(tmp_path / "transactions.db")
-        persisted_skill = Skill("step", 1)
-        persisted_skill.status = Status.IN_PROGRESS
+        persisted_step = Step("step", 1)
+        persisted_step.status = Status.IN_PROGRESS
         persisted = Transaction(
             reference="identity-mismatch",
             status=Status.IN_PROGRESS,
-            skills=[persisted_skill],
+            steps=[persisted_step],
         )
         save_transaction(persisted, db_path)
         conn = sqlite3.connect(db_path)
@@ -2068,7 +2068,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=Engine(),
             build_transaction=lambda queue_item: _Transaction(
                 reference=queue_item.reference,
-                skills=[Skill("step", 1)],
+                steps=[Step("step", 1)],
                 definition_identity="tests.runner/v2",
             ),
             config={},
@@ -2091,7 +2091,7 @@ class TestRunnerManagedTransactionPersistence:
         assert summary.terminal_failed == 1
         assert queue.fail_retries == [False]
         assert loaded.status is Status.IN_PROGRESS
-        assert loaded.skills[0].status is Status.IN_PROGRESS
+        assert loaded.steps[0].status is Status.IN_PROGRESS
         assert loaded.history == []
         assert revision_after == revision_before
         assert isinstance(errors[0], runner_module._DurableTransactionBindingError)
@@ -2102,12 +2102,12 @@ class TestRunnerManagedTransactionPersistence:
         tmp_path,
     ) -> None:
         transaction_db_path = str(tmp_path / "transactions.db")
-        skill = Skill("step", 1)
-        skill.status = Status.SUCCESSFUL
+        step = Step("step", 1)
+        step.status = Status.SUCCESSFUL
         transaction = Transaction(
             reference="completed-before-queue-transition",
             status=Status.SUCCESSFUL,
-            skills=[skill],
+            steps=[step],
         )
         transaction.append_history(
             HistoryEvent.TRANSACTION_STARTED,
@@ -2140,7 +2140,7 @@ class TestRunnerManagedTransactionPersistence:
             engine=UnexpectedEngine(),
             build_transaction=lambda queue_item: Transaction(
                 reference=queue_item.reference,
-                skills=[Skill("step", 1)],
+                steps=[Step("step", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -2167,11 +2167,11 @@ class TestRunnerManagedTransactionPersistence:
         )
         attempts = 0
 
-        class DurableStateSkill(Skill):
+        class DurableStateStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 ctx.state["invoice"] = "durable"
 
-        class FailsOnceSkill(Skill):
+        class FailsOnceStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 nonlocal attempts
                 attempts += 1
@@ -2181,7 +2181,7 @@ class TestRunnerManagedTransactionPersistence:
         def build(queue_item: QueueItem) -> Transaction:
             return Transaction(
                 reference=queue_item.reference,
-                skills=[DurableStateSkill("state", 1), FailsOnceSkill("retry", 2)],
+                steps=[DurableStateStep("state", 1), FailsOnceStep("retry", 2)],
             )
 
         run_queue_loop(
@@ -2279,7 +2279,7 @@ class TestRunnerManagedTransactionPersistence:
         db_path = str(tmp_path / "transactions.db")
         transaction = Transaction(
             reference="valid-before-corruption",
-            skills=[Skill("step", 1)],
+            steps=[Step("step", 1)],
         )
         save_transaction(transaction, db_path)
         conn = sqlite3.connect(db_path)
@@ -2343,7 +2343,7 @@ class TestRunnerManagedTransactionPersistence:
         db_path = str(tmp_path / "transactions.db")
         transaction_ids: list[str] = []
 
-        class _UseResourceSkill(Skill):
+        class _UseResourceStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 assert "session" in ctx.resources
                 ctx.state["done"] = True
@@ -2351,7 +2351,7 @@ class TestRunnerManagedTransactionPersistence:
 
         _run(
             [_item("ok")],
-            skill_cls=_UseResourceSkill,
+            step_cls=_UseResourceStep,
             transaction_db_path=db_path,
             resource_scope=_resource_scope({"session": object()}),
         )
@@ -2377,13 +2377,13 @@ class TestRunnerManagedTransactionPersistence:
     def test_non_json_safe_final_state_prevents_queue_completion(self, tmp_path) -> None:
         errors: list[Exception | None] = []
 
-        class _BadStateSkill(Skill):
+        class _BadStateStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 ctx.state["client"] = object()
 
         summary, queue = _run(
             [_item("bad-state")],
-            skill_cls=_BadStateSkill,
+            step_cls=_BadStateStep,
             transaction_db_path=str(tmp_path / "transactions.db"),
             after_item=lambda item, tx, err: errors.append(err),
         )
@@ -2422,7 +2422,7 @@ class TestRunnerManagedTransactionPersistence:
             return Transaction(
                 reference=queue_item.reference,
                 state={"invoice_id": "prebuilt"},
-                skills=[_SuccessSkill("step", 1)],
+                steps=[_SuccessStep("step", 1)],
             )
 
         run_queue_loop(
@@ -2446,16 +2446,16 @@ class TestRunnerManagedTransactionPersistence:
 
 class TestQueueLeaseHeartbeat:
     @pytest.mark.parametrize(
-        ("skill_cls", "lost_transition"),
+        ("step_cls", "lost_transition"),
         [
-            (_SuccessSkill, "complete"),
-            (_SystemFailSkill, "fail"),
+            (_SuccessStep, "complete"),
+            (_SystemFailStep, "fail"),
         ],
     )
     def test_final_transition_lease_loss_stops_without_claiming_next_item(
         self,
         caplog,
-        skill_cls: type[Skill],
+        step_cls: type[Step],
         lost_transition: str,
     ) -> None:
         first = _item(f"transition-lease-loss-{lost_transition}")
@@ -2507,7 +2507,7 @@ class TestQueueLeaseHeartbeat:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[skill_cls("step", 1)],
+                    steps=[step_cls("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -2632,22 +2632,22 @@ class TestQueueLeaseHeartbeat:
         assert renewal_completed.is_set()
 
     @pytest.mark.parametrize(
-        ("skill_cls", "expected_completed", "expected_failed"),
+        ("step_cls", "expected_completed", "expected_failed"),
         [
-            (_SuccessSkill, True, False),
-            (_SystemFailSkill, False, True),
+            (_SuccessStep, True, False),
+            (_SystemFailStep, False, True),
         ],
     )
     def test_final_transition_serializes_with_heartbeat_renewal(
         self,
-        skill_cls: type[Skill],
+        step_cls: type[Step],
         expected_completed: bool,
         expected_failed: bool,
     ) -> None:
         renewal_attempted = threading.Event()
         renewal_completed = threading.Event()
         renewal_threads: list[threading.Thread] = []
-        item = _item(f"final-transition-{skill_cls.__name__}")
+        item = _item(f"final-transition-{step_cls.__name__}")
         item.claimed_by = "worker"
         item.claim_token = "claim-token"
         heartbeat = runner_module._LeaseHeartbeat(
@@ -2714,7 +2714,7 @@ class TestQueueLeaseHeartbeat:
             Engine(),
             lambda queue_item: Transaction(
                 reference=queue_item.reference,
-                skills=[skill_cls("step", 1)],
+                steps=[step_cls("step", 1)],
             ),
             {},
             _CREDS,
@@ -2754,7 +2754,7 @@ class TestQueueLeaseHeartbeat:
             captured.append(heartbeat)
             return heartbeat
 
-        class _SourceSkill(Skill):
+        class _SourceStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 if fatal_source == "engine":
                     raise MemoryError("fatal source failure")
@@ -2789,7 +2789,7 @@ class TestQueueLeaseHeartbeat:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SourceSkill("step", 1)],
+                    steps=[_SourceStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -2824,7 +2824,7 @@ class TestQueueLeaseHeartbeat:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SuccessSkill("step", 1)],
+                    steps=[_SuccessStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -2855,7 +2855,7 @@ class TestQueueLeaseHeartbeat:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SuccessSkill("step", 1)],
+                    steps=[_SuccessStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -2894,7 +2894,7 @@ class TestQueueLeaseHeartbeat:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SuccessSkill("step", 1)],
+                    steps=[_SuccessStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,
@@ -2923,7 +2923,7 @@ class TestQueueLeaseHeartbeat:
         queue.add(QueueItem(reference="slow", payload={}))
         monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 0.05)
 
-        class _SlowSkill(Skill):
+        class _SlowStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 time.sleep(1.2)
 
@@ -2932,7 +2932,7 @@ class TestQueueLeaseHeartbeat:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_SlowSkill("slow", 1)],
+                steps=[_SlowStep("slow", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -2944,7 +2944,7 @@ class TestQueueLeaseHeartbeat:
         assert stored.status is QueueStatus.SUCCESSFUL
         assert queue.next_item("worker-b") is None
 
-    def test_lease_loss_during_running_skill_prevents_final_transition(
+    def test_lease_loss_during_running_step_prevents_final_transition(
         self,
         monkeypatch,
         tmp_path,
@@ -2969,7 +2969,7 @@ class TestQueueLeaseHeartbeat:
         errors: list[BaseException] = []
         after_item_calls: list[str] = []
 
-        class _BlockingSkill(Skill):
+        class _BlockingStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 started.set()
                 assert release.wait(timeout=2)
@@ -2982,7 +2982,7 @@ class TestQueueLeaseHeartbeat:
                         engine=Engine(),
                         build_transaction=lambda item: Transaction(
                             reference=item.reference,
-                            skills=[_BlockingSkill("block", 1)],
+                            steps=[_BlockingStep("block", 1)],
                         ),
                         config={},
                         credentials=_CREDS,
@@ -3108,7 +3108,7 @@ class TestLifecycleHooks:
         seen: list[dict[str, object]] = []
         queue = _FakeQueue([_item("a"), _item("b")])
 
-        class _CaptureSkill(Skill):
+        class _CaptureStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 seen.append(dict(ctx.resources))
 
@@ -3117,7 +3117,7 @@ class TestLifecycleHooks:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_CaptureSkill("capture", 1)],
+                steps=[_CaptureStep("capture", 1)],
             ),
             config={"session_name": "shared"},
             credentials=_CREDS,
@@ -3132,7 +3132,7 @@ class TestLifecycleHooks:
         item.payload = {"value": "item"}
         seen: list[tuple[dict[str, object], dict[str, object]]] = []
 
-        class _CaptureSkill(Skill):
+        class _CaptureStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 seen.append((dict(ctx.state), dict(ctx.resources)))
 
@@ -3141,7 +3141,7 @@ class TestLifecycleHooks:
             engine=Engine(),
             build_transaction=lambda queue_item: Transaction(
                 reference=queue_item.reference,
-                skills=[_CaptureSkill("capture", 1)],
+                steps=[_CaptureStep("capture", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -3155,7 +3155,7 @@ class TestLifecycleHooks:
         seen: list[dict[str, object]] = []
         queue = _FakeQueue([_item("a"), _item("b")])
 
-        class _MutateSkill(Skill):
+        class _MutateStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 seen.append(dict(ctx.resources))
                 ctx.resources["mutated"] = True
@@ -3165,7 +3165,7 @@ class TestLifecycleHooks:
             engine=Engine(),
             build_transaction=lambda item: Transaction(
                 reference=item.reference,
-                skills=[_MutateSkill("mutate", 1)],
+                steps=[_MutateStep("mutate", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -3179,13 +3179,13 @@ class TestLifecycleHooks:
         resource = {"session_id": "shared"}
         seen: list[object] = []
 
-        class _CaptureSkill(Skill):
+        class _CaptureStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 seen.append(ctx.resources["resource"])
 
         _run(
             [_item("a"), _item("b")],
-            skill_cls=_CaptureSkill,
+            step_cls=_CaptureStep,
             resource_scope=_resource_scope({"resource": resource}),
         )
 
@@ -3198,7 +3198,7 @@ class TestLifecycleHooks:
         item.payload = {"value": "item"}
         seen: list[tuple[dict[str, object], dict[str, object]]] = []
 
-        class _CaptureSkill(Skill):
+        class _CaptureStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 seen.append((dict(ctx.state), dict(ctx.resources)))
 
@@ -3207,7 +3207,7 @@ class TestLifecycleHooks:
             engine=Engine(),
             build_transaction=lambda queue_item: Transaction(
                 reference=queue_item.reference,
-                skills=[_CaptureSkill("capture", 1)],
+                steps=[_CaptureStep("capture", 1)],
             ),
             config={},
             credentials=_CREDS,
@@ -3341,7 +3341,7 @@ class TestLifecycleHooks:
                 engine=Engine(),
                 build_transaction=lambda item: Transaction(
                     reference=item.reference,
-                    skills=[_SuccessSkill("step", 1)],
+                    steps=[_SuccessStep("step", 1)],
                 ),
                 config={},
                 credentials=_CREDS,

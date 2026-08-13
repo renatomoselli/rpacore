@@ -20,7 +20,7 @@ command are `rpacore`.
 ## What Is RPA Core?
 
 RPA Core is a pip-installable Python library for building reliable, auditable
-robotic process automations. Define your skills, wire them into a transaction,
+robotic process automations. Define your steps, wire them into a transaction,
 and the framework handles execution order, retry logic, persistence, logging,
 queues, reports, credentials, and notifications.
 
@@ -37,12 +37,12 @@ The design direction is:
 That means RPA Core should be friendly to humans and AI coding agents, but the
 runtime remains deterministic. There are no runtime AI dependencies.
 
-![RPA Core concept diagram showing user automation, ProcessContext, Engine, ordered skills, checkpoint persistence, and local outputs/state](https://raw.githubusercontent.com/renatomoselli/rpacore/main/docs/assets/rpacore-concept-diagram.png)
+![RPA Core concept diagram showing user automation, ProcessContext, Engine, ordered steps, checkpoint persistence, and local outputs/state](https://raw.githubusercontent.com/renatomoselli/rpacore/main/docs/assets/rpacore-concept-diagram.png)
 
 Core traits:
 
 - **Deterministic execution**: predictable behavior, no hidden runtime magic.
-- **Stateful transactions**: every skill's status is tracked and persisted.
+- **Stateful transactions**: every step's status is tracked and persisted.
 - **Idempotent retries**: resume from failure and re-run only failed work.
 - **Explicit exceptions**: business rule failures and system failures are
   classified separately.
@@ -84,7 +84,7 @@ from rpacore import (
     load_config,
 )
 
-from my_skills import FetchRecord, ProcessRecord, WriteOutput
+from my_steps import FetchRecord, ProcessRecord, WriteOutput
 
 
 config = load_config("config.toml")
@@ -94,7 +94,7 @@ tx = Transaction(
     reference="my-automation",
     definition_identity="my-automation/v1",
 )
-tx.skills = [
+tx.steps = [
     FetchRecord(
         name="fetch_record",
         execution_order=1,
@@ -133,13 +133,13 @@ rpacore run
 ```
 
 `rpacore init <project_name>` creates a normal Python project with
-`pyproject.toml`, `rpacore.toml`, `config.toml`, `main.py`, a `skills/` package,
-a pytest skill test, and `.gitignore`. Skill tests use normal pytest with
-plain skill instances and `ProcessContext`; see [Testing RPA Core Skills](docs/testing.md).
+`pyproject.toml`, `rpacore.toml`, `config.toml`, `main.py`, a `steps/` package,
+a pytest step test, and `.gitignore`. Step tests use normal pytest with
+plain step instances and `ProcessContext`; see [Testing RPA Core Steps](docs/testing.md).
 
 `rpacore run` discovers `rpacore.toml` from the current directory, resolves the
 declared `module:callable` entrypoint, and invokes it. The CLI does not build
-skills, transactions, config, or persistence automatically; that wiring remains
+steps, transactions, config, or persistence automatically; that wiring remains
 in project Python code. Entrypoint imports temporarily prioritize the manifest's
 project directory and replace only conflicting cached modules in that Python
 package namespace; the process working directory is unchanged. Dependencies
@@ -164,14 +164,14 @@ storage paths are resolved relative to `rpacore.toml`. `transaction list`
 returns the latest 100 transactions by default; pass `--limit N` to choose a
 different cap. Human output is intended for operators; `--json` writes parseable
 JSON to stdout with diagnostics only on stderr. Transaction inspection JSON uses
-`schema_version = 1` and embeds the canonical transaction record with
-`transaction_format_version = 2`. The record includes the caller-owned
+`schema_version = 2` and embeds the canonical transaction record with
+`transaction_format_version = 3`. The record includes the caller-owned
 `definition_identity` used to guard recovery compatibility.
 
 Transaction export writes portable machine-readable records for all persisted
-transactions. JSON export uses an envelope with `export_format_version = 1`,
+transactions. JSON export uses an envelope with `export_format_version = 2`,
 `framework_version`, `exported_at`, and `transactions`. NDJSON export writes one
-record per line with `export_format_version = 1` on each record. Export selects
+record per line with `export_format_version = 2` on each record. Export selects
 records through normalized-UTC cursor pages in `created_at DESC, id ASC` order.
 It keeps one page of summaries at a time and releases the page query before
 loading records, so slow output or partial consumption does not hold a SQLite
@@ -182,7 +182,7 @@ transaction deleted by concurrent cleanup before its load is omitted. Unlike
 `transaction list`, export has no 100-record cap.
 
 Machine-readable transaction records include user-supplied state, metadata,
-skill arguments, exception messages, and artifact metadata. These fields can
+step arguments, exception messages, and artifact metadata. These fields can
 contain sensitive business data. They never include resources, config,
 credentials, or artifact file contents. Webhook notifications preserve their
 compact payload shape by default while including report metadata and artifact
@@ -204,10 +204,11 @@ payloads include artifact records and paths, not artifact file contents.
 
 Set `log_format = "json"` and pass it to `configure_logger(..., fmt=...)` for
 line-delimited JSON logs. Each JSON log line contains `log_format_version`,
-UTC `timestamp`, `event`, `level`, and `message`, plus sanitized event fields.
-User extras cannot replace canonical envelope fields. Logged exceptions add an
-`exception` object with `type`, `message`, and `traceback`; explicit stack data
-uses `stack`. Text logs preserve the same diagnostic evidence.
+UTC `timestamp`, `severity`, `logger`, namespaced `event`, `message`, and nested
+`attributes`. User extras cannot replace canonical envelope fields. Logged
+exceptions add an `exception` object with `type`, `message`, and `stacktrace`;
+explicit stack data uses `stacktrace`. Text logs preserve the same diagnostic
+evidence.
 
 Exit behavior is stable across platforms:
 
@@ -219,13 +220,13 @@ Exit behavior is stable across platforms:
 
 `rpacore version` prints the installed framework version.
 
-## Writing a Skill
+## Writing a Step
 
 ```python
-from rpacore import BusinessException, ProcessContext, Skill
+from rpacore import BusinessException, ProcessContext, Step
 
 
-class FetchRecord(Skill):
+class FetchRecord(Step):
     def execute(self, ctx: ProcessContext) -> None:
         record_id = self.arguments.get("record_id")
         if not record_id:
@@ -234,7 +235,7 @@ class FetchRecord(Skill):
                 action="FetchRecord",
             )
 
-        # Fetch and store durable state for later skills.
+        # Fetch and store durable state for later steps.
         ctx.state["record"] = {"id": record_id}
 ```
 
@@ -245,7 +246,7 @@ rpacore/              # Framework core
   __init__.py      # Public API re-exports
   exceptions.py    # BusinessException, SystemException
   status.py        # Status enum
-  skill.py         # Skill base class
+  step.py          # Step base class
   transaction.py   # Transaction model
   engine.py        # Execution engine
   persistence.py   # SQLite persistence
@@ -260,7 +261,7 @@ rpacore/              # Framework core
 ```
 
 User automations should live outside `rpacore/`, usually in their own repository
-with a `skills/` package and a small `main.py` wiring layer.
+with a `steps/` package and a small `main.py` wiring layer.
 
 ## Execution Model
 
@@ -269,7 +270,7 @@ main.py
   load_config()
   configure_logger()
   create Transaction
-  attach ordered Skills
+  attach ordered Steps
   execute_transaction(transaction, transaction_db_path=...)
   generate report / dispatch notifications
 ```
@@ -282,9 +283,9 @@ PENDING -> IN_PROGRESS -> SUCCESSFUL
 ```
 
 `Engine.run()` validates transaction wiring and durable JSON data before any
-skill runs. Transaction references and skill names must be non-empty, skill
-names must be unique within the transaction, and skill execution orders must be
-unique positive integers. Transaction state and metadata, skill arguments, and
+step runs. Transaction references and step names must be non-empty, step
+names must be unique within the transaction, and step execution orders must be
+unique positive integers. Transaction state and metadata, step arguments, and
 artifact metadata must contain only JSON-safe values. Malformed input raises
 `ExecutionValidationError` or `JsonStateError` and should be treated as a
 permanent configuration or code issue, not as a retryable runtime failure. The
@@ -294,7 +295,7 @@ partially persisted or silently coerced.
 Persistence is written by user wiring. For strict crash boundaries in ordinary
 one-off runs, use `execute_transaction(transaction, transaction_db_path=...)`;
 it supplies `save_transaction()` as the engine checkpoint after each transaction
-or skill state transition. Advanced callers can still build `ProcessContext`
+or step state transition. Advanced callers can still build `ProcessContext`
 directly and call `Engine.run(ctx, checkpoint=...)`. Without a checkpoint
 callback, user code may still save only after `Engine.run()` returns. Loading a
 persisted transaction preserves the stored status; explicit recovery happens
@@ -315,8 +316,8 @@ entrypoint = "main:main"
 transaction_db_path = "rpacore.db"
 ```
 
-`rpacore.toml` is intentionally small. Skill construction and transaction wiring
-stay in Python; the manifest does not define pipelines or automatic skill
+`rpacore.toml` is intentionally small. Step construction and transaction wiring
+stay in Python; the manifest does not define pipelines or automatic step
 discovery. See `docs/project-manifest.md` for the full schema.
 
 When both `rpacore.toml` and `config.toml` are present, the value passed to the
@@ -365,24 +366,24 @@ paths declared in `rpacore.toml`, which resolve from the manifest's directory.
 
 | Exception | Meaning | Engine behavior |
 |---|---|---|
-| `BusinessException` | Expected rule violation, such as invalid input data. | Skill fails, execution continues. |
-| `SystemException` | Technical failure, such as network or file errors. | Skill fails, execution stops, retryable. |
+| `BusinessException` | Expected rule violation, such as invalid input data. | Step fails; remaining steps continue unless explicitly halted. |
+| `SystemException` | Technical failure, such as network or file errors. | Step fails, execution stops, retryable. |
 | Any other exception | Unhandled Python exception. | Wrapped as `SystemException`. |
 
-Use `stop=True` for a business failure that should stop downstream work:
+Use `halts_remaining_steps=True` for a business failure that should halt downstream work:
 
 ```python
-raise BusinessException("bad row", action=self.name, stop=True)
+raise BusinessException("bad row", action=self.name, halts_remaining_steps=True)
 ```
 
 ## Timeouts and Deadlines
 
-RPA Core does not provide a generic per-skill timeout. Python threads cannot be
-safely stopped, so an in-process timeout can mark a skill failed while the timed
+RPA Core does not provide a generic per-step timeout. Python threads cannot be
+safely stopped, so an in-process timeout can mark a step failed while the timed
 out code keeps running and mutating external systems.
 
 Configure I/O timeouts in the library that performs the work, such as the HTTP,
-SMTP, browser, database, or desktop automation client used by a skill. If an
+SMTP, browser, database, or desktop automation client used by a step. If an
 automation needs a hard deadline with termination, run it behind a separate
 worker process boundary and record the outcome back into RPA
 Core. RPA Core intentionally rejects Pebble or similar process-timeout
@@ -403,7 +404,7 @@ pip install "rpacore[keyring]"       # keyring: OS credential store integration
 This repo keeps a minimal in-repo automation under `examples/` to support
 integration-style tests for the framework itself:
 
-- `examples/sample_skill.py`
+- `examples/sample_step.py`
 - `examples/sample_main.py`
 
 Fuller user-facing automations live in the separate

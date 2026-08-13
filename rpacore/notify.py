@@ -149,11 +149,11 @@ class EmailNotifier:
 
         if self.attach_screenshots:
             seen: set[str] = set()
-            skills = report_payload["skills"]
-            assert isinstance(skills, list)
-            for skill in skills:
-                assert isinstance(skill, dict)
-                exceptions = skill["exceptions"]
+            steps = report_payload["steps"]
+            assert isinstance(steps, list)
+            for step in steps:
+                assert isinstance(step, dict)
+                exceptions = step["exceptions"]
                 assert isinstance(exceptions, list)
                 for exc in exceptions:
                     assert isinstance(exc, dict)

@@ -10,7 +10,7 @@ Creates a normal Python project directory containing:
 - `rpacore.toml`
 - `config.toml`
 - `main.py`
-- `skills/`
+- `steps/`
 - `tests/`
 - `.gitignore`
 
@@ -34,7 +34,7 @@ Exit codes:
 ## `rpacore run`
 
 Finds `rpacore.toml` from the current directory, resolves `[project].entrypoint`,
-and calls that Python callable. RPA Core does not discover skills or build a
+and calls that Python callable. RPA Core does not discover steps or build a
 pipeline from configuration; user code owns transaction wiring. Resolution
 temporarily prioritizes the manifest's project directory and replaces a cached
 entrypoint package only when it belongs to another project. The resolver never
@@ -124,7 +124,7 @@ rpacore transaction export --format ndjson
 ### Machine-readable compatibility
 
 The `--json` list and show envelopes are independently versioned by their
-`command` and `schema_version` fields. Their version-1 framework-owned fields
+`command` and `schema_version` fields. Their version-2 framework-owned fields
 are closed: a field cannot be added, removed, renamed, retyped, or given a new
 meaning without a new schema version. The nested transaction is separately
 versioned by `transaction_format_version`. Export follows the corresponding

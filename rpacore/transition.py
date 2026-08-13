@@ -9,7 +9,7 @@ from typing import Final, Literal
 from rpacore._json_state import validate_json_object
 
 
-EXECUTION_TRANSITION_SCHEMA_VERSION: Final[Literal[1]] = 1
+EXECUTION_TRANSITION_SCHEMA_VERSION: Final[Literal[2]] = 2
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -21,7 +21,7 @@ class ExecutionTransition:
     return a fresh mutable view.
     """
 
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     transition_id: str
     sequence: int
     occurred_at: str
@@ -31,9 +31,9 @@ class ExecutionTransition:
     definition_identity: str
     transaction_status: str
     execution_pass: int
-    skill_name: str
-    skill_execution_order: int | None
-    skill_status: str
+    step_name: str
+    step_execution_order: int | None
+    step_status: str
     outcome_category: str
     failure_code: str
     retry_recommended: bool | None
@@ -42,7 +42,7 @@ class ExecutionTransition:
     def __init__(
         self,
         *,
-        schema_version: Literal[1],
+        schema_version: Literal[2],
         transition_id: str,
         sequence: int,
         occurred_at: str,
@@ -52,9 +52,9 @@ class ExecutionTransition:
         definition_identity: str,
         transaction_status: str,
         execution_pass: int,
-        skill_name: str,
-        skill_execution_order: int | None,
-        skill_status: str,
+        step_name: str,
+        step_execution_order: int | None,
+        step_status: str,
         outcome_category: str,
         failure_code: str,
         retry_recommended: bool | None,
@@ -89,9 +89,9 @@ class ExecutionTransition:
         object.__setattr__(self, "definition_identity", definition_identity)
         object.__setattr__(self, "transaction_status", transaction_status)
         object.__setattr__(self, "execution_pass", execution_pass)
-        object.__setattr__(self, "skill_name", skill_name)
-        object.__setattr__(self, "skill_execution_order", skill_execution_order)
-        object.__setattr__(self, "skill_status", skill_status)
+        object.__setattr__(self, "step_name", step_name)
+        object.__setattr__(self, "step_execution_order", step_execution_order)
+        object.__setattr__(self, "step_status", step_status)
         object.__setattr__(self, "outcome_category", outcome_category)
         object.__setattr__(self, "failure_code", failure_code)
         object.__setattr__(self, "retry_recommended", retry_recommended)
@@ -103,7 +103,7 @@ class ExecutionTransition:
         return json.loads(self._checkpoint_state_json)
 
     def to_record(self) -> dict[str, object]:
-        """Return a fresh JSON-safe version-1 record."""
+        """Return a fresh JSON-safe version-2 record."""
         return {
             "schema_version": self.schema_version,
             "transition_id": self.transition_id,
@@ -115,9 +115,9 @@ class ExecutionTransition:
             "definition_identity": self.definition_identity,
             "transaction_status": self.transaction_status,
             "execution_pass": self.execution_pass,
-            "skill_name": self.skill_name,
-            "skill_execution_order": self.skill_execution_order,
-            "skill_status": self.skill_status,
+            "step_name": self.step_name,
+            "step_execution_order": self.step_execution_order,
+            "step_status": self.step_status,
             "outcome_category": self.outcome_category,
             "failure_code": self.failure_code,
             "retry_recommended": self.retry_recommended,

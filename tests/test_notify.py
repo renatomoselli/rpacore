@@ -24,7 +24,7 @@ from rpacore.notify import (
 from rpacore.report import (
     ArtifactReport,
     ReportRecord,
-    SkillReport,
+    StepReport,
     TransactionReport,
     generate_report,
     render_json,
@@ -43,7 +43,7 @@ def _make_report(reference: str = "ref-test", status: Status = Status.SUCCESSFUL
         reference=reference,
         status=status,
         retry_count=0,
-        skills=[],
+        steps=[],
         metadata={"customer": "acme"},
         artifacts=[
             ArtifactReport(
@@ -56,7 +56,7 @@ def _make_report(reference: str = "ref-test", status: Status = Status.SUCCESSFUL
             )
         ],
         transaction_record={
-            "transaction_format_version": 1,
+            "transaction_format_version": 3,
             "id": "tx-001",
             "reference": reference,
             "status": str(status),
@@ -379,13 +379,13 @@ class TestEmailNotifierSend:
         img = tmp_path / "shot.png"
         img.write_bytes(b"PNG")
 
-        skill_report = SkillReport(
+        step_report = StepReport(
             name="s", execution_order=1, status=Status.FAILED, icon="✗",
             exceptions=[BusinessException("err", screenshot_path=str(img))],
         )
         report = TransactionReport(
             transaction_id="tx", reference="r", status=Status.FAILED,
-            retry_count=0, skills=[skill_report],
+            retry_count=0, steps=[step_report],
             generated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
         )
         notifier = EmailNotifier(_email_config(), _creds())
@@ -402,13 +402,13 @@ class TestEmailNotifierSend:
         img = tmp_path / "shot.png"
         img.write_bytes(b"PNG")
 
-        skill_report = SkillReport(
+        step_report = StepReport(
             name="s", execution_order=1, status=Status.FAILED, icon="✗",
             exceptions=[BusinessException("err", screenshot_path=str(img))],
         )
         report = TransactionReport(
             transaction_id="tx", reference="r", status=Status.FAILED,
-            retry_count=0, skills=[skill_report],
+            retry_count=0, steps=[step_report],
             generated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
         )
         notifier = EmailNotifier(_email_config(), _creds())
@@ -424,13 +424,13 @@ class TestEmailNotifierSend:
         assert 'filename="shot.png"' in raw_msg
 
     def test_missing_screenshot_file_does_not_raise(self):
-        skill_report = SkillReport(
+        step_report = StepReport(
             name="s", execution_order=1, status=Status.FAILED, icon="✗",
             exceptions=[BusinessException("err", screenshot_path="/nonexistent/shot.png")],
         )
         report = TransactionReport(
             transaction_id="tx", reference="r", status=Status.FAILED,
-            retry_count=0, skills=[skill_report],
+            retry_count=0, steps=[step_report],
             generated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
         )
         notifier = EmailNotifier(_email_config(), _creds())
@@ -444,7 +444,7 @@ class TestEmailNotifierSend:
     def test_missing_record_screenshot_field_skips_attachment(self):
         report = _make_report()
         payload = json.loads(render_json(report))
-        payload["skills"] = [
+        payload["steps"] = [
             {
                 "name": "s",
                 "execution_order": 1,
@@ -455,7 +455,7 @@ class TestEmailNotifierSend:
                         "message": "err",
                         "retry_number": 0,
                         "action": "",
-                        "stops_execution": False,
+                        "halts_remaining_steps": False,
                     }
                 ],
             }
@@ -475,13 +475,13 @@ class TestEmailNotifierSend:
         img = tmp_path / "shot.png"
         img.write_bytes(b"PNG")
 
-        skill_report = SkillReport(
+        step_report = StepReport(
             name="s", execution_order=1, status=Status.FAILED, icon="✗",
             exceptions=[BusinessException("err", screenshot_path=str(img))],
         )
         report = TransactionReport(
             transaction_id="tx", reference="r", status=Status.FAILED,
-            retry_count=0, skills=[skill_report],
+            retry_count=0, steps=[step_report],
             generated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
         )
         cfg = _email_config()
@@ -673,7 +673,7 @@ class TestWebhookNotifierSend:
     def test_json_contains_canonical_transaction_record_when_enabled(self):
         body = self._send(include_transaction=True)
         payload = json.loads(body)
-        assert payload["transaction"]["transaction_format_version"] == 1
+        assert payload["transaction"]["transaction_format_version"] == 3
         assert payload["transaction"]["id"] == "tx-001"
         assert payload["transaction"]["reference"] == "ref-test"
         assert payload["transaction"]["metadata"] == {"customer": "acme"}
@@ -688,11 +688,11 @@ class TestWebhookNotifierSend:
         payload = json.loads(body)
         assert "transaction" not in payload
 
-    def test_json_contains_opt_in_report_v1(self):
+    def test_json_contains_opt_in_report_v2(self):
         body = self._send(include_report=True)
         payload = json.loads(body)
 
-        assert payload["report"]["report_format_version"] == 1
+        assert payload["report"]["report_format_version"] == 2
         assert payload["report"]["transaction"]["id"] == "tx-001"
 
     def test_incomplete_record_is_disclosed_only_in_opt_in_report(self):
@@ -816,8 +816,8 @@ class TestDispatch:
         report.artifacts[0].metadata = {
             "nested": {"values": ["original"]}
         }
-        report.skills = [
-            SkillReport(
+        report.steps = [
+            StepReport(
                 name="validate",
                 execution_order=1,
                 status=Status.FAILED,
@@ -831,7 +831,7 @@ class TestDispatch:
             def send(self, view: TransactionReport) -> None:
                 view.metadata["nested"]["values"].append("mutated")
                 view.artifacts[0].metadata["nested"]["values"].append("mutated")
-                view.skills[0].exceptions[0].action = "mutated"
+                view.steps[0].exceptions[0].action = "mutated"
                 view.transaction_record["metadata"]["customer"] = "mutated"
 
         class _CapturingNotifier:
@@ -844,13 +844,13 @@ class TestDispatch:
         assert report.artifacts[0].metadata == {
             "nested": {"values": ["original"]}
         }
-        assert report.skills[0].exceptions[0].action == "original"
+        assert report.steps[0].exceptions[0].action == "original"
         assert report.transaction_record["metadata"] == {"customer": "acme"}
         assert observed[0].metadata == {"nested": {"values": ["original"]}}
         assert observed[0].artifacts[0].metadata == {
             "nested": {"values": ["original"]}
         }
-        assert observed[0].skills[0].exceptions[0].action == "original"
+        assert observed[0].steps[0].exceptions[0].action == "original"
         assert observed[0].transaction_record["metadata"] == {
             "customer": "acme"
         }
@@ -907,11 +907,11 @@ class TestDispatch:
         dispatch([bad], _make_report(), logger=logger)
 
         payload = json.loads(stream.getvalue())
-        assert payload["event"] == "notifier_error"
+        assert payload["event"] == "rpacore.notifier.error"
         assert payload["exception"]["type"] == "RuntimeError"
         assert payload["exception"]["message"] == "notification diagnostic"
         assert "RuntimeError: notification diagnostic" in (
-            payload["exception"]["traceback"]
+            payload["exception"]["stacktrace"]
         )
 
     def test_memory_error_propagates(self):

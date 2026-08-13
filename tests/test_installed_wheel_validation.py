@@ -36,8 +36,9 @@ def test_smoke_code_exercises_public_configuration_and_query_apis(tmp_path: Path
     assert '"query-smoke"' in smoke_code
     assert "missing py.typed" in smoke_code
     assert "expected_public_exports" in smoke_code
-    assert "v011_public_exports" in smoke_code
-    assert "frozen v0.2 contract" in smoke_code
+    assert "retired_name" in smoke_code
+    assert "rpacore.skill" in smoke_code
+    assert "frozen v0.3 contract" in smoke_code
     assert "ExecutionTransition" in smoke_code
     assert "transition_sink=transitions.append" in smoke_code
     assert 'transition_state_fields=("ran",)' in smoke_code
@@ -48,9 +49,8 @@ def test_frozen_wheel_export_inventories_match_the_checkout_contract() -> None:
     module = _load_script()
 
     assert module._FROZEN_PUBLIC_EXPORTS == tuple(rpacore.__all__)
-    assert set(module._V011_PUBLIC_EXPORTS).issubset(rpacore.__all__)
-    for public_name in module._V011_PUBLIC_EXPORTS:
-        getattr(rpacore, public_name)
+    assert not hasattr(rpacore, "Skill")
+    assert not hasattr(rpacore, "SkillReport")
 
 
 def test_typing_consumer_uses_scalar_accessor_types() -> None:
@@ -211,7 +211,7 @@ class TestInstalledWheelValidationScript:
                         examples_pytest=[],
                     )
 
-        assert len(calls) == 12
+        assert len(calls) == 13
         assert calls[0][0][1:3] == ["-m", "build"]
         assert calls[1][0][1:3] == ["-m", "venv"]
         assert calls[2][0][1:4] == ["-m", "pip", "install"]
@@ -220,11 +220,13 @@ class TestInstalledWheelValidationScript:
         assert calls[5][0][1:4] == ["-m", "mypy", "--no-incremental"]
         assert calls[6][0][-1] == "version"
         assert calls[7][0][-2:] == ["init", "installed_project"]
-        assert calls[8][0][-1] == "run"
-        assert calls[8][1] == work_dir / "outside" / "installed_project"
-        assert calls[9][0][-2:] == ["transaction", "list"]
-        assert calls[10][0][-3:] == ["transaction", "list", "--json"]
-        assert calls[11][0][-2:] == ["doctor", "--json"]
+        assert calls[8][0][1] == "-c"
+        assert "steps/greeting.py" in calls[8][0][2]
+        assert calls[9][0][-1] == "run"
+        assert calls[9][1] == work_dir / "outside" / "installed_project"
+        assert calls[10][0][-2:] == ["transaction", "list"]
+        assert calls[11][0][-3:] == ["transaction", "list", "--json"]
+        assert calls[12][0][-2:] == ["doctor", "--json"]
 
     def test_validate_installed_wheel_uses_prebuilt_wheel_dir(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -251,7 +253,7 @@ class TestInstalledWheelValidationScript:
                         examples_pytest=[],
                     )
 
-        assert len(calls) == 11
+        assert len(calls) == 12
         assert all(command[1:3] != ["-m", "build"] for command, _cwd in calls)
         assert calls[0][0][1:3] == ["-m", "venv"]
         assert calls[1][0][1:4] == ["-m", "pip", "install"]
@@ -316,7 +318,7 @@ class TestInstalledWheelValidationScript:
                         examples_pytest=["examples/rest_api_batch/tests"],
                     )
 
-        assert len(calls) == 14
+        assert len(calls) == 15
         assert calls[-2][0][-2:] == ["install", "pytest"]
         assert calls[-2][1] == work_dir / "outside"
         assert calls[-1][0][-3:] == ["pytest", "tests", "-q"]

@@ -12,25 +12,13 @@ from datetime import datetime, timezone
 from typing import Iterator, TextIO
 
 _LOGGER_NAME = "rpacore"
-LOG_FORMAT_VERSION = 1
-LOG_FORMAT_VERSION_V2 = 2
+LOG_FORMAT_VERSION = 3
 _RESERVED_RECORD_FIELDS = frozenset(logging.makeLogRecord({}).__dict__)
 _REDACTED_EXTRA_FIELDS = frozenset({"config", "credentials", "resources"})
-_V2_REDACTED_EXTRA_FIELDS = _REDACTED_EXTRA_FIELDS | frozenset(
+_STRUCTURED_REDACTED_EXTRA_FIELDS = _REDACTED_EXTRA_FIELDS | frozenset(
     {"state", "metadata", "path", "paths", "url", "urls"}
 )
 _CANONICAL_JSON_FIELDS = frozenset(
-    {
-        "log_format_version",
-        "timestamp",
-        "event",
-        "level",
-        "message",
-        "exception",
-        "stack",
-    }
-)
-_CANONICAL_V2_FIELDS = frozenset(
     {
         "log_format_version",
         "timestamp",
@@ -47,8 +35,8 @@ _LOG_CONTEXT_FIELDS = frozenset(
     {
         "transaction_id",
         "transaction_reference",
-        "skill_name",
-        "skill_execution_order",
+        "step_name",
+        "step_execution_order",
         "queue_item_id",
         "queue_reference",
         "worker_id",
@@ -60,7 +48,7 @@ _LOG_CONTEXT: ContextVar[dict[str, str | int]] = ContextVar(
     "rpacore_log_context",
     default={},
 )
-_V2_EVENT_NAMES = {
+_EVENT_NAMES = {
     "queue_run_completed": "rpacore.queue.run_completed",
 }
 _OWNED_HANDLER_ATTRIBUTE = "_rpacore_owned_handler"
@@ -115,67 +103,23 @@ class TextFormatter(logging.Formatter):
 
 
 class JsonFormatter(logging.Formatter):
-    """JSON formatter for rpacore events.
-
-    Version 1 remains the default compatibility format. Version 2 uses a
-    protected envelope and nests event attributes under ``attributes``.
-    """
-
-    def __init__(self, *, version: int = LOG_FORMAT_VERSION) -> None:
-        if version not in (LOG_FORMAT_VERSION, LOG_FORMAT_VERSION_V2):
-            raise ValueError(
-                "JSON log version must be 1 or 2, "
-                f"got {version!r}"
-            )
-        super().__init__()
-        self.version = version
+    """JSON log-v3 formatter with a protected structured envelope."""
 
     def format(self, record: logging.LogRecord) -> str:
         extra = _extra_fields(record)
         event = str(extra.pop("event", "log"))
-        if self.version == LOG_FORMAT_VERSION_V2:
-            return self._format_v2(record, event, extra)
-        payload: dict[str, object] = {
-            "log_format_version": LOG_FORMAT_VERSION,
-            "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
-            "event": event,
-            "level": record.levelname.lower(),
-            "message": record.getMessage(),
-        }
-        payload.update(_sanitized_extra_fields(extra))
-        if record.exc_info:
-            exception_type, exception, _ = record.exc_info
-            payload["exception"] = {
-                "type": (
-                    exception_type.__name__
-                    if exception_type is not None
-                    else "Exception"
-                ),
-                "message": "" if exception is None else str(exception),
-                "traceback": self.formatException(record.exc_info),
-            }
-        if record.stack_info:
-            payload["stack"] = self.formatStack(record.stack_info)
-        return json.dumps(payload, allow_nan=False, sort_keys=True, separators=(",", ":"))
-
-    def _format_v2(
-        self,
-        record: logging.LogRecord,
-        event: str,
-        extra: dict[str, object],
-    ) -> str:
         attributes = _sanitized_extra_fields(
             extra,
-            redacted_fields=_V2_REDACTED_EXTRA_FIELDS,
-            canonical_fields=_CANONICAL_V2_FIELDS,
+            redacted_fields=_STRUCTURED_REDACTED_EXTRA_FIELDS,
+            canonical_fields=_CANONICAL_JSON_FIELDS,
         )
         attributes.update(_LOG_CONTEXT.get())
         payload: dict[str, object] = {
-            "log_format_version": LOG_FORMAT_VERSION_V2,
+            "log_format_version": LOG_FORMAT_VERSION,
             "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
             "severity": record.levelname.lower(),
             "logger": record.name,
-            "event": _v2_event_name(event),
+            "event": _event_name(event),
             "message": record.getMessage(),
             "attributes": attributes,
         }
@@ -195,11 +139,11 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, allow_nan=False, sort_keys=True, separators=(",", ":"))
 
 
-def _v2_event_name(event: str) -> str:
-    """Return the documented v2 vocabulary name for a framework event."""
+def _event_name(event: str) -> str:
+    """Return the documented v3 vocabulary name for a framework event."""
     if event.startswith("rpacore."):
         return event
-    return _V2_EVENT_NAMES.get(event, f"rpacore.{event.replace('_', '.')}")
+    return _EVENT_NAMES.get(event, f"rpacore.{event.replace('_', '.')}")
 
 
 @contextmanager
@@ -288,7 +232,6 @@ def configure_logger(
     level: str | int = logging.INFO,
     fmt: str = "text",
     stream: TextIO | None = None,
-    json_version: int = LOG_FORMAT_VERSION,
 ) -> logging.Logger:
     """Configure and return an rpacore logger.
 
@@ -299,7 +242,7 @@ def configure_logger(
     if fmt == "text":
         formatter: logging.Formatter = TextFormatter()
     elif fmt == "json":
-        formatter = JsonFormatter(version=json_version)
+        formatter = JsonFormatter()
     else:
         raise ValueError(f"fmt must be 'text' or 'json', got {fmt!r}")
 

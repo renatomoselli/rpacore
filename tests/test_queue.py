@@ -25,7 +25,7 @@ from rpacore.queue import (
     SqliteQueue,
 )
 from rpacore.runner import run_queue_loop
-from rpacore.skill import Skill
+from rpacore.step import Step
 from rpacore.transaction import Transaction
 
 
@@ -1372,7 +1372,7 @@ class TestQueueProtocol:
 # TestRunQueueLoop
 # ---------------------------------------------------------------------------
 
-class _SuccessSkill(Skill):
+class _SuccessStep(Step):
     def __init__(self) -> None:
         super().__init__("success", 1)
 
@@ -1380,15 +1380,15 @@ class _SuccessSkill(Skill):
         pass
 
 
-class _FailSkill(Skill):
+class _FailStep(Step):
     def __init__(self) -> None:
         super().__init__("fail", 1)
 
     def execute(self, ctx: ProcessContext) -> None:
-        raise RuntimeError("skill boom")
+        raise RuntimeError("step boom")
 
 
-class _BusinessFailSkill(Skill):
+class _BusinessFailStep(Step):
     def __init__(self) -> None:
         super().__init__("business_fail", 1)
 
@@ -1396,7 +1396,7 @@ class _BusinessFailSkill(Skill):
         raise BusinessException("bad data", action=self.name)
 
 
-class _SystemFailSkill(Skill):
+class _SystemFailStep(Step):
     def __init__(self) -> None:
         super().__init__("system_fail", 1)
 
@@ -1421,7 +1421,7 @@ class TestRunQueueLoop:
 
         def build_transaction(qi: QueueItem) -> Transaction:
             t = Transaction(reference=qi.reference)
-            t.skills = [_SuccessSkill()]
+            t.steps = [_SuccessStep()]
             return t
 
         run_queue_loop(q, engine, build_transaction, config, credentials)
@@ -1437,7 +1437,7 @@ class TestRunQueueLoop:
 
         def build_transaction(qi: QueueItem) -> Transaction:
             t = Transaction(reference=qi.reference)
-            t.skills = [_FailSkill()]
+            t.steps = [_FailStep()]
             return t
 
         run_queue_loop(q, engine, build_transaction, config, credentials)
@@ -1452,7 +1452,7 @@ class TestRunQueueLoop:
         engine, credentials, config = self._make_ctx_parts()
 
         def build_transaction(qi: QueueItem) -> Transaction:
-            return Transaction(reference=qi.reference, skills=[_BusinessFailSkill()])
+            return Transaction(reference=qi.reference, steps=[_BusinessFailStep()])
 
         run_queue_loop(q, engine, build_transaction, config, credentials)
         stored = q.get_item(item.id)
@@ -1470,7 +1470,7 @@ class TestRunQueueLoop:
         stop_event = threading.Event()
 
         def build_transaction(qi: QueueItem) -> Transaction:
-            return Transaction(reference=qi.reference, skills=[_SystemFailSkill()])
+            return Transaction(reference=qi.reference, steps=[_SystemFailStep()])
 
         run_queue_loop(
             q,
@@ -1495,7 +1495,7 @@ class TestRunQueueLoop:
         stop_event = threading.Event()
 
         def build_transaction(qi: QueueItem) -> Transaction:
-            return Transaction(reference=qi.reference, skills=[_BusinessFailSkill()])
+            return Transaction(reference=qi.reference, steps=[_BusinessFailStep()])
 
         run_queue_loop(
             q,
@@ -1519,7 +1519,7 @@ class TestRunQueueLoop:
         engine, credentials, config = self._make_ctx_parts()
         captured: list[dict] = []
 
-        class _CaptureSkill(Skill):
+        class _CaptureStep(Step):
             def __init__(self) -> None:
                 super().__init__("capture", 1)
 
@@ -1528,7 +1528,7 @@ class TestRunQueueLoop:
 
         def build_transaction(item: QueueItem) -> Transaction:
             t = Transaction(reference=item.reference)
-            t.skills = [_CaptureSkill()]
+            t.steps = [_CaptureStep()]
             return t
 
         run_queue_loop(q, engine, build_transaction, config, credentials)
@@ -1549,7 +1549,7 @@ class TestRunQueueLoop:
 
         def build_transaction(qi: QueueItem) -> Transaction:
             t = Transaction(reference=qi.reference)
-            t.skills = [_SuccessSkill()]
+            t.steps = [_SuccessStep()]
             return t
 
         run_queue_loop(q, engine, build_transaction, config, credentials, worker_id="test-worker")
@@ -1569,7 +1569,7 @@ class TestRunQueueLoop:
 
         def build_transaction(qi: QueueItem) -> Transaction:
             t = Transaction(reference=qi.reference)
-            t.skills = [_SuccessSkill()]
+            t.steps = [_SuccessStep()]
             return t
 
         run_queue_loop(q, engine, build_transaction, config, credentials)
@@ -1595,7 +1595,7 @@ class TestRunQueueLoop:
 
         def build_transaction(qi: QueueItem) -> Transaction:
             t = Transaction(reference=qi.reference)
-            t.skills = [_SuccessSkill()]
+            t.steps = [_SuccessStep()]
             return t
 
         run_queue_loop(q, engine, build_transaction, config, credentials, notifiers=[_RecordingNotifier()])
@@ -1610,7 +1610,7 @@ class TestRunQueueLoop:
 
         def build_transaction(qi: QueueItem) -> Transaction:
             t = Transaction(reference=qi.reference)
-            t.skills = [_SuccessSkill()]
+            t.steps = [_SuccessStep()]
             return t
 
         # Should not raise even though no notifiers are wired.
@@ -1633,7 +1633,7 @@ class TestRunQueueLoop:
 
         def build_transaction(qi: QueueItem) -> Transaction:
             t = Transaction(reference=qi.reference)
-            t.skills = [_SuccessSkill()]
+            t.steps = [_SuccessStep()]
             return t
 
         def after_item(item: QueueItem, tx: Transaction | None, err: Exception | None) -> None:

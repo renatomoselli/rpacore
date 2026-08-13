@@ -20,7 +20,7 @@ For roadmap work, when the private planning tree exists, read `.internal/plans/R
 
 The user request defines the desired outcome; the current task defines its boundary. Live `rpacore/`, tests, public docs, and installed/released artifacts define actual behavior. Reconcile disagreements within scope or report the exact blocker—never silently choose one source.
 
-Ignored reviews/evidence are inputs only; reproduce findings against the live tree. `.rpiv/` belongs to the agent harness, while framework validation output belongs under `validation-artifacts/`.
+Ignored reviews/evidence are inputs only; reproduce findings against the live tree.
 
 ## Hard stops
 
@@ -39,7 +39,7 @@ Ignored reviews/evidence are inputs only; reproduce findings against the live tr
 - Framework code belongs in `rpacore/`. Repository `examples/` are integration fixtures; fuller/domain automation belongs in user projects or the examples repository.
 - Keep public APIs small, typed, explicit, and primarily exported from top-level `rpacore`; do not expose implementation submodules accidentally.
 - Prefer flat, concrete, synchronous, visible control flow. Add abstractions only after a real repeated use case proves the boundary.
-- Standard library is the default, not dogma. A runtime dependency requires a documented correctness guarantee, Windows behavior, packaging/transitive cost, and skill-author impact.
+- Standard library is the default, not dogma. A runtime dependency requires a documented correctness guarantee, Windows behavior, packaging/transitive cost, and step-author impact.
 - Keep business versus system failure classification explicit; never catch a failure merely to report success.
 - Durable state/metadata remain JSON-safe; runtime handles stay outside durable state.
 - Queue delivery is at least once. Preserve claim/revision fencing, attempt identity, poison disposition, checkpoint truth, and idempotent side effects.

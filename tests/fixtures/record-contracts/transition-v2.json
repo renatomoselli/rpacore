@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "transition_id": "transition-001",
+  "sequence": 3,
+  "occurred_at": "2026-07-27T12:00:01+00:00",
+  "event": "step_succeeded",
+  "transaction_id": "transaction-v3",
+  "transaction_reference": "fixture",
+  "definition_identity": "fixture/v3",
+  "transaction_status": "in_progress",
+  "execution_pass": 1,
+  "step_name": "fixture-step",
+  "step_execution_order": 1,
+  "step_status": "successful",
+  "outcome_category": "unknown",
+  "failure_code": "",
+  "retry_recommended": null,
+  "checkpoint_state": {"invoice": "001"}
+}

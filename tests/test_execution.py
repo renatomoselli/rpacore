@@ -17,7 +17,7 @@ from rpacore import (
     OutcomeCategory,
     ProcessContext,
     RetryDisposition,
-    Skill,
+    Step,
     Status,
     SystemException,
     Transaction,
@@ -26,18 +26,18 @@ from rpacore import (
 )
 
 
-class _SuccessSkill(Skill):
+class _SuccessStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         ctx.state["done"] = True
 
 
-class _ResourceSkill(Skill):
+class _ResourceStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         ctx.state["resource"] = ctx.resources["session"]
         ctx.resources["mutated"] = True
 
 
-class _SystemThenSuccessSkill(Skill):
+class _SystemThenSuccessStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         attempts = int(ctx.state.get("attempts", 0)) + 1
         ctx.state["attempts"] = attempts
@@ -45,15 +45,15 @@ class _SystemThenSuccessSkill(Skill):
             raise SystemException("try again", action=self.name)
 
 
-class _BusinessFailSkill(Skill):
+class _BusinessFailStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         raise BusinessException("bad input", action=self.name)
 
 
-def _transaction(*skills: Skill) -> Transaction:
+def _transaction(*steps: Step) -> Transaction:
     return Transaction(
         reference="tx",
-        skills=list(skills),
+        steps=list(steps),
         definition_identity="tests.execution/v1",
     )
 
@@ -71,7 +71,7 @@ class TestExecuteTransaction:
         db_path = tmp_path / "rpacore.db"
         transaction = Transaction(
             reference="unidentified",
-            skills=[_SuccessSkill("step", 1)],
+            steps=[_SuccessStep("step", 1)],
         )
 
         with pytest.raises(
@@ -86,7 +86,7 @@ class TestExecuteTransaction:
 
     def test_transaction_db_path_persists_strict_checkpoints(self, tmp_path: Path) -> None:
         db_path = tmp_path / "rpacore.db"
-        transaction = _transaction(_SuccessSkill("step", 1))
+        transaction = _transaction(_SuccessStep("step", 1))
 
         execute_transaction(transaction, transaction_db_path=db_path)
 
@@ -95,11 +95,11 @@ class TestExecuteTransaction:
         assert loaded.outcome_category is OutcomeCategory.SUCCESSFUL
         assert loaded.retry_disposition is RetryDisposition.NOT_APPLICABLE
         assert loaded.state == {"done": True}
-        assert loaded.skills[0].status is Status.SUCCESSFUL
+        assert loaded.steps[0].status is Status.SUCCESSFUL
 
     def test_transaction_db_path_accepts_string_paths(self, tmp_path: Path) -> None:
         db_path = tmp_path / "rpacore.db"
-        transaction = _transaction(_SuccessSkill("step", 1))
+        transaction = _transaction(_SuccessStep("step", 1))
 
         execute_transaction(transaction, transaction_db_path=str(db_path))
 
@@ -112,7 +112,7 @@ class TestExecuteTransaction:
     ) -> None:
         calls = 0
         sleeps: list[float] = []
-        transaction = _transaction(_SuccessSkill("step", 1))
+        transaction = _transaction(_SuccessStep("step", 1))
 
         def _flaky_save_transaction(
             transaction: Transaction,
@@ -138,7 +138,7 @@ class TestExecuteTransaction:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         calls = 0
-        transaction = _transaction(_SuccessSkill("step", 1))
+        transaction = _transaction(_SuccessStep("step", 1))
 
         def _fail_save_transaction(
             transaction: Transaction,
@@ -162,7 +162,7 @@ class TestExecuteTransaction:
     ) -> None:
         calls = 0
         sleeps: list[float] = []
-        transaction = _transaction(_SuccessSkill("step", 1))
+        transaction = _transaction(_SuccessStep("step", 1))
 
         def _busy_save_transaction(
             transaction: Transaction,
@@ -188,7 +188,7 @@ class TestExecuteTransaction:
     ) -> None:
         calls = 0
         sleeps: list[float] = []
-        transaction = _transaction(_SuccessSkill("step", 1))
+        transaction = _transaction(_SuccessStep("step", 1))
         memory_error = MemoryError("out of memory")
 
         def _fail_save_transaction(
@@ -210,7 +210,7 @@ class TestExecuteTransaction:
         assert sleeps == []
 
     def test_checkpoint_and_transaction_db_path_are_mutually_exclusive(self, tmp_path: Path) -> None:
-        transaction = _transaction(_SuccessSkill("step", 1))
+        transaction = _transaction(_SuccessStep("step", 1))
 
         with pytest.raises(ValueError, match="mutually exclusive"):
             execute_transaction(
@@ -220,7 +220,7 @@ class TestExecuteTransaction:
             )
 
     def test_custom_checkpoint_still_controls_persistence_boundary(self) -> None:
-        transaction = _transaction(_SuccessSkill("step", 1))
+        transaction = _transaction(_SuccessStep("step", 1))
         statuses: list[Status] = []
 
         execute_transaction(transaction, checkpoint=lambda tx: statuses.append(tx.status))
@@ -229,7 +229,7 @@ class TestExecuteTransaction:
         assert statuses[-1] is Status.SUCCESSFUL
 
     def test_omitted_checkpoint_runs_in_memory(self) -> None:
-        transaction = _transaction(_SuccessSkill("step", 1))
+        transaction = _transaction(_SuccessStep("step", 1))
 
         execute_transaction(transaction)
 
@@ -237,7 +237,7 @@ class TestExecuteTransaction:
         assert transaction.state == {"done": True}
 
     def test_configured_engine_is_used(self) -> None:
-        transaction = _transaction(_SystemThenSuccessSkill("flaky", 1))
+        transaction = _transaction(_SystemThenSuccessStep("flaky", 1))
 
         execute_transaction(transaction, engine=Engine(max_retries=1))
 
@@ -246,7 +246,7 @@ class TestExecuteTransaction:
 
     def test_resource_scope_populates_context_resources(self) -> None:
         resource = "browser-session"
-        transaction = _transaction(_ResourceSkill("step", 1))
+        transaction = _transaction(_ResourceStep("step", 1))
 
         execute_transaction(transaction, resource_scope=_resource_scope(resource))
 
@@ -255,7 +255,7 @@ class TestExecuteTransaction:
 
     def test_resource_scope_mapping_is_shallow_copied(self) -> None:
         resources = {"session": "shared"}
-        transaction = _transaction(_ResourceSkill("step", 1))
+        transaction = _transaction(_ResourceStep("step", 1))
 
         @contextmanager
         def _scope() -> Iterator[dict[str, object]]:
@@ -268,7 +268,7 @@ class TestExecuteTransaction:
     def test_resource_scope_none_preserves_empty_resources(self) -> None:
         seen: list[dict[str, object]] = []
 
-        class _CaptureSkill(Skill):
+        class _CaptureStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 seen.append(dict(ctx.resources))
 
@@ -276,14 +276,14 @@ class TestExecuteTransaction:
         def _scope() -> Iterator[None]:
             yield None
 
-        execute_transaction(_transaction(_CaptureSkill("step", 1)), resource_scope=_scope())
+        execute_transaction(_transaction(_CaptureStep("step", 1)), resource_scope=_scope())
 
         assert seen == [{}]
 
-    def test_invalid_resource_scope_yield_raises_before_skill_execution(self) -> None:
+    def test_invalid_resource_scope_yield_raises_before_step_execution(self) -> None:
         ran = False
 
-        class _TrackSkill(Skill):
+        class _TrackStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 nonlocal ran
                 ran = True
@@ -293,15 +293,15 @@ class TestExecuteTransaction:
             yield "invalid"
 
         with pytest.raises(TypeError) as exc_info:
-            execute_transaction(_transaction(_TrackSkill("step", 1)), resource_scope=_scope())
+            execute_transaction(_transaction(_TrackStep("step", 1)), resource_scope=_scope())
 
         assert str(exc_info.value) == "resource_scope yield expected dict | None; got str value='invalid'"
         assert ran is False
 
-    def test_resource_scope_setup_failure_prevents_skill_execution(self) -> None:
+    def test_resource_scope_setup_failure_prevents_step_execution(self) -> None:
         ran = False
 
-        class _TrackSkill(Skill):
+        class _TrackStep(Step):
             def execute(self, ctx: ProcessContext) -> None:
                 nonlocal ran
                 ran = True
@@ -312,7 +312,7 @@ class TestExecuteTransaction:
             yield {}
 
         with pytest.raises(RuntimeError, match="setup failed"):
-            execute_transaction(_transaction(_TrackSkill("step", 1)), resource_scope=_scope())
+            execute_transaction(_transaction(_TrackStep("step", 1)), resource_scope=_scope())
 
         assert ran is False
 
@@ -332,7 +332,7 @@ class TestExecuteTransaction:
 
         with pytest.raises(RuntimeError, match="checkpoint failed"):
             execute_transaction(
-                _transaction(_SuccessSkill("step", 1)),
+                _transaction(_SuccessStep("step", 1)),
                 checkpoint=_fail_checkpoint,
                 resource_scope=_scope(),
             )
@@ -340,7 +340,7 @@ class TestExecuteTransaction:
         assert events == ["setup", "cleanup"]
 
     def test_resource_scope_cleanup_failure_propagates_after_transaction_outcome(self) -> None:
-        transaction = _transaction(_BusinessFailSkill("step", 1))
+        transaction = _transaction(_BusinessFailStep("step", 1))
 
         @contextmanager
         def _scope() -> Iterator[dict[str, object]]:
@@ -367,7 +367,7 @@ class TestExecuteTransaction:
 
         with pytest.raises(RuntimeError, match="cleanup failed") as exc_info:
             execute_transaction(
-                _transaction(_SuccessSkill("step", 1)),
+                _transaction(_SuccessStep("step", 1)),
                 checkpoint=_fail_checkpoint,
                 resource_scope=_scope(),
             )
