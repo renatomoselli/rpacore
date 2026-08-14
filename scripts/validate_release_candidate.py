@@ -79,9 +79,17 @@ PYTEST_COUNT_PATTERN = re.compile(
     r"\b(?P<count>\d+)\s+(?P<status>passed|failed|skipped|xfailed|xpassed|errors?)\b"
 )
 FROZEN_EXAMPLE_WHEEL_MATRIX = (
+    "acme_work_items",
+    "checkpoint_resume",
     "database_reconciliation",
     "excel_reorganization",
+    "file_inbox_processor",
+    "git_repo_health_monitor",
     "json_event_log_processor",
+    "pdf_invoice_extraction",
+    "rest_api_batch",
+    "rpa_challenge",
+    "windows_calculator",
 )
 PYTEST_COUNT_STATUSES = frozenset(
     {"passed", "failed", "skipped", "xfailed", "xpassed", "errors"}
@@ -543,7 +551,7 @@ def _manifest_result(
     failed_command_count = sum(1 for command in commands if command.exit_code != 0)
     dirty_repository_count = sum(1 for repo in repos if repo.dirty)
     return {
-        "status": "fail" if failed_command_count else "pass",
+        "status": "fail" if failed_command_count or dirty_repository_count else "pass",
         "command_count": len(commands),
         "failed_command_count": failed_command_count,
         "dirty_repository_count": dirty_repository_count,
@@ -888,6 +896,19 @@ def _run_examples_wheel_matrix(
     result = evidence.get("result")
     if not isinstance(result, dict) or result.get("status") != "pass":
         raise ValidationError("examples wheel matrix did not pass")
+    examples_evidence = evidence.get("examples")
+    actual_examples = (
+        [item.get("name") for item in examples_evidence if isinstance(item, dict)]
+        if isinstance(examples_evidence, list)
+        else []
+    )
+    expected_examples = list(FROZEN_EXAMPLE_WHEEL_MATRIX)
+    if (
+        actual_examples != expected_examples
+        or result.get("example_count") != len(expected_examples)
+        or any(item.get("status") != "pass" for item in examples_evidence)
+    ):
+        raise ValidationError("examples wheel matrix did not cover the frozen examples exactly")
     return command_record, {
         "status": result["status"],
         "evidence_path": str(manifest_path),
@@ -1293,7 +1314,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = args.output_dir or (work_dir / "validation-results")
     work_dir.mkdir(parents=True, exist_ok=True)
     try:
-        validate_release_candidate(
+        manifest = validate_release_candidate(
             repo_root=args.repo_root.resolve(),
             examples_repo=args.examples_repo.resolve() if args.examples_repo else None,
             work_dir=work_dir.resolve(),
@@ -1312,7 +1333,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if owns_work_dir and args.output_dir is not None and not args.keep_work_dir:
             _remove_tree(work_dir)
-    return 0
+    return 0 if manifest["result"]["status"] == "pass" else 1
 
 
 if __name__ == "__main__":

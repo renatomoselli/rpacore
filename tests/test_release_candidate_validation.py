@@ -31,6 +31,24 @@ def _load_script():
     return module
 
 
+def test_frozen_examples_wheel_matrix_covers_every_v03_example() -> None:
+    module = _load_script()
+
+    assert module.FROZEN_EXAMPLE_WHEEL_MATRIX == (
+        "acme_work_items",
+        "checkpoint_resume",
+        "database_reconciliation",
+        "excel_reorganization",
+        "file_inbox_processor",
+        "git_repo_health_monitor",
+        "json_event_log_processor",
+        "pdf_invoice_extraction",
+        "rest_api_batch",
+        "rpa_challenge",
+        "windows_calculator",
+    )
+
+
 def test_examples_wheel_matrix_uses_the_candidate_wheel_and_records_matching_hash(tmp_path: Path) -> None:
     module = _load_script()
     framework_copy = tmp_path / "source" / "rpacore"
@@ -49,7 +67,14 @@ def test_examples_wheel_matrix_uses_the_candidate_wheel_and_records_matching_has
             json.dumps(
                 {
                     "wheel": {"sha256": module._sha256(wheel)},
-                    "result": {"status": "pass"},
+                    "result": {
+                        "status": "pass",
+                        "example_count": len(module.FROZEN_EXAMPLE_WHEEL_MATRIX),
+                    },
+                    "examples": [
+                        {"name": name, "status": "pass"}
+                        for name in module.FROZEN_EXAMPLE_WHEEL_MATRIX
+                    ],
                 }
             ),
             encoding="utf-8",
@@ -85,6 +110,52 @@ def test_examples_wheel_matrix_uses_the_candidate_wheel_and_records_matching_has
         "wheel_sha256": module._sha256(wheel),
         "examples": list(module.FROZEN_EXAMPLE_WHEEL_MATRIX),
     }
+
+
+def test_examples_wheel_matrix_rejects_incomplete_passing_evidence(tmp_path: Path) -> None:
+    module = _load_script()
+    framework_copy = tmp_path / "source" / "rpacore"
+    examples_copy = tmp_path / "source" / "rpacore-examples"
+    wheel = tmp_path / "wheelhouse" / "rpacore-0.1.1-py3-none-any.whl"
+    output_dir = tmp_path / "out"
+    framework_copy.mkdir(parents=True)
+    examples_copy.mkdir(parents=True)
+    wheel.parent.mkdir()
+    wheel.write_bytes(b"candidate-wheel")
+
+    def fake_run(name, command, *, cwd, allowed_roots, env):
+        evidence_path = output_dir / "examples-wheel-validation" / "examples-wheel-validation.json"
+        evidence_path.parent.mkdir(parents=True)
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "wheel": {"sha256": module._sha256(wheel)},
+                    "result": {"status": "pass", "example_count": 1},
+                    "examples": [{"name": module.FROZEN_EXAMPLE_WHEEL_MATRIX[0], "status": "pass"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return module.CommandRecord(
+            name=name,
+            command=command,
+            cwd=str(cwd),
+            exit_code=0,
+            duration_seconds=0.0,
+        )
+
+    with patch.object(module, "_run", side_effect=fake_run):
+        with pytest.raises(module.ValidationError, match="did not cover the frozen examples"):
+            module._run_examples_wheel_matrix(
+                framework_copy=framework_copy,
+                examples_copy=examples_copy,
+                wheel=wheel,
+                expected_wheel_sha256=module._sha256(wheel),
+                work_dir=tmp_path / "work",
+                output_dir=output_dir,
+                allowed_roots=(tmp_path,),
+                env={},
+            )
 
 
 def test_examples_wheel_matrix_rejects_a_wheel_changed_after_artifact_hash(tmp_path: Path) -> None:
@@ -675,6 +746,26 @@ class TestReleaseCandidateValidationScript:
             "status": "fail",
             "command_count": 2,
             "failed_command_count": 1,
+            "dirty_repository_count": 1,
+        }
+
+    def test_manifest_result_fails_when_only_repository_state_is_dirty(self) -> None:
+        module = _load_script()
+        commands = [
+            module.CommandRecord(
+                name="passed",
+                command=["cmd"],
+                cwd=".",
+                exit_code=0,
+                duration_seconds=0.01,
+            )
+        ]
+        repos = [module.RepoState("rpacore", ".", "abc", "main", True, ["M file"])]
+
+        assert module._manifest_result(commands=commands, repos=repos) == {
+            "status": "fail",
+            "command_count": 1,
+            "failed_command_count": 0,
             "dirty_repository_count": 1,
         }
 
@@ -1858,7 +1949,7 @@ name = "rpacore"
         with patch.object(
             module,
             "validate_release_candidate",
-            return_value={"ok": True},
+            return_value={"result": {"status": "pass"}},
         ) as validate:
             result = module.main(
                 [
@@ -1876,6 +1967,29 @@ name = "rpacore"
         assert work_dir.exists()
         assert validate.call_args.kwargs["prebuilt_artifacts_dir"] is None
 
+    def test_main_returns_failure_for_a_failed_manifest(self, tmp_path: Path) -> None:
+        module = _load_script()
+        work_dir = tmp_path / "work"
+        output_dir = tmp_path / "validation-results"
+
+        with patch.object(
+            module,
+            "validate_release_candidate",
+            return_value={"result": {"status": "fail"}},
+        ):
+            result = module.main(
+                [
+                    "--work-dir",
+                    str(work_dir),
+                    "--output-dir",
+                    str(output_dir),
+                    "--repo-root",
+                    str(tmp_path),
+                ]
+            )
+
+        assert result == 1
+
     def test_main_defaults_output_to_public_validation_artifacts_dir(self, tmp_path: Path) -> None:
         module = _load_script()
         work_dir = tmp_path / "owned-work"
@@ -1884,7 +1998,7 @@ name = "rpacore"
             with patch.object(
                 module,
                 "validate_release_candidate",
-                return_value={"ok": True},
+                return_value={"result": {"status": "pass"}},
             ) as validate:
                 result = module.main(["--repo-root", str(tmp_path)])
 
@@ -1903,7 +2017,11 @@ name = "rpacore"
         artifacts_dir = tmp_path / "artifacts"
         artifacts_dir.mkdir()
 
-        with patch.object(module, "validate_release_candidate", return_value={"ok": True}) as validate:
+        with patch.object(
+            module,
+            "validate_release_candidate",
+            return_value={"result": {"status": "pass"}},
+        ) as validate:
             result = module.main(
                 [
                     "--repo-root",
@@ -1926,7 +2044,11 @@ name = "rpacore"
         output_dir = tmp_path / "validation-results"
 
         with patch.object(module.tempfile, "mkdtemp", return_value=str(work_dir)):
-            with patch.object(module, "validate_release_candidate", return_value={"ok": True}):
+            with patch.object(
+                module,
+                "validate_release_candidate",
+                return_value={"result": {"status": "pass"}},
+            ):
                 result = module.main(["--output-dir", str(output_dir), "--repo-root", str(tmp_path)])
 
         assert result == 0
