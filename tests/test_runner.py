@@ -2963,6 +2963,15 @@ class TestQueueLeaseHeartbeat:
         queue.add(first)
         queue.add(second)
         monkeypatch.setattr(runner_module, "_lease_renewal_interval", lambda queue: 0.01)
+        captured_heartbeats: list[runner_module._LeaseHeartbeat] = []
+        original_start = runner_module._start_lease_heartbeat
+
+        def _capture_start(*args, **kwargs):
+            heartbeat = original_start(*args, **kwargs)
+            captured_heartbeats.append(heartbeat)
+            return heartbeat
+
+        monkeypatch.setattr(runner_module, "_start_lease_heartbeat", _capture_start)
         started = threading.Event()
         release = threading.Event()
         summaries: list[QueueRunSummary] = []
@@ -3007,7 +3016,14 @@ class TestQueueLeaseHeartbeat:
                 conn.commit()
             finally:
                 conn.close()
-            time.sleep(0.05)
+            deadline = time.monotonic() + 2
+            while (
+                not captured_heartbeats
+                or not isinstance(captured_heartbeats[0].error, QueueLeaseLostError)
+            ) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert captured_heartbeats
+            assert isinstance(captured_heartbeats[0].error, QueueLeaseLostError)
             release.set()
             worker.join(timeout=2)
 
