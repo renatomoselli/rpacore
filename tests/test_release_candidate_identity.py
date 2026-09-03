@@ -277,6 +277,20 @@ def test_release_candidate_python_matrix_matches_package_and_support_policy() ->
     assert supported_versions == workflow_versions
 
 
+def test_release_candidate_platform_cells_keep_artifacts_outside_checkout() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release-candidate.yml"
+    ).read_text(encoding="utf-8")
+    platform_cell = workflow.split("  platform-cell:", 1)[1].split("  examples-wheel:", 1)[0]
+
+    assert "path: ${{ runner.temp }}/artifact-set" in platform_cell
+    assert 'ARTIFACT_SET_DIR: ${{ runner.temp }}/artifact-set' in platform_cell
+    assert "root=pathlib.Path(os.environ['ARTIFACT_SET_DIR'])" in platform_cell
+    assert '--prebuilt-artifacts-dir "${{ runner.temp }}/artifact-set"' in platform_cell
+    assert "path: artifact-set" not in platform_cell
+    assert "--prebuilt-artifacts-dir artifact-set" not in platform_cell
+
+
 def test_release_toolchain_is_pinned_and_shared_by_ci_candidate_and_publisher() -> None:
     root = Path(__file__).resolve().parents[1]
     requirements = (root / "requirements" / "release.txt").read_text(encoding="utf-8").splitlines()

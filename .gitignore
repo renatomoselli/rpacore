@@ -3,6 +3,9 @@
 Classes/
 .rpiv/
 
+# Local agent / navigation tooling state
+.codegraph/
+
 # Python
 __pycache__/
 *.py[cod]
