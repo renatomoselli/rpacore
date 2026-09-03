@@ -5,10 +5,8 @@ public APIs, packaging, generated project scaffolds, and public documentation.
 
 ## Supported Versions
 
-The latest public `0.2.x` release line receives compatibility and security fixes
-as maintainer availability permits. Local forks are not supported release lines.
-The unreleased `0.3.0` development line on `main` is not a published support
-line yet.
+The `0.3.x` release line receives compatibility and security fixes as
+maintainer availability permits. Local forks are not supported release lines.
 
 ## Supported Platforms
 

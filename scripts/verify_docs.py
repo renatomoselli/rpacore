@@ -29,7 +29,17 @@ SENSITIVE_PATTERNS = {
 
 PUBLIC_FORBIDDEN_PATTERNS = {
     r"pip install -e": "editable install instruction",
+    r"Current development version:": "mutable current-version banner",
+    r"Latest published release:": "mutable latest-release banner",
 }
+
+RETIRED_EXECUTION_VOCABULARY = re.compile(
+    r"\bSkillReport\b|rpacore\.skill\b|ordered_skills\b|failed_skills\b|"
+    r"datetime_occurred\b|stops_execution\b|\bskill_[A-Za-z0-9_]*\b|"
+    r"skills/|`stop`|\bskills?\b",
+    flags=re.IGNORECASE,
+)
+RETIRED_VOCABULARY_MIGRATION_DOC = Path("docs/v0.3-migration.md")
 
 MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -260,6 +270,34 @@ def _check_api_reference(root: Path, docs: list[Path]) -> list[Finding]:
     return findings
 
 
+def _check_retired_execution_vocabulary(root: Path, docs: list[Path]) -> list[Finding]:
+    findings: list[Finding] = []
+    for path in docs:
+        relative = path.relative_to(root)
+        if relative == RETIRED_VOCABULARY_MIGRATION_DOC:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in RETIRED_EXECUTION_VOCABULARY.finditer(text):
+            preceding = text[: match.start()].splitlines()
+            section = next(
+                (line[3:].strip() for line in reversed(preceding) if line.startswith("## ")),
+                "",
+            )
+            if relative == Path("CHANGELOG.md") and section.startswith("v0.3.0 - "):
+                continue
+            if relative == Path("docs/durability.md") and section == "Migrations":
+                continue
+            findings.append(
+                Finding(
+                    relative,
+                    _line_number(text, match.start()),
+                    "retired execution vocabulary outside a migration record: "
+                    f"{match.group(0).strip('`')}",
+                )
+            )
+    return findings
+
+
 def _release_version(root: Path) -> str:
     metadata = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     project = metadata.get("project")
@@ -338,7 +376,30 @@ def _check_release_version_docs(
         for line_number, heading_version, label in headings
         if label == "Unreleased"
     ]
-    if version != published_version:
+    if top_version != version:
+        # Release metadata is already inconsistent. Avoid cascading support-policy
+        # findings derived from a changelog state that cannot be authoritative.
+        if version != published_version and unreleased_headings != [(top_line, version)]:
+            findings.append(
+                Finding(
+                    Path("CHANGELOG.md"),
+                    top_line,
+                    f"expected exactly one Unreleased heading at the top for v{version}",
+                )
+            )
+        return findings
+
+    top_is_unreleased = top_label == "Unreleased"
+    top_is_dated = CHANGELOG_RELEASE_DATE.fullmatch(top_label) is not None
+    if not top_is_unreleased and not top_is_dated:
+        findings.append(
+            Finding(
+                Path("CHANGELOG.md"),
+                top_line,
+                "top changelog release label must be Unreleased or an ISO date",
+            )
+        )
+    elif top_is_unreleased:
         if unreleased_headings != [(top_line, version)]:
             findings.append(
                 Finding(
@@ -356,19 +417,12 @@ def _check_release_version_docs(
             )
         )
 
-    published_series = _release_series(published_version)
+    supported_version = version if top_is_dated else published_version
+    supported_series = _release_series(supported_version)
     development_series = _release_series(version)
     expected_text = {
-        Path("README.md"): (
-            f"Current development version: `{version}`",
-            f"Latest published release: `v{published_version}`",
-        ),
-        Path("SUPPORT.md"): (f"`{published_series}`",),
-        Path("SECURITY.md"): (f"| {published_series} | Yes |",),
-        Path("docs/README.md"): (
-            f"Current development version: `{version}`",
-            f"Latest published release: `v{published_version}`",
-        ),
+        Path("SUPPORT.md"): (f"`{supported_series}`",),
+        Path("SECURITY.md"): (f"| {supported_series} | Yes |",),
     }
     for relative, expected_values in expected_text.items():
         try:
@@ -383,7 +437,7 @@ def _check_release_version_docs(
                 findings.append(
                     Finding(relative, 1, f"release version documentation must contain: {expected}")
                 )
-        if relative == Path("SUPPORT.md") and development_series != published_series:
+        if relative == Path("SUPPORT.md") and development_series != supported_series:
             development_tokens = (version, development_series)
             for line_number, line in enumerate(text.splitlines(), start=1):
                 lowered = line.lower()
@@ -401,7 +455,7 @@ def _check_release_version_docs(
                     )
         if (
             relative in {Path("SUPPORT.md"), Path("SECURITY.md")}
-            and development_series != published_series
+            and development_series != supported_series
             and f"| {development_series} | Yes |" in text
         ):
             findings.append(
@@ -432,6 +486,12 @@ def verify_docs(root: Path, *, expected_release_version: str | None = None) -> l
     findings: list[Finding] = []
     findings.extend(_run_check("links", lambda: _check_links(root, docs)))
     findings.extend(_run_check("forbidden-patterns", lambda: _check_forbidden_patterns(root, docs)))
+    findings.extend(
+        _run_check(
+            "retired-execution-vocabulary",
+            lambda: _check_retired_execution_vocabulary(root, docs),
+        )
+    )
     findings.extend(_run_check("api-reference", lambda: _check_api_reference(root, docs)))
     findings.extend(
         _run_check(

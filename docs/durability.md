@@ -350,7 +350,7 @@ logs. Each `HistoryEntry` has a transaction-local `sequence`, UTC `timestamp`,
 closed `HistoryEvent`, resulting `status`, `retry_number`, and optional step
 identity.
 
-The v0.3.0 history vocabulary is closed:
+The history vocabulary is closed:
 
 - `transaction_started`
 - `step_started`
@@ -468,9 +468,6 @@ db_path = "queue.db"
 lease_timeout = 30
 max_retries = 3
 ```
-
-The old top-level `db_path` configuration key is rejected with a migration
-error. Rename it to `transaction_db_path`.
 
 When loaded from `config.toml`, relative `transaction_db_path` and
 `queue.db_path` values are resolved relative to the config file's directory.

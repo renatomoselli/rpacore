@@ -82,7 +82,7 @@ build for the same rehearsal. A standalone examples rerun must use
 For the full supported Windows and Linux matrix, use the manually dispatched
 **Release candidate** workflow with the exact framework and examples commits.
 Before artifact construction, that workflow verifies the frozen commit is the
-dispatched `main` head, verifies the frozen package version, unreleased changelog
+dispatched `main` head, verifies the frozen package version, dated changelog
 entry, and release tag against GitHub and PyPI, and runs the documentation
 verifier; an existing tag, release, package version, unavailable registry, or
 documentation mismatch stops the candidate. It also verifies the frozen examples

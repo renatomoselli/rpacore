@@ -42,8 +42,7 @@ max_retries = 3
 ```
 
 Relative `transaction_db_path`, `screenshot_dir`, and `queue.db_path` values are
-resolved relative to the config file. The removed top-level `db_path` key is
-rejected; use `transaction_db_path`. The exact empty `screenshot_dir = ""`
+resolved relative to the config file. The exact empty `screenshot_dir = ""`
 value remains unchanged and disables automatic screenshots. Whitespace-only
 values and the SQLite `:memory:` sentinel, with or without surrounding
 whitespace, are invalid screenshot directories.

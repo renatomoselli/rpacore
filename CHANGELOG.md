@@ -2,7 +2,7 @@
 
 All notable user-facing changes are recorded here.
 
-## v0.3.0 - Unreleased
+## v0.3.0 - 2026-09-03
 
 ### Added
 
@@ -150,7 +150,7 @@ All notable user-facing changes are recorded here.
   rollback journal for queue safety, and moved initial-transaction cleanup into
   persistence ownership.
 - Validated transaction wiring and all durable JSON data before initial
-  persistence, rejected skill-argument shape coercion and corrupt stored
+  persistence, rejected execution-argument shape coercion and corrupt stored
   arguments, and preserved history-proven downstream skips from stopping
   business failures during recovery.
 - Preserved exception and stack diagnostics in text and JSON logs, protected
@@ -196,9 +196,9 @@ deterministic Python automation.
   - `rpacore transaction show`
   - `rpacore transaction export --format json`
   - `rpacore transaction export --format ndjson`
-- Public top-level API for skills, transactions, engine execution, persistence,
-  recovery, queue processing, config, logging, reports, notifications,
-  credentials, and project manifests.
+- Public top-level API for execution steps, transactions, engine execution,
+  persistence, recovery, queue processing, config, logging, reports,
+  notifications, credentials, and project manifests.
 - SQLite transaction persistence with explicit schema versions and migrations.
 - SQLite queue provider with leases, reclaim behavior, retry accounting, and
   transaction binding.
@@ -231,8 +231,8 @@ deterministic Python automation.
 - RPA Core is not a sandbox; it executes user-authored Python.
 - There is no runtime AI behavior or AI dependency.
 - There is no managed execution service or remote worker protocol in v0.1.0.
-- There is no generic per-skill hard timeout or arbitrary cancellation.
-- There is no automatic skill discovery or configuration-defined pipeline model.
+- There is no generic per-step hard timeout or arbitrary cancellation.
+- There is no automatic step discovery or configuration-defined pipeline model.
 - Artifact records store paths and metadata, not file contents.
 
 ### Validation

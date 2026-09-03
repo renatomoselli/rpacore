@@ -1,9 +1,6 @@
 # API Reference
 
-The current `0.3.0` development API is exposed from the top-level `rpacore`
-package. The latest published API remains `v0.2.0`; use its
-[versioned API reference](https://github.com/renatomoselli/rpacore/blob/v0.2.0/docs/api.md)
-when working from the published package. For current development, prefer
+The supported API is exposed from the top-level `rpacore` package. Prefer
 imports such as:
 
 ```python

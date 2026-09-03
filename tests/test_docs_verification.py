@@ -36,8 +36,7 @@ def _write_minimal_repo(root: Path, *, release_metadata: bool = False) -> None:
     (root / "rpacore" / "__init__.py").write_text('__all__ = ["Engine"]\n', encoding="utf-8")
     if release_metadata:
         (root / "README.md").write_text(
-            "# Root\n\nCurrent development version: `0.3.0`\n\n"
-            "Latest published release: `v0.2.0`\n\n[Docs](docs/README.md)\n",
+            "# Root\n\n[Docs](docs/README.md)\n",
             encoding="utf-8",
         )
         (root / "CHANGELOG.md").write_text(
@@ -47,8 +46,7 @@ def _write_minimal_repo(root: Path, *, release_metadata: bool = False) -> None:
         (root / "SECURITY.md").write_text("# Security\n\n| Version | Supported |\n| --- | --- |\n| 0.2.x | Yes |\n", encoding="utf-8")
         (root / "SUPPORT.md").write_text("# Support\n\nThe latest public `0.2.x` release line.\n", encoding="utf-8")
         (root / "docs" / "README.md").write_text(
-            "# Docs\n\nCurrent development version: `0.3.0`\n\n"
-            "Latest published release: `v0.2.0`\n\n[API](api.md)\n",
+            "# Docs\n\n[API](api.md)\n",
             encoding="utf-8",
         )
         (root / "pyproject.toml").write_text('[project]\nversion = "0.3.0"\n', encoding="utf-8")
@@ -156,16 +154,6 @@ def test_verify_docs_reports_malformed_release_metadata_as_release_metadata_erro
 
 def test_verify_docs_accepts_published_steady_state(tmp_path: Path) -> None:
     _write_minimal_repo(tmp_path, release_metadata=True)
-    (tmp_path / "README.md").write_text(
-        "# Root\n\nCurrent development version: `0.3.0`\n\n"
-        "Latest published release: `v0.3.0`\n\n[Docs](docs/README.md)\n",
-        encoding="utf-8",
-    )
-    (tmp_path / "docs" / "README.md").write_text(
-        "# Docs\n\nCurrent development version: `0.3.0`\n\n"
-        "Latest published release: `v0.3.0`\n\n[API](api.md)\n",
-        encoding="utf-8",
-    )
     (tmp_path / "CHANGELOG.md").write_text(
         "# Changelog\n\n## v0.3.0 - 2026-08-01\n\n## v0.2.0 - 2026-07-29\n",
         encoding="utf-8",
@@ -180,6 +168,14 @@ def test_verify_docs_accepts_published_steady_state(tmp_path: Path) -> None:
     )
 
     assert verify_docs(tmp_path) == []
+
+
+def test_verify_docs_does_not_require_release_versions_in_reader_docs(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path, release_metadata=True)
+
+    findings = verify_docs(tmp_path)
+
+    assert findings == []
 
 
 def test_verify_docs_rejects_duplicate_development_changelog_heading(tmp_path: Path) -> None:
@@ -461,6 +457,76 @@ def test_verify_docs_reports_public_forbidden_patterns(tmp_path: Path) -> None:
     assert [finding.message for finding in findings] == [
         "forbidden public-doc pattern: editable install instruction"
     ]
+
+
+def test_verify_docs_rejects_mutable_release_status_banners(tmp_path: Path) -> None:
+    _write_minimal_repo(tmp_path)
+    (tmp_path / "README.md").write_text(
+        "# Root\n\nCurrent development version: `0.3.0`\n",
+        encoding="utf-8",
+    )
+
+    findings = verify_docs(tmp_path)
+
+    assert [finding.message for finding in findings] == [
+        "forbidden public-doc pattern: mutable current-version banner"
+    ]
+
+
+def test_verify_docs_rejects_retired_execution_vocabulary_in_ordinary_docs(
+    tmp_path: Path,
+) -> None:
+    _write_minimal_repo(tmp_path)
+    (tmp_path / "docs" / "design-note.md").write_text(
+        "# Design Note\n\nUse `Transaction.skills` for execution.\n",
+        encoding="utf-8",
+    )
+
+    findings = verify_docs(tmp_path)
+
+    assert [finding.message for finding in findings] == [
+        "retired execution vocabulary outside a migration record: skills"
+    ]
+
+
+def test_verify_docs_does_not_match_retired_vocabulary_inside_larger_names(
+    tmp_path: Path,
+) -> None:
+    _write_minimal_repo(tmp_path)
+    (tmp_path / "docs" / "design-note.md").write_text(
+        "# Design Note\n\nA reskill_worker setting belongs to another tool.\n",
+        encoding="utf-8",
+    )
+
+    assert verify_docs(tmp_path) == []
+
+
+def test_verify_docs_limits_durability_exception_to_migration_section(
+    tmp_path: Path,
+) -> None:
+    _write_minimal_repo(tmp_path)
+    (tmp_path / "docs" / "durability.md").write_text(
+        "# Durability\n\n## Runtime\n\nUse `skills` during execution.\n",
+        encoding="utf-8",
+    )
+
+    findings = verify_docs(tmp_path)
+
+    assert [finding.message for finding in findings] == [
+        "retired execution vocabulary outside a migration record: skills"
+    ]
+
+
+def test_verify_docs_allows_retired_vocabulary_in_durability_migration_section(
+    tmp_path: Path,
+) -> None:
+    _write_minimal_repo(tmp_path)
+    (tmp_path / "docs" / "durability.md").write_text(
+        "# Durability\n\n## Migrations\n\nVersion 1 stores `skills`.\n",
+        encoding="utf-8",
+    )
+
+    assert verify_docs(tmp_path) == []
 
 
 def test_verify_docs_reports_missing_link_targets(tmp_path: Path) -> None:

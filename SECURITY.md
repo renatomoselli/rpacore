@@ -11,11 +11,8 @@ Security fixes target the latest public release line.
 
 | Version | Supported |
 | --- | --- |
-| 0.2.x | Yes |
+| 0.3.x | Yes |
 | earlier release lines | No |
-
-The unreleased `0.3.0` development line on `main` is not a published support
-line. This table changes only after that version is released.
 
 ## Reporting a Vulnerability
 

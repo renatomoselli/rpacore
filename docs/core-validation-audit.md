@@ -13,7 +13,7 @@ hide important behavior.
 
 | Area | Decision | Rationale |
 | --- | --- | --- |
-| `rpacore.config` | Keep local validation. | Config loading normalizes values (`log_level`, `log_format`), rejects legacy `db_path`, resolves paths relative to the config file, and checks finite numeric values. The public helper does not express those rules without local follow-up logic that would make the code less clear. |
+| `rpacore.config` | Keep local validation. | Config loading normalizes values (`log_level`, `log_format`), rejects ambiguous transaction-path configuration, resolves paths relative to the config file, and checks finite numeric values. The public helper does not express those rules without local follow-up logic that would make the code less clear. |
 | `rpacore.credentials` | Keep local validation. | `build_credential_provider()` validates a single provider name, not a config mapping. Direct `type_error` / `value_error` calls are clearer than wrapping the value in a temporary dict. |
 | `rpacore.notify` | Keep local validation. | Email and webhook validation is nested and has notifier-specific policy, including URL scheme checks, embedded credential redaction, timeout ranges, and screenshot attachment behavior. Keeping explicit checks preserves the security-sensitive error paths. |
 | `rpacore.queue` | Migrated plain config type/default checks. | `SqliteQueue` uses `optional_config()` for `db_path`, `lease_timeout`, and `max_retries`, then keeps local range checks so existing messages and retry policy stay unchanged. |

@@ -29,7 +29,7 @@ def _repo(tmp_path: Path, *, changelog: bool = True) -> Path:
     (root / "pyproject.toml").write_text("[project]\nversion = '0.3.0'\n", encoding="utf-8")
     if changelog:
         (root / "CHANGELOG.md").write_text(
-            "## v0.3.0 - Unreleased\n\n## v0.2.0 - 2026-07-29\n",
+            "## v0.3.0 - 2026-09-03\n\n## v0.2.0 - 2026-07-29\n",
             encoding="utf-8",
         )
     return root
@@ -88,11 +88,11 @@ def test_release_identity_canonicalizes_uppercase_commit_input(tmp_path: Path) -
     assert result["source"] == {"core_commit": COMMIT}
 
 
-def test_release_identity_accepts_changelog_heading_with_trailing_whitespace(tmp_path: Path) -> None:
+def test_release_identity_accepts_dated_changelog_heading_with_trailing_whitespace(tmp_path: Path) -> None:
     script = _load_script()
     repo_root = _repo(tmp_path)
     (repo_root / "CHANGELOG.md").write_text(
-        "## v0.3.0 - Unreleased   \n\n## v0.2.0 - 2026-07-29\n",
+        "## v0.3.0 - 2026-09-03   \n\n## v0.2.0 - 2026-07-29\n",
         encoding="utf-8",
     )
 
@@ -195,7 +195,54 @@ def test_release_identity_rejects_unavailable_registry(tmp_path: Path) -> None:
             raise AssertionError("expected ReleaseIdentityError")
 
 
-def test_release_identity_rejects_missing_unreleased_changelog_entry(tmp_path: Path) -> None:
+def test_release_identity_rejects_unreleased_changelog_entry(tmp_path: Path) -> None:
+    script = _load_script()
+    repo_root = _repo(tmp_path)
+    (repo_root / "CHANGELOG.md").write_text(
+        "## v0.3.0 - Unreleased\n\n## v0.2.0 - 2026-07-29\n",
+        encoding="utf-8",
+    )
+
+    with patch.object(script, "_current_commit", return_value=COMMIT):
+        try:
+            script.verify_release_candidate_identity(
+                repo_root=repo_root,
+                expected_core_commit=COMMIT,
+                repository="renatomoselli/rpacore",
+                github_token="token",
+                opener=_absent_opener,
+            )
+        except script.ReleaseIdentityError as exc:
+            assert "dated top release heading" in str(exc)
+            assert "found: ## v0.3.0 - Unreleased" in str(exc)
+        else:
+            raise AssertionError("expected ReleaseIdentityError")
+
+
+def test_release_identity_rejects_invalid_changelog_date(tmp_path: Path) -> None:
+    script = _load_script()
+    repo_root = _repo(tmp_path)
+    (repo_root / "CHANGELOG.md").write_text(
+        "## v0.3.0 - 2026-02-30\n\n## v0.2.0 - 2026-07-29\n",
+        encoding="utf-8",
+    )
+
+    with patch.object(script, "_current_commit", return_value=COMMIT):
+        try:
+            script.verify_release_candidate_identity(
+                repo_root=repo_root,
+                expected_core_commit=COMMIT,
+                repository="renatomoselli/rpacore",
+                github_token="token",
+                opener=_absent_opener,
+            )
+        except script.ReleaseIdentityError as exc:
+            assert "invalid release date" in str(exc)
+        else:
+            raise AssertionError("expected ReleaseIdentityError")
+
+
+def test_release_identity_rejects_missing_changelog(tmp_path: Path) -> None:
     script = _load_script()
 
     with patch.object(script, "_current_commit", return_value=COMMIT):

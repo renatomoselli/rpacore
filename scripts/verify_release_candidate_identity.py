@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
+import re
 import subprocess
 import sys
 import tomllib
@@ -45,14 +47,26 @@ def _release_version(repo_root: Path) -> str:
     return version
 
 
-def _require_unreleased_changelog_entry(repo_root: Path, version: str) -> None:
-    heading = f"## v{version} - Unreleased"
+def _require_dated_changelog_entry(repo_root: Path, version: str) -> None:
     try:
         headings = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8").splitlines()
     except OSError as exc:
         raise ReleaseIdentityError("cannot read CHANGELOG.md") from exc
-    if heading not in {line.rstrip() for line in headings}:
-        raise ReleaseIdentityError(f"CHANGELOG.md is missing the required heading: {heading}")
+    release_headings = [line.rstrip() for line in headings if line.startswith("## v")]
+    expected = re.compile(rf"^## v{re.escape(version)} - (?P<date>\d{{4}}-\d{{2}}-\d{{2}})$")
+    match = expected.fullmatch(release_headings[0]) if release_headings else None
+    if match is None:
+        actual = release_headings[0] if release_headings else "<missing>"
+        raise ReleaseIdentityError(
+            "CHANGELOG.md must start release history with a dated top release heading "
+            f"for v{version}: ## v{version} - YYYY-MM-DD; found: {actual}"
+        )
+    try:
+        dt.date.fromisoformat(match.group("date"))
+    except ValueError as exc:
+        raise ReleaseIdentityError(
+            f"CHANGELOG.md has an invalid release date for v{version}: {match.group('date')}"
+        ) from exc
 
 
 def _github_json(
@@ -123,7 +137,7 @@ def verify_release_candidate_identity(
 
     version = _release_version(repo_root)
     tag = f"v{version}"
-    _require_unreleased_changelog_entry(repo_root, version)
+    _require_dated_changelog_entry(repo_root, version)
     repository_path = urllib.parse.quote(repository, safe="/")
     encoded_tag = urllib.parse.quote(tag, safe="")
     if _github_json(

@@ -4,13 +4,10 @@ Deterministic, stateful RPA in Python for code-first enterprise automation.
 
 Requires Python 3.11+.
 
-> Current development version: `0.3.0` (unreleased).
-> Latest published release: `v0.2.0`.
-
-The documentation on `main` describes the unreleased `0.3.0` API. Installing
-`rpacore` from PyPI currently provides the published `0.2.x` API; use the
-[`v0.2.0` source and documentation](https://github.com/renatomoselli/rpacore/tree/v0.2.0)
-when you need the stable published contract.
+Documentation shipped with a release describes that release. The default
+branch may include changes intended for the next release; when exact
+compatibility matters, use the source and documentation at the tag matching
+your installed package.
 
 ## Package Name
 
@@ -73,7 +70,7 @@ Community and release-readiness routes:
 - [Maintainers](MAINTAINERS.md)
 - [Governance and Release Process](docs/governance.md)
 
-## Quick Start (`0.3.0` development API)
+## Quick Start
 
 ```python
 from rpacore import (
