@@ -96,10 +96,11 @@ For `rpacore`, require the CI jobs that prove the public product:
 
 - `docs`
 - `test`
+- `static`
 - `package`
 - `installed-artifact`
 
-The release owner should also verify the Windows checkpoint/resume subset inside
+The release owner should also verify the Windows framework test suite inside
 the `installed-artifact` job before approving a release.
 
 For `rpacore-examples`, require its deterministic validation checks when a CI

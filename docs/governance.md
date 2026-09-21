@@ -55,9 +55,10 @@ The release branch should require the CI jobs that prove the public product:
 
 - documentation verification on supported Python versions
 - framework tests on supported Python versions
+- mypy type checking and Ruff pyflakes linting over `rpacore`
 - package build and metadata checks
 - installed-artifact validation from built distributions
-- Windows checkpoint/resume validation subset
+- Windows framework test suite
 - security policy, sensitive-data surfaces, dependency posture, and package
   content review before release approval
 - tracked-file and archive-content hygiene checks for private paths, stale

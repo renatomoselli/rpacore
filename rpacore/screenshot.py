@@ -21,7 +21,7 @@ def capture_screenshot(directory: str) -> str:
     or the capture fails.
     """
     try:
-        import mss  # type: ignore[import-untyped]
+        import mss  # type: ignore[import-not-found, import-untyped]  # optional screenshots extra
     except ImportError:
         logger.warning("mss is not installed — screenshot skipped. Install with: pip install rpacore[screenshots]")
         return ""

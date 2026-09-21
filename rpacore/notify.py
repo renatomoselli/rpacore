@@ -16,7 +16,6 @@ from typing import Callable, Protocol, runtime_checkable
 
 from rpacore._validation import type_error, value_error
 from rpacore.credentials import CredentialProvider
-from rpacore.exceptions import BusinessException
 from rpacore.logger import get_logger
 from rpacore.report import (
     TransactionReport,

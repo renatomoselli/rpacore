@@ -93,25 +93,25 @@ def validate_config(
     """Validate a flat field specification and return values by dotted key."""
     validated: dict[str, object] = {}
     seen: set[str] = set()
-    for field in fields:
-        if field.key in seen:
-            raise ValueError(f"Duplicate config field: {field.key}")
-        seen.add(field.key)
-        found, value = _lookup_dotted_value(config, field.key)
+    for config_field in fields:
+        if config_field.key in seen:
+            raise ValueError(f"Duplicate config field: {config_field.key}")
+        seen.add(config_field.key)
+        found, value = _lookup_dotted_value(config, config_field.key)
         if not found:
-            if field.required:
-                raise KeyError(f"Missing required config key: {field.key}")
-            if field._default_snapshot is _MISSING_DEFAULT:
+            if config_field.required:
+                raise KeyError(f"Missing required config key: {config_field.key}")
+            if config_field._default_snapshot is _MISSING_DEFAULT:
                 continue
-            value = _copy_json_default(field.key, field._default_snapshot)
-        validated[field.key] = _validate_value(
-            field.key,
+            value = _copy_json_default(config_field.key, config_field._default_snapshot)
+        validated[config_field.key] = _validate_value(
+            config_field.key,
             value,
-            field.expected_type,
-            choices=field.choices,
-            min_value=field.min_value,
-            max_value=field.max_value,
-            allow_empty=field.allow_empty,
+            config_field.expected_type,
+            choices=config_field.choices,
+            min_value=config_field.min_value,
+            max_value=config_field.max_value,
+            allow_empty=config_field.allow_empty,
         )
     return validated
 

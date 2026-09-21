@@ -15,7 +15,6 @@ from rpacore.serialization import serialize_transaction
 from rpacore.status import Status
 
 if TYPE_CHECKING:
-    from rpacore.step import Step
     from rpacore.transaction import HistoryEntry, Transaction
 
 

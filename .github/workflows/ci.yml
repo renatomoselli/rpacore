@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v7
@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v7
@@ -47,6 +47,26 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  static:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Type check rpacore
+        run: python -m mypy rpacore
+
+      - name: Lint rpacore
+        run: python -m ruff check rpacore
 
   package:
     runs-on: ubuntu-latest
@@ -119,12 +139,10 @@ jobs:
       - name: Validate installed wheel
         run: python scripts/validate_installed_wheel.py --repo-root . --wheel-dir dist
 
-      - name: Install checkpoint test dependencies
+      - name: Install Windows test dependencies
         if: runner.os == 'Windows'
         run: pip install -e ".[dev]"
 
-      - name: Validate Windows checkpoint/resume subset
+      - name: Run Windows test suite
         if: runner.os == 'Windows'
-        run: >
-          python -m pytest
-          tests/test_engine.py::TestEngineCheckpointing
+        run: python -m pytest

@@ -250,9 +250,9 @@ class TestReleaseCandidateValidationScript:
         try:
             (source / "linked.txt").symlink_to(target)
         except OSError as exc:
-            if exc.errno in {errno.EPERM, errno.EACCES, errno.ENOTSUP}:
-                return
-            raise
+            if exc.errno not in {errno.EPERM, errno.EACCES, errno.ENOTSUP} and getattr(exc, "winerror", None) != 1314:
+                raise
+            pytest.skip(f"Symlinks unavailable: {exc}")
 
         module._copy_tree(source, destination)
 

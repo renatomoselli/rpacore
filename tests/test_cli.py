@@ -263,7 +263,14 @@ class TestCliInit:
         env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + str(project)
 
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", "tests/test_greeting_step.py"],
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                "--basetemp",
+                str(tmp_path / "inner-pytest-tmp"),
+                "tests/test_greeting_step.py",
+            ],
             cwd=project,
             env=env,
             capture_output=True,

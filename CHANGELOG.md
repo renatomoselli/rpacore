@@ -216,7 +216,7 @@ deterministic Python automation.
 
 ### Compatibility
 
-- Python 3.11, 3.12, and 3.13 are supported.
+- Python 3.11, 3.12, 3.13, and 3.14 are supported.
 - Runtime dependencies remain empty by default.
 - Package license metadata uses the PEP 621 table form, with license file
   inclusion configured through the current build backend.
