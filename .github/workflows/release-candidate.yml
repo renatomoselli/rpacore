@@ -116,7 +116,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate-artifacts-${{ github.run_id }}
           path: ${{ runner.temp }}/artifact-set
@@ -192,7 +192,7 @@ jobs:
       - name: Verify frozen examples dependency metadata
         run: python -m pytest rpacore-examples/tests/test_dependency_metadata.py -q
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate-artifacts-${{ github.run_id }}
           path: artifact-set
@@ -231,12 +231,12 @@ jobs:
     needs: [platform-cell, examples-wheel]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate-artifacts-${{ github.run_id }}
           path: artifact-set
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-candidate-evidence-*
           path: evidence
