@@ -103,6 +103,24 @@ For files that must not appear partially written, write through
 context succeeds. Test both the successful destination and the failure path that
 preserves any previous destination.
 
+## Static Analysis
+
+Before pushing or opening a pull request, run the same static analysis checks that CI runs. These require the development dependencies.
+
+Type checking with mypy:
+
+```powershell
+python -m mypy rpacore
+```
+
+Linting with Ruff (pyflakes rules only):
+
+```powershell
+python -m ruff check rpacore
+```
+
+CI runs these commands in the standalone `static` job. A failing mypy or Ruff check blocks the CI run.
+
 ## Decision
 
 Do not add a framework-specific test base class to the current API. Plain pytest

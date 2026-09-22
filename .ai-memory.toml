@@ -1,0 +1,8 @@
+[capture]
+ignore_paths = [
+  ".env", ".env.*", "**/.env", "**/.env.*",
+  "**/*secret*", "**/*token*", "**/*credential*",
+  "**/*.pem", "**/*.key", "**/*.pfx", "**/*.p12", "**/*.kdbx",
+  "**/.aws/**", "**/.ssh/**", "**/secrets/**",
+  "**/.git/**", "**/node_modules/**", "**/dist/**", "**/build/**", "**/coverage/**", "**/.next/**"
+]
