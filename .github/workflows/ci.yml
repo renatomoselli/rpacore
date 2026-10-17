@@ -129,7 +129,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Download distribution artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: rpacore-dist
           path: dist
