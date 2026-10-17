@@ -50,7 +50,7 @@ jobs:
           test "$EXPECTED_COMMIT" = "$DISPATCHED_MAIN_COMMIT"
           test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -112,7 +112,7 @@ jobs:
           ref: ${{ needs.freeze-artifacts.outputs.core_commit }}
           fetch-depth: 1
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -182,7 +182,7 @@ jobs:
           token: ${{ secrets.RPACORE_EXAMPLES_TOKEN }}
           persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
