@@ -63,7 +63,7 @@ jobs:
           --repo-root .
           --expected-release-version "$EXPECTED_RELEASE_VERSION"
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate-artifacts-${{ inputs.candidate_run_id }}
           path: candidate-artifacts
@@ -71,7 +71,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.candidate_run_id }}
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate-evidence-aggregate
           path: candidate-aggregate
@@ -135,7 +135,7 @@ jobs:
           --repo-root .
           --expected-release-version "$EXPECTED_RELEASE_VERSION"
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate-artifacts-${{ inputs.candidate_run_id }}
           path: candidate-artifacts
@@ -143,7 +143,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.candidate_run_id }}
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: release-candidate-evidence-aggregate
           path: candidate-aggregate
@@ -151,7 +151,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.candidate_run_id }}
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: verified-publish-candidate-lock
           path: publish-lock
