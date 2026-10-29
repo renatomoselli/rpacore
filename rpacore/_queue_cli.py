@@ -32,7 +32,7 @@ from rpacore.queue import QueueAttempt, QueueItem, QueuePoisonEvent, QueueStatus
 SUCCESS = 0
 EXECUTION_ERROR = 1
 USAGE_ERROR = 2
-CLI_QUEUE_FORMAT_VERSION = 1
+CLI_QUEUE_FORMAT_VERSION = 2
 CONFIG_NAME = "config.toml"
 STATUS_VOCABULARY = tuple(status.value for status in QueueStatus)
 
@@ -158,6 +158,7 @@ def _item_projection(item: QueueItem) -> dict[str, object]:
         "claimed_at": None if item.claimed_at is None else item.claimed_at.isoformat(),
         "claimed_by": item.claimed_by,
         "transaction_id": item.transaction_id,
+        "available_at": None if item.available_at is None else item.available_at.isoformat(timespec="microseconds"),
     }
 
 
@@ -191,6 +192,7 @@ def _item_lines(item: QueueItem) -> list[str]:
         f"Claimed by:    {item.claimed_by or '(unclaimed)'}",
         f"Claimed at:    {_optional_timestamp(item.claimed_at)}",
         f"Transaction:   {item.transaction_id or '(unbound)'}",
+        f"Available at:  {_optional_timestamp(item.available_at)}",
     ]
 
 
@@ -204,6 +206,7 @@ def _item_page_lines(
         lines.append(
             f"{item.id}  {item.status.value}  retries={item.retry_count}  "
             f"created={item.created_at.isoformat()}  reference={item.reference}"
+            f"  available_at={_optional_timestamp(item.available_at)}"
         )
     lines.extend(_continuation_lines(has_more=has_more, next_cursor=next_cursor))
     return lines

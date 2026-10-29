@@ -381,7 +381,7 @@ for command in ("list", "show", "attempts", "poison"):
         assert "payload-secret" not in result.stdout and claimed.claim_token not in result.stdout
         if json_flag:
             payload = json.loads(result.stdout)
-            assert payload["schema_version"] == 1 and payload["command"] == "queue:" + command
+            assert payload["schema_version"] == 2 and payload["command"] == "queue:" + command
             assert payload["item"] if command == "show" else payload["records"]
 assert {p: p.read_bytes() for p in root.glob("inspection-queue.db*")} == before_queue
 for arguments, expected_code in (
@@ -393,6 +393,47 @@ for arguments, expected_code in (
     result = subprocess.run(console + ["queue", *arguments, "--json"], cwd=root, capture_output=True, text=True)
     assert result.returncode == expected_code and result.stdout == "" and result.stderr, result
 print("Installed read-only queue APIs and console commands passed")
+
+# Separate drain-once processes, suitable for an external scheduler. No task is
+# registered: the test proves durable timing and bound-transaction recovery.
+worker = root / "delayed_worker.py"
+worker.write_text("""
+import json, sys
+from pathlib import Path
+from rpacore import (Engine, EnvCredentialProvider, QueueItem, SqliteQueue,
+                     Step, SystemException, Transaction, run_queue_loop)
+root = Path(__file__).parent
+queue = SqliteQueue({'db_path': str(root / 'delayed.db'), 'retry_delay': 10})
+class Effect(Step):
+    def execute(self, ctx):
+        if not ctx.state.get('retried'):
+            ctx.state['retried'] = True
+            raise SystemException('transient fixture failure')
+        ctx.state['done'] = True
+def build(item):
+    return Transaction(item.reference, definition_identity='wheel-retry/v1',
+                       steps=[Effect('effect', 1)])
+if sys.argv[1] == 'first':
+    queue.add(QueueItem(id='delayed', reference='retry', payload={}))
+summary = run_queue_loop(queue, Engine(), build, {}, EnvCredentialProvider(),
+                         transaction_db_path=str(root / 'delayed-transactions.db'))
+print(json.dumps(vars(summary)))
+""", encoding="utf-8")
+first = json.loads(run([sys.executable, str(worker), "first"], root).stdout)
+assert first["processed"] == first["retry_scheduled"] == 1
+delayed = get_queue_item("delayed", str(root / "delayed.db"))
+bound_id, due = delayed.transaction_id, delayed.available_at
+early = json.loads(run([sys.executable, str(worker), "early"], root).stdout)
+assert early["processed"] == 0
+from datetime import datetime, timezone
+import time
+time.sleep(max(0, (due - datetime.now(timezone.utc)).total_seconds()) + .01)
+later = json.loads(run([sys.executable, str(worker), "due"], root).stdout)
+assert later["completed"] == 1
+from rpacore import load_transaction
+assert get_queue_item("delayed", str(root / "delayed.db")).transaction_id == bound_id
+assert load_transaction(bound_id, str(root / "delayed-transactions.db")).state["done"] is True
+print("Installed delayed drain-once restart retained the same transaction")
 
 for name in (
     "my project", ".demo", "demo.", "_demo", "demo_", "-demo", "demo-",

@@ -13,6 +13,7 @@ from typing import Iterable, Protocol, runtime_checkable
 
 from rpacore._clock import _Clock, _SYSTEM_CLOCK
 from rpacore._json_state import JsonStateError, validate_json_object
+from rpacore._queue_retry import available_at_text, parse_available_at, retry_available_at, retry_policy
 from rpacore._queue_read import (
     ATTEMPT_SELECT,
     ATTEMPT_ORDER,
@@ -110,6 +111,7 @@ class QueueItem:
     claimed_at: datetime | None = None
     claim_token: str = ""
     transaction_id: str = ""
+    available_at: datetime | None = None
 
 
 @runtime_checkable
@@ -273,6 +275,12 @@ def _migrate_queue_to_v4(conn: sqlite3.Connection) -> None:
     _record_queue_schema_version(conn, 4)
 
 
+def _migrate_queue_to_v5(conn: sqlite3.Connection) -> None:
+    """Persist delivery eligibility without rewriting existing items/history."""
+    conn.execute("ALTER TABLE queue_items ADD COLUMN available_at TEXT")
+    _record_queue_schema_version(conn, 5)
+
+
 def _ensure_schema(conn: sqlite3.Connection) -> None:
     """Run sequential queue migrations after rejecting future schemas."""
     with conn:
@@ -282,6 +290,15 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             component=_QUEUE_SCHEMA_COMPONENT,
             supported_version=_QUEUE_SCHEMA_VERSION,
         )
+        if current_version < _QUEUE_SCHEMA_VERSION and not conn.in_transaction:
+            # DDL must roll back with the marker. Re-read after acquiring the
+            # lock: another constructor may have completed these migrations.
+            conn.execute("BEGIN IMMEDIATE")
+            ensure_database_compatibility(conn)
+            current_version = ensure_supported_schema(
+                conn, component=_QUEUE_SCHEMA_COMPONENT,
+                supported_version=_QUEUE_SCHEMA_VERSION,
+            )
         _ensure_schema_version_table(conn)
         if current_version < 1:
             _migrate_queue_to_v1(conn)
@@ -295,6 +312,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         if current_version < 4:
             _migrate_queue_to_v4(conn)
             current_version = 4
+        if current_version < 5:
+            _migrate_queue_to_v5(conn)
+            current_version = 5
         if current_version != _QUEUE_SCHEMA_VERSION:
             raise RuntimeError(
                 f"Unsupported queue schema version {current_version}; "
@@ -324,7 +344,7 @@ def _insert_item(conn: sqlite3.Connection, item: QueueItem) -> None:
     conn.execute(
         "INSERT INTO queue_items "
         "(id, reference, payload, status, retry_count, created_at, claimed_by, claimed_at, "
-        "claim_token, transaction_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "claim_token, transaction_id, available_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             item.id,
             item.reference,
@@ -336,6 +356,7 @@ def _insert_item(conn: sqlite3.Connection, item: QueueItem) -> None:
             item.claimed_at.isoformat() if item.claimed_at else None,
             item.claim_token,
             item.transaction_id,
+            available_at_text(item.available_at),
         ),
     )
 
@@ -391,16 +412,18 @@ class SqliteQueue:
     two workers cannot claim the same item simultaneously.
 
     Stale reclaim: items left IN_PROGRESS longer than lease_timeout seconds
-    are treated as abandoned and returned to PENDING on the next next_item() call.
+    are treated as abandoned and returned to delayed PENDING on next_item().
 
     Retry: fail() increments retry_count. With retry=True it resets to PENDING
-    if under max_retries; otherwise it marks FAILED permanently. With
+    with a durable eligibility time if under max_retries; otherwise FAILED. With
     retry=False it marks FAILED immediately.
 
     Config keys (all from the [queue] section of config.toml):
         db_path        (str)  Path to the SQLite file. Default: "queue.db"
         lease_timeout  (int)  Seconds before an IN_PROGRESS item is reclaimed. Default: 30
         max_retries    (int)  Max times an item may be retried on fail. Default: 3
+        retry_delay    (number) Base delivery delay, 0..86400 seconds. Default: 1
+        retry_backoff  (number) Delivery delay multiplier >= 1. Default: 2
     """
 
     def __init__(self, config: dict[str, object] | None = None) -> None:
@@ -429,11 +452,14 @@ class SqliteQueue:
             raise value_error("queue.lease_timeout", "int > 0", lease_timeout)
         if max_retries < 0:
             raise value_error("queue.max_retries", "int >= 0", max_retries)
+        retry_delay, retry_backoff = retry_policy(cfg)
         validate_durable_sqlite_path(db_path, field="queue.db_path")
 
         self.db_path: str = db_path
         self.lease_timeout: int = lease_timeout
         self.max_retries: int = max_retries
+        self.retry_delay: float = retry_delay
+        self.retry_backoff: float = retry_backoff
         self._clock: _Clock = _SYSTEM_CLOCK
 
         conn = _connect(self.db_path)
@@ -557,10 +583,10 @@ class SqliteQueue:
             conn.close()
 
     def next_item(self, worker_id: str = "") -> QueueItem | None:
-        """Atomically claim and return the oldest PENDING item, or None if empty.
+        """Atomically claim the oldest eligible PENDING item, or None if none is due.
 
         Also reclaims stale IN_PROGRESS items (older than lease_timeout seconds)
-        back to PENDING before selecting.
+        back to delayed PENDING before selecting. No delivery wait is performed.
         """
         if not worker_id:
             worker_id = socket.gethostname()
@@ -585,11 +611,12 @@ class SqliteQueue:
                 retry_count = int(stale["retry_count"]) + 1
                 new_status = "pending" if retry_count <= self.max_retries else "failed"
                 claimed_by = "" if new_status == "pending" else stale["claimed_by"]
+                due = retry_available_at(now, retry_count, self.retry_delay, self.retry_backoff) if new_status == "pending" else None
                 result = conn.execute(
                     "UPDATE queue_items SET status = ?, retry_count = ?, claimed_by = ?, "
-                    "claimed_at = NULL, claim_token = '' "
+                    "claimed_at = NULL, claim_token = '', available_at = ? "
                     "WHERE id = ? AND status = 'in_progress' AND claim_token = ?",
-                    (new_status, retry_count, claimed_by, stale["id"], stale["claim_token"]),
+                    (new_status, retry_count, claimed_by, due, stale["id"], stale["claim_token"]),
                 )
                 if result.rowcount == 1 and stale["claim_token"]:
                     _close_attempt(
@@ -605,13 +632,17 @@ class SqliteQueue:
             while True:
                 # Validate outside the write lock. A guarded UPDATE below keeps
                 # claiming atomic when multiple workers race for the same row.
+                now_text = available_at_text(self._clock.now_utc())
                 row = conn.execute(
-                    "SELECT * FROM queue_items WHERE status = 'pending' ORDER BY created_at ASC, id ASC LIMIT 1"
+                    "SELECT * FROM queue_items WHERE status = 'pending' "
+                    "AND (available_at IS NULL OR available_at <= ?) "
+                    "ORDER BY created_at ASC, id ASC LIMIT 1", (now_text,),
                 ).fetchone()
 
                 if row is None:
                     return None
 
+                parse_available_at(row["available_at"])
                 try:
                     payload = load_payload(row["payload"])
                 except (json.JSONDecodeError, JsonStateError) as exc:
@@ -619,9 +650,11 @@ class SqliteQueue:
                     transaction_started = True
                     result = conn.execute(
                         "UPDATE queue_items SET status = 'failed', claimed_by = '', "
-                        "claimed_at = NULL, claim_token = '' "
-                        "WHERE id = ? AND status = 'pending'",
-                        (row["id"],),
+                        "claimed_at = NULL, claim_token = '', available_at = NULL "
+                        "WHERE id = ? AND status = 'pending' "
+                        "AND available_at IS ? "
+                        "AND (available_at IS NULL OR available_at <= ?)",
+                        (row["id"], row["available_at"], available_at_text(self._clock.now_utc())),
                     )
                     if result.rowcount == 1:
                         _record_poison_event(
@@ -640,9 +673,11 @@ class SqliteQueue:
                 transaction_started = True
                 result = conn.execute(
                     "UPDATE queue_items SET status = 'in_progress', claimed_by = ?, claimed_at = ?, "
-                    "claim_token = ? "
-                    "WHERE id = ? AND status = 'pending'",
-                    (worker_id, now.isoformat(), claim_token, row["id"]),
+                    "claim_token = ?, available_at = NULL "
+                    "WHERE id = ? AND status = 'pending' "
+                    "AND available_at IS ? "
+                    "AND (available_at IS NULL OR available_at <= ?)",
+                    (worker_id, now.isoformat(), claim_token, row["id"], row["available_at"], available_at_text(now)),
                 )
                 if result.rowcount != 1:
                     conn.execute("COMMIT")
@@ -723,7 +758,7 @@ class SqliteQueue:
                 _ensure_schema(conn)
                 result = conn.execute(
                     "UPDATE queue_items SET status = 'successful', "
-                    "claimed_at = NULL, claim_token = '' "
+                    "claimed_at = NULL, claim_token = '', available_at = NULL "
                     "WHERE id = ? AND status = 'in_progress' AND claimed_by = ? "
                     "AND claim_token = ? AND claim_token != ''",
                     (item_id, claimed_by, claim_token),
@@ -768,12 +803,14 @@ class SqliteQueue:
                 new_count = row["retry_count"] + 1
                 new_status = "pending" if retry and new_count <= self.max_retries else "failed"
                 next_claimed_by = "" if new_status == "pending" else claimed_by
+                now = self._clock.now_utc()
+                due = retry_available_at(now, new_count, self.retry_delay, self.retry_backoff) if new_status == "pending" else None
                 result = conn.execute(
                     "UPDATE queue_items SET status = ?, retry_count = ?, claimed_by = ?, "
-                    "claimed_at = NULL, claim_token = '' "
+                    "claimed_at = NULL, claim_token = '', available_at = ? "
                     "WHERE id = ? AND status = 'in_progress' AND claimed_by = ? "
                     "AND claim_token = ? AND claim_token != ''",
-                    (new_status, new_count, next_claimed_by, item_id, claimed_by, claim_token),
+                    (new_status, new_count, next_claimed_by, due, item_id, claimed_by, claim_token),
                 )
                 if result.rowcount != 1:
                     raise QueueLeaseLostError(
@@ -789,7 +826,7 @@ class SqliteQueue:
                     item_id=item_id,
                     claim_token=claim_token,
                     outcome=outcome,
-                    finished_at=self._clock.now_utc(),
+                    finished_at=now,
                 )
                 return outcome
         finally:
@@ -834,10 +871,11 @@ class SqliteQueue:
                     retry_count += 1
                     if retry and retry_count <= self.max_retries:
                         new_status = QueueStatus.PENDING
+                due = retry_available_at(now, retry_count, self.retry_delay, self.retry_backoff) if new_status == QueueStatus.PENDING else None
                 conn.execute(
                     "UPDATE queue_items SET status = ?, retry_count = ?, claimed_by = '', "
-                    "claimed_at = NULL, claim_token = '' WHERE id = ?",
-                    (new_status, retry_count, item_id),
+                    "claimed_at = NULL, claim_token = '', available_at = ? WHERE id = ?",
+                    (new_status, retry_count, due, item_id),
                 )
                 if row["claim_token"]:
                     _close_attempt(

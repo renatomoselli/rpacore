@@ -131,7 +131,8 @@ def run_queue_loop(
 ) -> QueueRunSummary:
     """Drain a queue by running each item through the engine.
 
-    Claims items one at a time until the queue is empty. For each item:
+    Claims items one at a time until none is currently eligible. Delayed pending
+    work remains for a later invocation. For each item:
     - Calls build_transaction(item) to construct a Transaction (user responsibility).
     - Builds a ProcessContext with the item's payload in transaction.state.
     - Runs engine.run(ctx).

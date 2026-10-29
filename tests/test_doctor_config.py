@@ -268,5 +268,12 @@ def test_queue_advisory_keys_follow_real_consumer_access(tmp_path, monkeypatch):
         accessed.add(field.removeprefix("queue."))
         return original(config, field, *args, **kwargs)
     monkeypatch.setattr(queue_module, "optional_config", record)
-    queue_module.SqliteQueue({"db_path": str(tmp_path / "queue.db")})
+
+    class Settings(dict):
+        def get(self, key, default=None):
+            accessed.add(key)
+            return super().get(key, default)
+
+    queue_module.SqliteQueue(Settings(db_path=str(tmp_path / "queue.db")))
     assert accessed == set(_CONTEXT_KEYS["queue"])
+    assert accessed == {"db_path", "lease_timeout", "max_retries", "retry_delay", "retry_backoff"}

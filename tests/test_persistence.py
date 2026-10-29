@@ -1552,7 +1552,7 @@ class TestQueueClaimFencing:
 
         queue_db = str(tmp_path / "queue.db")
         transaction_db = queue_db if shared else str(tmp_path / "transactions.db")
-        queue = SqliteQueue({"db_path": queue_db, "lease_timeout": 1})
+        queue = SqliteQueue({"db_path": queue_db, "lease_timeout": 1, "retry_delay": 0})
         queue.add(QueueItem(reference="failure", payload={}))
         claim = queue.next_item("same-label")
         _prepare_transaction_database(transaction_db)
@@ -1620,7 +1620,7 @@ class TestQueueClaimFencing:
 
         queue_db = str(tmp_path / "queue.db")
         transaction_db = str(tmp_path / "transactions.db")
-        queue = SqliteQueue({"db_path": queue_db, "lease_timeout": 1})
+        queue = SqliteQueue({"db_path": queue_db, "lease_timeout": 1, "retry_delay": 0})
         queue.add(QueueItem(reference="fenced", payload={}))
         stale = queue.next_item("shared-worker")
         assert stale is not None
@@ -2848,7 +2848,7 @@ class TestSchemaMigration:
         finally:
             conn.close()
 
-        assert rows == [("queue", 4), ("transactions", 10)]
+        assert rows == [("queue", 5), ("transactions", 10)]
 
     def test_unsupported_transaction_schema_version_raises(self, db_path) -> None:
         conn = sqlite3.connect(db_path)

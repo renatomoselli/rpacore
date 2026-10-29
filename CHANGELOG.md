@@ -45,6 +45,23 @@ All notable user-facing changes are recorded here.
 
 ### Breaking
 
+- Queue delivery retries now persist a next-eligible UTC `available_at`, with
+  default delay 1 second, backoff 2 and a one-day cap. Retryable failures, lease
+  expiry and retrying administrative overrides share this policy. Set queue
+  `retry_delay=0` for immediate redelivery. Drain-once workers can return with
+  delayed pending work; applications/examples need later invocations or the
+  explicit zero-delay setting. No examples files are changed automatically.
+  Claims reject selected noncanonical stored deadlines before claiming or
+  quarantining the item, preserving the malformed record for diagnosis.
+- Queue SQLite schema advances from v4 to v5. Stop all workers and back up both
+  databases before the forward transactional migration. Existing items become
+  immediately eligible without changing their IDs/bindings/history. Rollback
+  requires the matching pre-upgrade code and database backup.
+- All queue CLI JSON envelopes advance to schema v2; item records add nullable
+  `available_at`, also visible in human output. Library QueuePage format is 2;
+  cursor format stays 1 and existing query positions remain valid. Historical
+  v1 JSON fixtures are retained; consumers must accept v2 and its item field.
+
 - Transaction list/show JSON advance to CLI schema v3 for truthful captured
   outcomes beside unchanged transaction-v3 records. List consumers must read
   `entry.transaction` and `entry.outcome`; show retains `payload.transaction`

@@ -6,7 +6,7 @@ import base64
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -132,7 +132,7 @@ def test_cli_list_and_show_v3_fixtures_match_live_output(tmp_path: Path, capsys:
     assert json.loads(capsys.readouterr().out) == _json_fixture("cli-transaction-show-v3.json")
 
 
-def test_queue_v1_fixtures_match_all_live_commands(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_queue_v2_fixtures_match_all_live_commands(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     db_path = tmp_path / "queue.db"
     stamp = datetime(2026, 10, 22, 12, tzinfo=timezone.utc)
     SqliteQueue({"db_path": str(db_path)}).add(QueueItem(
@@ -140,6 +140,11 @@ def test_queue_v1_fixtures_match_all_live_commands(tmp_path: Path, capsys: pytes
         status=QueueStatus.IN_PROGRESS, retry_count=1, created_at=stamp,
         claimed_at=stamp, claimed_by="fixture-worker", claim_token="token-secret",
         transaction_id="transaction-fixture",
+    ))
+    SqliteQueue({"db_path": str(db_path)}).add(QueueItem(
+        id="queue-delayed", reference="fixture-delayed", payload={},
+        created_at=stamp + timedelta(seconds=1),
+        available_at=stamp + timedelta(seconds=2),
     ))
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -152,11 +157,15 @@ def test_queue_v1_fixtures_match_all_live_commands(tmp_path: Path, capsys: pytes
         )
     before = db_path.read_bytes()
     for command in ("list", "show", "attempts", "poison"):
-        selector = ["queue-fixture"] if command == "show" else []
+        selector = ["queue-delayed"] if command == "show" else []
         assert cli_module.main(["queue", command, *selector, "--db", str(db_path), "--json"]) == 0
         output = capsys.readouterr()
         assert not output.err
-        assert json.loads(output.out) == _json_fixture(f"cli-queue-{command}-v1.json")
+        assert json.loads(output.out) == _json_fixture(f"cli-queue-{command}-v2.json")
+        historical = _json_fixture(f"cli-queue-{command}-v1.json")
+        assert historical["schema_version"] == 1
+        old_items = [historical["item"]] if command == "show" else historical.get("records", [])
+        assert all("available_at" not in item for item in old_items)
         assert db_path.read_bytes() == before
 
 

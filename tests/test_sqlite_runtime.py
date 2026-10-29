@@ -137,7 +137,7 @@ def build(item):
                        steps=[First('first', 1), Second('second', 2)])
 stop = threading.Event()
 summary = run_queue_loop(
-    SqliteQueue({'db_path': queue_path, 'lease_timeout': 60}), Engine(), build,
+    SqliteQueue({'db_path': queue_path, 'lease_timeout': 60, 'retry_delay': 0}), Engine(), build,
     {}, EnvCredentialProvider(), worker_id=ready_path, transaction_db_path=transaction_path,
     stop_event=stop, after_item=lambda *args: stop.set())
 assert summary.completed == 1 and summary.failed == 0, summary

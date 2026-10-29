@@ -492,13 +492,17 @@ are not one global snapshot: items newly eligible behind a cursor, new/backdated
 rows and status changes can require a fresh traversal, even for terminal status
 filters because administrative overrides can change them. Complete audit
 enumeration needs separately obtained quiescent storage. Reads report persisted
-facts without inferring lease validity or future delivery time.
+facts, including stored `available_at`, without inferring lease validity or
+guaranteeing delivery at that instant.
 
 Invalid payloads fail item decoding without quarantine; attempts and poison
 events remain independently readable. Existing `SqliteQueue` construction and
 read methods retain their writable schema-assurance policy and unbounded list
 defaults; use the explicit read-only functions for nonmutating inspection.
-No database migration or examples-project adoption is required.
+Existing queue databases must be migrated offline to schema v5 with the current
+writable runtime before these current-schema reads are used. Inspection itself
+never migrates. Queue applications adopting the new retry timing must arrange
+later invocations or explicitly select zero delay.
 
 ## Transaction Persistence
 
@@ -627,7 +631,7 @@ The SQLite queue records its own component version:
 
 ```text
 component = "queue"
-version   = 4
+version   = 5
 ```
 
 This lets transaction and queue tables safely coexist in one SQLite file if a
@@ -742,9 +746,13 @@ append-only claim attempts and poison dispositions. Migration to version 3
 invalidates legacy `IN_PROGRESS` leases by returning them to `PENDING` without
 discarding their transaction binding, so they must be reacquired with a token.
 Version 4 begins attempt history for future claims; it does not invent attempt
-records for older rows.
+records for older rows. Version 5 adds nullable `available_at` UTC timestamps;
+existing items retain NULL (immediately eligible when pending), unchanged IDs,
+bindings and history. The column and schema marker migrate in one transaction;
+a failed upgrade rolls back both. Read-only inspection rejects older schemas
+without migrating them.
 
-Treat transaction-schema upgrades and the queue-v4 upgrade as offline: stop every worker, back up
+Treat transaction-schema upgrades and the queue-v5 upgrade as offline: stop every worker, back up
 both database files together, upgrade and open both with the new runtime, then
 restart workers so pending items are reacquired. Old workers reject the newer
 schema on their next framework database operation, but the offline boundary is
@@ -756,6 +764,39 @@ files.
 Initial transaction creation and queue binding roll back together on failure;
 the runner requires no compensating deletion. Previously bound records and
 older unbound records are retained for audit.
+
+### Delayed queue redelivery
+
+Queue retries have a durable eligibility time independent of Engine's in-claim
+retries. Retryable `fail`, lease expiry and `force_fail(retry=True)` persist
+`available_at` with the queue state and attempt disposition in one transaction.
+Delay defaults to 1 second with backoff 2, capped at one day; see
+[queue configuration](config.md#which-code-consumes-a-setting). Set queue
+`retry_delay=0` explicitly for immediate redelivery. Positive delays have a
+minimum of one microsecond. Terminal transitions and successful claims clear
+the field. Reopening or changing worker settings does not recompute a deadline.
+
+Claims choose the oldest eligible pending item, bypassing delayed older items,
+and recheck eligibility under the write lock. Other workers cannot bypass a
+stored deadline by reusing a stale selection or claim token. Eligibility uses
+UTC wall time; clock adjustments can lengthen or shorten the elapsed wait.
+Queue retries and external effects remain at least once.
+Selected deadlines are validated before claiming or quarantining the item,
+and the write is fenced to the same stored deadline that was validated.
+Noncanonical UTC text raises `ValueError` without erasing that item's deadline
+or recording a claim/quarantine event. Inspect and repair externally edited
+storage offline; queue operations do not silently normalize it.
+
+`run_queue_loop()` drains currently eligible work and returns normally when
+none remains. Delayed pending work can remain after that return. Arrange a later
+OS-scheduled or supervised invocation, inspect `available_at` with
+`rpacore queue list/show`, and reopen the same queue/transaction files. With
+transaction persistence, the due item resumes its existing bound transaction;
+this does not create a daemon or register a schedule. Existing queue applications
+and examples must arrange later invocations or select zero delay; no examples
+files are modified automatically. Queue JSON consumers must adopt schema v2 and
+library pages format 2; cursor v1, transaction records and Engine policy remain
+unchanged. See [queue compatibility](cli.md#queue-machine-readable-compatibility).
 
 ## Crash Behavior
 

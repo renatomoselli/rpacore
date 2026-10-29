@@ -39,6 +39,8 @@ credential_provider = "env"
 db_path = "queue.db"
 lease_timeout = 30
 max_retries = 3
+retry_delay = 1.0
+retry_backoff = 2.0
 ```
 
 Relative `transaction_db_path`, `screenshot_dir`, and `queue.db_path` values are
@@ -67,9 +69,27 @@ code makes these choices explicitly:
 
 Root `max_retries`, `retry_delay` and `retry_backoff` configure Engine retries
 only when supplied to Engine. Queue `max_retries` instead controls queue
-redelivery; `lease_timeout` controls claim lifetime. Neither setting substitutes
-for the other. Passing `config=` to `execute_transaction` makes it available to
+redelivery; `lease_timeout` controls claim lifetime. Queue `retry_delay` and
+`retry_backoff` control durable delivery timing, independently of the root Engine
+settings. Passing `config=` to `execute_transaction` makes it available to
 steps; it does not build an Engine or select storage or a credential provider.
+
+Queue delay defaults to 1 second and backoff to 2. For delivery retry number `n`
+(starting at 1), the delay is `min(86400, retry_delay * retry_backoff ** (n - 1))`
+seconds. Both values accept finite numbers excluding booleans; delay must be
+between 0 and 86400 and backoff at least 1. Positive delays have a minimum of one
+microsecond and round up to whole microseconds to avoid early eligibility.
+Set `[queue].retry_delay = 0` to retain immediate redelivery.
+These settings are validated by `SqliteQueue` before opening storage; loading a
+TOML section alone does not instantiate a queue or validate its retry policy.
+
+Retryable failure, lease expiry and `force_fail(retry=True)` persist the next
+eligible UTC instant. Changing the constructor settings does not alter existing
+deadlines. A drain-once runner returns when no work is currently eligible; arrange
+a later invocation through your external scheduler or supervisor. It does not
+wait for delayed pending items. Queue-backed examples and applications that
+previously drained all retries in one invocation must adopt later invocations or
+explicitly select zero delay; their files are not changed automatically.
 
 ### Credential selection in existing projects
 

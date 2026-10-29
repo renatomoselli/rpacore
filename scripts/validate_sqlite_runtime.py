@@ -38,7 +38,7 @@ def validate_sqlite_runtime(*, repo_root: Path, wheel: Path, output_dir: Path) -
             "sqlite": sqlite3.sqlite_version,
         },
         "status": "fail",
-        "tests": ["test_queue.py", "test_persistence.py", "test_sqlite_runtime.py"],
+        "tests": ["test_queue.py", "test_queue_retry.py", "test_persistence.py", "test_sqlite_runtime.py"],
     }
     try:
         with tempfile.TemporaryDirectory(prefix="rpacore-sqlite-") as temporary:

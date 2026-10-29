@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from rpacore._json_state import validate_json_object
+from rpacore._queue_retry import parse_available_at
 from rpacore._sqlite import (
     QUEUE_SCHEMA_VERSION,
     connect_sqlite,
@@ -46,7 +47,8 @@ ATTEMPT_SELECT = "SELECT * FROM queue_attempts"
 ATTEMPT_ORDER = "sequence ASC"
 POISON_SELECT = "SELECT * FROM queue_poison_events"
 POISON_ORDER = "sequence ASC"
-QUEUE_PAGE_FORMAT_VERSION = 1
+QUEUE_PAGE_FORMAT_VERSION = 2
+QUEUE_CURSOR_VERSION = 1
 QUERY_DEFAULT_LIMIT = 100
 QUERY_MAX_LIMIT = 1_000
 _KIND_ITEMS = "queue_items"
@@ -88,6 +90,7 @@ def row_to_item(
         claimed_at = datetime.fromisoformat(row["claimed_at"])
     if payload is None:
         payload = load_payload(row["payload"])
+    available_at = parse_available_at(row["available_at"])
     return QueueItem(
         id=row["id"],
         reference=row["reference"],
@@ -99,6 +102,7 @@ def row_to_item(
         claimed_at=claimed_at,
         claim_token=row["claim_token"],
         transaction_id=row["transaction_id"],
+        available_at=available_at,
     )
 
 
@@ -345,7 +349,7 @@ def _encoded_cursor(*, kind: str, filters: str, position: dict[str, object]) -> 
             "filters": filters,
             "kind": kind,
             "position": position,
-            "version": QUEUE_PAGE_FORMAT_VERSION,
+            "version": QUEUE_CURSOR_VERSION,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -363,7 +367,7 @@ def _decoded_cursor(cursor: str, *, kind: str, filters: str) -> dict[str, object
         raise ValueError("cursor is not a valid queue query cursor") from exc
     if not isinstance(payload, dict):
         raise ValueError("cursor is not a valid queue query cursor")
-    if type(payload.get("version")) is not int or payload.get("version") != QUEUE_PAGE_FORMAT_VERSION:
+    if type(payload.get("version")) is not int or payload.get("version") != QUEUE_CURSOR_VERSION:
         raise ValueError("cursor has an unsupported queue query version")
     if payload.get("kind") != kind or payload.get("filters") != filters:
         raise ValueError("cursor does not match the queue query kind or filters")

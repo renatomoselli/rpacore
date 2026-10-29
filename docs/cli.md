@@ -255,11 +255,11 @@ do not quarantine data; attempts/poison can still be inspected independently.
 
 ### Queue machine-readable compatibility
 
-Queue JSON has its own `schema_version: 1`, independent of transaction/export
+Queue JSON has its own `schema_version: 2`, independent of transaction/export
 formats. Page envelopes have exactly these fields:
 
 ```json
-{"schema_version":1,"command":"queue:list","limit":100,"records":[],"has_more":false,"next_cursor":null}
+{"schema_version":2,"command":"queue:list","limit":100,"records":[],"has_more":false,"next_cursor":null}
 ```
 
 `command` is `queue:list`, `queue:attempts` or `queue:poison`; `limit` is an
@@ -269,7 +269,7 @@ more records exist, otherwise null. Show has exactly `schema_version`,
 
 | Record | Exact fields and types |
 | --- | --- |
-| Item (`list` and `show`) | `id`, `reference`, `status`, `created_at`, `claimed_by`, `transaction_id`: strings; `retry_count`: integer; `claimed_at`: string or null. `status` is `pending`, `in_progress`, `successful` or `failed`. Empty worker/transaction strings mean unassigned/unbound. |
+| Item (`list` and `show`) | `id`, `reference`, `status`, `created_at`, `claimed_by`, `transaction_id`: strings; `retry_count`: integer; `claimed_at`, `available_at`: string or null. `status` is `pending`, `in_progress`, `successful` or `failed`. Empty worker/transaction strings mean unassigned/unbound. |
 | Attempt | `sequence`: integer; `item_id`, `claimed_by`, `started_at`: strings; `finished_at`: string or null; `outcome`: string or null. Outcomes are `successful`, `retry_scheduled`, `failed`, `lease_expired`, `admin_override`; null denotes an open attempt. |
 | Poison event | `sequence`: integer; `item_id`, `error_type`, `created_at`: strings. `error_type` is the recorded parser error type, not an error message. |
 
@@ -280,7 +280,17 @@ protect captured output. Full library records carry payloads/tokens. Cursors
 contain no payload or token and are versioned continuation positions, not
 authorization or completeness guarantees. Framework fields are closed for each
 version; consumers should check `schema_version`. Checked compatibility examples
-live under `tests/fixtures/record-contracts/cli-queue-*-v1.json`.
+live under `tests/fixtures/record-contracts/cli-queue-*-v2.json`; v1 files remain
+historical examples. Consumers upgrading from v1 must accept schema 2 for all
+four queue commands and read the added nullable item `available_at` field.
+Attempt/poison fields and envelope structure are unchanged. Cursor format remains
+v1, so saved query positions remain usable; library pages report format 2.
+
+Human list/show output includes `available_at` (the next eligible UTC instant),
+or `(none)` when no delay is outstanding. A pending item can be delayed: it is
+still listed and does not become claimed merely because inspection observes it.
+A drain-once worker may have returned normally while delayed work remains;
+invoke it again at or after this instant through your scheduler or supervisor.
 
 ## Transaction Commands
 

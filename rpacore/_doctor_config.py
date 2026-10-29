@@ -17,7 +17,7 @@ from rpacore.manifest import ProjectManifest
 # email/webhook: EmailNotifier.__init__/WebhookNotifier.__init__.
 _CONTEXT_KEYS = {
     "": (*_DEFAULTS, "queue", "notification"),
-    "queue": ("db_path", "lease_timeout", "max_retries"),
+    "queue": ("db_path", "lease_timeout", "max_retries", "retry_delay", "retry_backoff"),
     "notification": ("email", "webhook"),
     "notification.email": ("host", "port", "from_addr", "to_addrs", "timeout", "attach_screenshots"),
     "notification.webhook": ("url", "timeout", "include_transaction", "include_report"),

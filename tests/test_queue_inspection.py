@@ -72,7 +72,7 @@ def test_pages_match_writable_order_without_mutation(queue_path, query, method, 
     cursor = None
     while True:
         page = query(str(queue_path), cursor=cursor, limit=limit)
-        assert isinstance(page, QueuePage) and page.format_version == 1
+        assert isinstance(page, QueuePage) and page.format_version == 2
         assert isinstance(page.records, tuple) and len(page.records) <= limit
         records.extend(page.records)
         assert page.has_more == (len(records) < len(expected))

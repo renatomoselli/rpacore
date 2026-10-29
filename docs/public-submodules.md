@@ -18,4 +18,5 @@ is in [API Reference](api.md).
 Queue inspection follows the same boundary: import `QueuePage`, `get_queue_item`,
 `query_queue_items`, `query_queue_attempts` and `query_queue_poison_events` from
 `rpacore`. The `_queue_read` and `_queue_cli` modules are private implementation
-details.
+details. Delivery timing in `_queue_retry` is private as well; applications use
+`SqliteQueue` settings and the top-level `QueueItem.available_at` field.

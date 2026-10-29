@@ -285,6 +285,27 @@ summary prose is for people rather than semantic parsing.
 | `QueueItem`, `QueueStatus`, `QueueLeaseLostError`, `QueueAdminEvent`, `QueueAttempt`, `QueueAttemptOutcome`, `QueuePoisonEvent`, `QueueProvider`, `SqliteQueue` | Queue item model, statuses, claim-loss error, audited overrides, attempt/disposition records, provider contract, and SQLite implementation. | `SqliteQueue` creates/migrates and mutates SQLite queue state. Every claim receives an opaque `claim_token`; claimed-worker mutations require the current token. Its `fail()` returns the durable `retry_scheduled` or `failed` attempt disposition; custom providers may return `None` when they cannot attest it. `list_attempts()` exposes one final outcome per post-v4 claim without fabricating history for older rows. |
 | `QueueRunSummary`, `run_queue_loop` | Process claimed queue items through user factories and `Engine`. Fatal `MemoryError`, `KeyboardInterrupt`, and `SystemExit` signals propagate after deterministic cleanup. | `processed` and `failed` remain compatibility aggregates. Use `retry_scheduled`, `terminal_failed`, `lease_lost`, and `transition_unknown` for disposition truth; unknown is never inferred from a requested retry flag. Mutates queue and transaction SQLite databases; renews leases; checkpoints transactions when `transaction_db_path` is configured. Durable queue checkpoints require `SqliteQueue` and atomically validate its claim token plus transaction revision. Every post-claim exit stops and joins its lease heartbeat. |
 
+`QueueItem.available_at: datetime | None` exposes the persisted next eligible UTC
+instant; `None` means no outstanding delay. The field is appended after existing
+constructor fields. Inserts accept only aware datetimes or `None` and normalize
+them to UTC microseconds. Claims clear the field. `SqliteQueue` accepts
+`retry_delay` (default 1 second, range 0–86400) and `retry_backoff` (default 2,
+finite and at least 1) in its config dictionary. Boolean values are invalid.
+Retryable failures, expired leases and retrying administrative overrides persist
+`min(86400, retry_delay * retry_backoff ** (retry_count - 1))` seconds of delay,
+rounded up to whole microseconds, with a minimum of one for positive delays. Zero selects immediate
+redelivery. Terminal transitions clear the deadline. Settings apply to newly
+scheduled retries; reopening with different settings retains stored deadlines.
+
+`next_item()` claims the oldest currently eligible pending item, allowing later
+ready work to bypass delayed items. `run_queue_loop()` still drains once and can
+return with delayed pending work; schedule a later invocation to process it.
+The queue clock is UTC wall time, so clock adjustments affect eligibility. This
+adds no exactly-once guarantee and does not change Engine retry behavior.
+Stored deadlines must use canonical UTC text with six fractional digits. A
+selected noncanonical deadline raises `ValueError` before claiming or
+quarantining that item; the queue never repairs it by erasing the deadline.
+
 With `transaction_db_path`, the SQLite runner creates the initial pending
 snapshot and queue binding in one commit, before executing steps. The new ID
 must be a nonblank string and unused, including by revision-zero records. An ID
@@ -301,7 +322,7 @@ If initial persistence rejects a blank/non-string or already-used ID,
 wrapper's private class is not part of the supported API.
 
 `QueuePage[T]` has `records: tuple[T, ...]`, `has_more: bool`,
-`next_cursor: str | None` and `format_version: int` (currently `1`). Limits are
+`next_cursor: str | None` and `format_version: int` (currently `2`). Limits are
 integers from 1 through 1000. Item `statuses` takes a union of `QueueStatus`
 values: `None` selects all, an empty iterable selects none, and repetitions or
 reordering do not change cursor identity. Event `item_id` selectors use exact
@@ -311,7 +332,9 @@ Items sort by persisted `(created_at, id)` text ascending; events sort by
 sequence ascending. Cursors are opaque, versioned and bound to the query kind
 and normalized filters; malformed, unsupported or mismatched cursors raise
 `ValueError`. Pass them back to the same query with the same filters. Each call
-returns one page and closes its connection. Pages are current reads, not a
+returns one page and closes its connection. Page format 2 adds the item deadline;
+cursor format remains 1 because query positions and ordering are unchanged.
+Saved v1 cursors remain accepted. Pages are current reads, not a
 global snapshot: filter changes or new/backdated rows behind the cursor require
 a fresh traversal. Complete enumeration requires quiescent storage.
 

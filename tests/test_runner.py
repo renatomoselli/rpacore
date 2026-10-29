@@ -124,7 +124,7 @@ class _RecordingSqliteQueue(SqliteQueue):
         *,
         max_retries: int = 0,
     ) -> None:
-        super().__init__({"db_path": db_path, "max_retries": max_retries})
+        super().__init__({"db_path": db_path, "max_retries": max_retries, "retry_delay": 0})
         self.completed: list[str] = []
         self.failed: list[str] = []
         self.fail_retries: list[bool] = []
@@ -1055,7 +1055,7 @@ class TestRunnerManagedTransactionPersistence:
                 return now
 
         queue = SqliteQueue({
-            "db_path": str(tmp_path / "queue.db"), "lease_timeout": 30, "max_retries": 1,
+            "db_path": str(tmp_path / "queue.db"), "lease_timeout": 30, "max_retries": 1, "retry_delay": 0,
         })
         queue._clock = Clock()
         item = _item("notification-lease-loss")
@@ -1731,7 +1731,7 @@ class TestRunnerManagedTransactionPersistence:
         queue_db = str(tmp_path / "queue.db")
         transaction_db = str(tmp_path / "transactions.db")
         queue = SqliteQueue(
-            {"db_path": queue_db, "lease_timeout": 1, "max_retries": 1}
+            {"db_path": queue_db, "lease_timeout": 1, "max_retries": 1, "retry_delay": 0}
         )
         item = QueueItem(reference="same-label-runner", payload={})
         queue.add(item)
@@ -3026,7 +3026,7 @@ class TestQueueLeaseHeartbeat:
 
     def test_item_is_reclaimable_after_fatal_notifier_exit(self, tmp_path) -> None:
         db_path = str(tmp_path / "queue.db")
-        queue = SqliteQueue({"db_path": db_path, "lease_timeout": 1, "max_retries": 1})
+        queue = SqliteQueue({"db_path": db_path, "lease_timeout": 1, "max_retries": 1, "retry_delay": 0})
         queue.add(_item("fatal"))
 
         class _FatalNotifier:

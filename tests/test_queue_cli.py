@@ -34,7 +34,7 @@ def test_empty_item_list_in_human_and_json_output(tmp_path, capsys):
         assert not result.err
         if json_flag:
             assert json.loads(result.out) == {
-                "schema_version": 1, "command": "queue:list", "limit": 100,
+                "schema_version": 2, "command": "queue:list", "limit": 100,
                 "records": [], "has_more": False, "next_cursor": None,
             }
         else:
@@ -54,7 +54,7 @@ def test_allowlisted_output_and_nonmutation(storage, capsys, command, as_json):
     assert {p: p.read_bytes() for p in storage.parent.iterdir() if p.is_file()} == before
     if as_json:
         data = json.loads(result.out)
-        assert data["schema_version"] == 1 and data["command"] == f"queue:{command[0]}"
+        assert data["schema_version"] == 2 and data["command"] == f"queue:{command[0]}"
         records = [data["item"]] if command[0] == "show" else data["records"]
         assert records  # In particular, an omitted --status means all items.
 

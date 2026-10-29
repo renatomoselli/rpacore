@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "command": "queue:attempts",
+  "limit": 100,
+  "records": [
+    {
+      "sequence": 1,
+      "item_id": "queue-fixture",
+      "claimed_by": "fixture-worker",
+      "started_at": "2026-10-22T12:00:00+00:00",
+      "finished_at": null,
+      "outcome": null
+    }
+  ],
+  "has_more": false,
+  "next_cursor": null
+}

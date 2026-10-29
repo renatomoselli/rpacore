@@ -35,7 +35,8 @@ from rpacore.transaction import Transaction
 
 def make_queue(tmp_path, **kwargs) -> SqliteQueue:
     db = str(tmp_path / "queue.db")
-    return SqliteQueue({"db_path": db, **kwargs})
+    # These lifecycle tests explicitly exercise the immediate-delivery option.
+    return SqliteQueue({"db_path": db, "retry_delay": 0, **kwargs})
 
 
 def make_item(reference: str = "ref", payload: dict | None = None) -> QueueItem:
@@ -563,7 +564,7 @@ class TestSqliteQueueIntrospection:
         finally:
             conn.close()
 
-        assert version == 4
+        assert version == 5
 
     def test_queue_uses_rollback_journal(self, tmp_path):
         queue = make_queue(tmp_path)
@@ -756,7 +757,7 @@ class TestSqliteQueueIntrospection:
 
         stored = q.get_item("old")
         assert "transaction_id" in columns
-        assert version == 4
+        assert version == 5
         assert stored is not None
         assert stored.transaction_id == ""
 

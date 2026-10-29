@@ -25,7 +25,7 @@ def test_gate_retains_runtime_and_wheel_identity_even_when_tests_fail(tmp_path, 
     module = _load_script()
     repo = tmp_path / "repo"
     (repo / "tests").mkdir(parents=True)
-    names = ["test_queue.py", "test_persistence.py", "test_sqlite_runtime.py"]
+    names = ["test_queue.py", "test_queue_retry.py", "test_persistence.py", "test_sqlite_runtime.py"]
     for name in names:
         (repo / "tests" / name).write_text("# synthetic gate fixture\n", encoding="utf-8")
     wheel = tmp_path / "rpacore-test.whl"
@@ -59,7 +59,7 @@ def test_gate_retains_runtime_and_wheel_identity_even_when_tests_fail(tmp_path, 
     assert (output / "keep.txt").read_text(encoding="utf-8") == "caller-owned"
     command, kwargs = calls[0]
     assert command[1:3] == ["-m", "pytest"]
-    assert command[3:6] == names
+    assert command[3:7] == names
     assert command[command.index("--basetemp") + 1] == str(kwargs["cwd"] / "tmp")
     assert command[-2:] == ["--junitxml", str(output / "sqlite-runtime.xml")]
     assert "PYTHONPATH" not in kwargs["env"]
