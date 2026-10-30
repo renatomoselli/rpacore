@@ -2930,3 +2930,36 @@ class TestSchemaMigration:
 
         with pytest.raises(sqlite3.OperationalError):
             save_transaction(make_transaction(), db_path)
+
+
+@pytest.mark.parametrize("shared", [False, True], ids=["separate-files", "shared-file"])
+@pytest.mark.parametrize(("revision", "initial", "message"), [
+    (-1, False, "expected_revision must be >= 0"),
+    (1, True, "initial queue persistence requires revision zero"),
+])
+def test_invalid_fenced_revision_preserves_databases(tmp_path, shared, revision, initial, message):
+    from rpacore.queue import QueueItem, SqliteQueue
+
+    queue_path = tmp_path / "queue.db"
+    transaction_path = queue_path if shared else tmp_path / "transactions.db"
+    queue = SqliteQueue({"db_path": str(queue_path)})
+    queue.add(QueueItem(reference="revision-guard", payload={}))
+    claim = queue.next_item("worker")
+    transaction = make_transaction(state={"original": True}, steps=[Step("original", 1)])
+    _save_queue_transaction_fenced(
+        transaction, db_path=str(transaction_path), queue_db_path=str(queue_path),
+        queue_item_id=claim.id, claimed_by=claim.claimed_by, claim_token=claim.claim_token,
+        expected_revision=0, initial=True,
+    )
+    paths = {queue_path, transaction_path}
+    binding = queue.get_item(claim.id)
+    before = {path: path.read_bytes() for path in paths}
+    transaction.state = {"unexpected": True}
+    with pytest.raises(ValueError, match=message):
+        _save_queue_transaction_fenced(
+            transaction, db_path=str(transaction_path), queue_db_path=str(queue_path),
+            queue_item_id=claim.id, claimed_by=claim.claimed_by, claim_token=claim.claim_token,
+            expected_revision=revision, initial=initial,
+        )
+    assert {path: path.read_bytes() for path in paths} == before
+    assert queue.get_item(claim.id) == binding

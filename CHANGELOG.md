@@ -76,6 +76,12 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- Transaction loads now capture all record rows and their private revision in
+  one SQLite read snapshot, closing the connection before decoding or recovery
+  preparation. Queue recovery keeps that matching revision so a concurrent save
+  cannot be overwritten by an older snapshot carrying a newer revision. Public
+  signatures, schemas, formats and retry policy are unchanged; no migration,
+  dependency or examples-repository update is required.
 - Queue runners retry built-in SQLite claim lock/busy failures with three total
   attempts and 0.05/0.1-second waits, checking for stop before each call. Custom
   providers and overridden claim methods retain single-call behavior. Claim

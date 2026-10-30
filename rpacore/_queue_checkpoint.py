@@ -10,21 +10,6 @@ from rpacore.persistence import TransactionFenceError
 from rpacore.transaction import Transaction
 
 
-def _load_transaction_revision(transaction_id: str, db_path: str) -> int:
-    """Return the current durable revision for a bound queue transaction."""
-    conn = persistence._connect(db_path)
-    try:
-        persistence._ensure_schema(conn)
-        row = conn.execute(
-            "SELECT revision FROM transactions WHERE id = ?", (transaction_id,)
-        ).fetchone()
-        if row is None:
-            raise KeyError(f"Transaction not found: {transaction_id!r}")
-        return int(row["revision"])
-    finally:
-        conn.close()
-
-
 def _qualified_queue_schema_version(conn: sqlite3.Connection, schema: str) -> int:
     table = conn.execute(
         f"SELECT 1 FROM {schema}.sqlite_master "

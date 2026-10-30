@@ -31,6 +31,23 @@ def resume_transaction(
     transaction status first to avoid unnecessary work.
     """
     transaction = load_transaction(tx_id, db_path)
+    return _prepare_resumed_transaction(
+        transaction,
+        steps,
+        retry_business_failures=retry_business_failures,
+        definition_identity=definition_identity,
+    )
+
+
+def _prepare_resumed_transaction(
+    transaction: Transaction,
+    steps: list[Step],
+    *,
+    retry_business_failures: bool = False,
+    definition_identity: str | None = None,
+) -> Transaction:
+    """Reattach execution only after the persisted snapshot has been released."""
+    tx_id = transaction.id
     if transaction.status is Status.SUCCESSFUL:
         return transaction
 
@@ -108,13 +125,12 @@ def resume_transaction(
         raise KeyError(f"Recovery steps did not match persisted transaction: {extra}")
 
     transaction.steps = restored
-    if transaction.status is not Status.SUCCESSFUL:
-        transaction.status = Status.PENDING
-        transaction.retry_count = 0
-        transaction.started_at = None
-        transaction.finished_at = None
-        if not already_resumed:
-            transaction.append_history(HistoryEvent.TRANSACTION_RESUMED)
+    transaction.status = Status.PENDING
+    transaction.retry_count = 0
+    transaction.started_at = None
+    transaction.finished_at = None
+    if not already_resumed:
+        transaction.append_history(HistoryEvent.TRANSACTION_RESUMED)
     return transaction
 
 

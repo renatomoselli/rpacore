@@ -14,10 +14,13 @@ import pytest
 from rpacore._queue_checkpoint import _save_queue_transaction_fenced
 
 from rpacore import (
+    Artifact, BusinessException, Engine, EnvCredentialProvider, HistoryEvent, Step,
+    SystemException, run_queue_loop, serialize_transaction,
     QueueItem, QueueStatus, SqliteQueue, Status, Transaction, TransactionFenceError,
     load_transaction, save_transaction,
 )
 from rpacore.persistence import _prepare_transaction_database
+import rpacore.persistence as persistence
 
 
 _CLAIM_WORKER = """
@@ -381,3 +384,247 @@ def test_wal_conversion_and_active_checkpoint_rejection(tmp_path, wal_target):
         )
     assert transaction_path.read_bytes() == before
     assert load_transaction(transaction.id, str(transaction_path), readonly=True).state == {"original": True}
+
+
+_SNAPSHOT_WRITER = """
+import json, sqlite3, sys, time
+from pathlib import Path
+import rpacore.persistence as persistence
+from rpacore import (Artifact, HistoryEvent, Status, SystemException,
+                     load_transaction, serialize_transaction)
+root, db_path, transaction_id, mode = sys.argv[1:]
+root = Path(root)
+transaction = load_transaction(transaction_id, db_path, readonly=True)
+transaction.reference = 'new'
+transaction.state = {'checkpoint': 2}
+transaction.metadata = {'checkpoint': 2}
+transaction.status = Status.SUCCESSFUL
+transaction.steps[0].status = Status.SUCCESSFUL
+transaction.steps[0].arguments = {'checkpoint': 2}
+transaction.steps[0].exceptions = [SystemException('new')]
+transaction.append_history(HistoryEvent.TRANSACTION_COMPLETED)
+transaction.artifacts = [Artifact('new', 'new.txt', metadata={'checkpoint': 2})]
+(root / 'writer-ready').touch()
+deadline = time.monotonic() + 15
+while not (root / 'writer-start').exists():
+    if time.monotonic() > deadline:
+        raise TimeoutError('reader never started writer')
+    time.sleep(.01)
+connection = persistence._connect(db_path)
+try:
+    if mode == 'release':
+        connection.execute('PRAGMA busy_timeout=0')
+    connection.execute('BEGIN IMMEDIATE')
+    state, metadata, artifacts = persistence._serialized_transaction(transaction)
+    persistence._write_transaction_rows(
+        connection, transaction, state_json=state, metadata_json=metadata,
+        artifact_rows=artifacts, expected_revision=None)
+    connection.set_trace_callback(lambda sql: (root / 'commit-attempt').touch()
+                                  if sql == 'COMMIT' else None)
+    try:
+        connection.execute('COMMIT')
+    except sqlite3.OperationalError as error:
+        if mode != 'release' or error.sqlite_errorcode != sqlite3.SQLITE_BUSY:
+            raise
+        (root / 'commit-blocked').touch()
+        deadline = time.monotonic() + 15
+        while not (root / 'reader-released').exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError('reader never released snapshot')
+            time.sleep(.01)
+        connection.execute('PRAGMA busy_timeout=1000')
+        connection.execute('COMMIT')
+    result = {'record': serialize_transaction(transaction)}
+except sqlite3.OperationalError as error:
+    result = {'error_code': error.sqlite_errorcode}
+finally:
+    connection.close()
+(root / 'writer-result.json').write_text(json.dumps(result), encoding='utf-8')
+"""
+
+
+@pytest.mark.parametrize('readonly', [False, True])
+@pytest.mark.parametrize('exhaust', [False, True], ids=['release', 'timeout'])
+@pytest.mark.parametrize('public', [False, True], ids=['paired', 'public'])
+def test_transaction_load_keeps_one_snapshot_during_writer_commit(tmp_path, monkeypatch, readonly, exhaust, public):
+    db = str(tmp_path / 'transactions.db')
+    step = Step('stored', 1, arguments={'checkpoint': 1})
+    step.status = Status.FAILED
+    step.exceptions = [BusinessException('old'), SystemException('old-system')]
+    transaction = Transaction('old', state={'checkpoint': 1}, metadata={'checkpoint': 1},
+                              steps=[step], artifacts=[Artifact('old', 'old.txt')])
+    transaction.append_history(HistoryEvent.TRANSACTION_STARTED)
+    save_transaction(transaction, db)
+    old = serialize_transaction(load_transaction(transaction.id, db, readonly=True))
+    process = subprocess.Popen([sys.executable, '-c', _SNAPSHOT_WRITER,
+                                str(tmp_path), db, transaction.id,
+                                'timeout' if exhaust else 'release'])
+    connect = persistence._connect
+    observations = []
+    try:
+        _wait_ready(process, tmp_path / 'writer-ready')
+
+        def pause_after_header(sql):
+            if not sql.startswith('SELECT id, name, execution_order, status, arguments FROM steps'):
+                return
+            try:
+                (tmp_path / 'writer-start').touch()
+                _wait_ready(process, tmp_path / 'commit-attempt')
+                if exhaust:
+                    assert process.wait(timeout=10) == 0
+                    result = json.loads((tmp_path / 'writer-result.json').read_text())
+                    assert result == {'error_code': sqlite3.SQLITE_BUSY}
+                else:
+                    # A zero-wait COMMIT must actually fail while this reader holds
+                    # its snapshot. Release the writer only after the load returns.
+                    _wait_ready(process, tmp_path / 'commit-blocked')
+                observations.append(True)
+            except BaseException as error:
+                # sqlite trace callbacks discard exceptions; relay them to pytest.
+                observations.append(error)
+
+        def traced_connect(path, *, readonly=False):
+            connection = connect(path, readonly=readonly)
+            connection.set_trace_callback(pause_after_header)
+            return connection
+
+        with monkeypatch.context() as scoped:
+            scoped.setattr(persistence, '_connect', traced_connect)
+            if public:
+                captured = load_transaction(transaction.id, db, readonly=readonly)
+            else:
+                captured, revision = persistence._load_transaction_with_revision(
+                    transaction.id, db, readonly=readonly)
+                assert revision == 1
+        (tmp_path / 'reader-released').touch()
+        assert observations == [True]
+        assert serialize_transaction(captured) == old
+        assert process.wait(timeout=10) == 0
+        if exhaust:
+            assert serialize_transaction(load_transaction(transaction.id, db, readonly=True)) == old
+            save_transaction(transaction, db)  # the released reader no longer blocks a writer
+        else:
+            result = json.loads((tmp_path / 'writer-result.json').read_text())
+            if public:
+                current = load_transaction(transaction.id, db, readonly=readonly)
+            else:
+                current, revision = persistence._load_transaction_with_revision(transaction.id, db, readonly=readonly)
+                assert revision == 2
+            assert serialize_transaction(current) == result['record']
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=10)
+
+
+@pytest.mark.parametrize('shared', [False, True], ids=['separate-files', 'shared-file'])
+@pytest.mark.parametrize('write_during', ['decode', 'reattach'])
+def test_recovered_snapshot_cannot_borrow_a_newer_revision(tmp_path, monkeypatch, shared, write_during):
+    queue_path = tmp_path / 'queue.db'
+    db_path = queue_path if shared else tmp_path / 'transactions.db'
+    queue = SqliteQueue({'db_path': str(queue_path)})
+    durable = Transaction('recovery', definition_identity='snapshot/v1',
+                          state={'checkpoint': 1}, steps=[Step('effect', 1)])
+    save_transaction(durable, str(db_path))
+    item = QueueItem(reference='recovery', payload={}, transaction_id=durable.id)
+    queue.add(item)
+    after_save = []
+    effects = []
+
+    def publish_newer():
+        assert not after_save, 'independent update must happen exactly once'
+        durable.state = {'checkpoint': 2}
+        save_transaction(durable, str(db_path))
+        after_save.append(db_path.read_bytes())
+
+    class Effect(Step):
+        def __setattr__(self, name, value):
+            if name == 'arguments' and getattr(self, 'armed', False):
+                self.armed = False
+                publish_newer()
+            super().__setattr__(name, value)
+
+        def execute(self, ctx):
+            effects.append('unexpected execution')
+
+    def build(_item):
+        step = Effect('effect', 1)
+        step.armed = write_during == 'reattach'
+        return Transaction('recovery', definition_identity='snapshot/v1', steps=[step])
+
+    if write_during == 'decode':
+        decode = persistence._transaction_from_rows
+
+        def decode_after_save(rows):
+            publish_newer()
+            return decode(rows)
+
+        monkeypatch.setattr(persistence, '_transaction_from_rows', decode_after_save)
+    summary = run_queue_loop(queue, Engine(), build, {}, EnvCredentialProvider(),
+                             transaction_db_path=str(db_path))
+    assert summary.processed == summary.failed == summary.lease_lost == 1
+    assert summary.completed == summary.persistence_errors == 0
+    assert not effects
+    assert len(after_save) == 1 and db_path.read_bytes() == after_save[0]
+    current = queue.get_item(item.id)
+    assert current.status is QueueStatus.IN_PROGRESS
+    assert current.transaction_id == durable.id
+    assert queue.list_attempts(item.id)[0].finished_at is None
+    with closing(sqlite3.connect(db_path)) as connection:
+        assert connection.execute('SELECT state, revision FROM transactions WHERE id = ?',
+                                  (durable.id,)).fetchone() == ('{"checkpoint": 2}', 2)
+
+
+def test_recovery_reader_does_not_survive_into_step_or_callback(tmp_path):
+    db_path = tmp_path / 'shared.db'
+    queue = SqliteQueue({'db_path': str(db_path)})
+    durable = Transaction('recovery', definition_identity='snapshot/v1', steps=[Step('effect', 1)])
+    save_transaction(durable, str(db_path))
+    queue.add(QueueItem(reference='recovery', payload={}, transaction_id=durable.id))
+    with closing(sqlite3.connect(db_path)) as connection, connection:
+        connection.execute('CREATE TABLE lock_probes (phase TEXT)')
+
+    def independent_write(phase):
+        with closing(sqlite3.connect(db_path, timeout=.1)) as connection, connection:
+            connection.execute('INSERT INTO lock_probes VALUES (?)', (phase,))
+
+    class Effect(Step):
+        def execute(self, ctx):
+            independent_write('step')
+
+    summary = run_queue_loop(
+        queue, Engine(), lambda item: Transaction(item.reference, definition_identity='snapshot/v1',
+                                                  steps=[Effect('effect', 1)]),
+        {}, EnvCredentialProvider(), transaction_db_path=str(db_path),
+        after_item=lambda *args: independent_write('callback'))
+    assert summary.completed == 1 and summary.failed == summary.callback_errors == 0
+    with closing(sqlite3.connect(db_path)) as connection:
+        assert connection.execute('SELECT phase FROM lock_probes ORDER BY rowid').fetchall() == [
+            ('step',), ('callback',)]
+
+
+@pytest.mark.parametrize('failure', ['missing', 'read-error', 'fatal-read', 'corrupt-decode'])
+@pytest.mark.parametrize('readonly', [False, True])
+def test_transaction_load_errors_release_the_reader(tmp_path, monkeypatch, failure, readonly):
+    db_path = tmp_path / 'transactions.db'
+    transaction = Transaction('errors')
+    save_transaction(transaction, str(db_path))
+    expected = KeyError if failure == 'missing' else SystemException
+    if failure == 'corrupt-decode':
+        with closing(sqlite3.connect(db_path)) as connection, connection:
+            connection.execute("UPDATE transactions SET state = 'invalid'")
+    if failure in {'read-error', 'fatal-read'}:
+        error = sqlite3.OperationalError('read failed') if failure == 'read-error' else KeyboardInterrupt()
+        expected = type(error)
+
+        def failed_read(connection, transaction_id):
+            connection.execute('SELECT * FROM transactions').fetchall()
+            raise error
+
+        monkeypatch.setattr(persistence, '_read_transaction_rows', failed_read)
+    before = db_path.read_bytes()
+    with pytest.raises(expected):
+        load_transaction('missing' if failure == 'missing' else transaction.id,
+                         str(db_path), readonly=readonly)
+    assert db_path.read_bytes() == before
+    save_transaction(transaction, str(db_path))

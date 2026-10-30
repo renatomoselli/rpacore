@@ -14,7 +14,7 @@ from typing import Callable
 from rpacore._clock import _Clock, _SYSTEM_CLOCK
 from rpacore._definition import validate_definition_identity
 from rpacore._json_state import JsonStateError, validate_json_object
-from rpacore._queue_checkpoint import _load_transaction_revision, _save_queue_transaction_fenced
+from rpacore._queue_checkpoint import _save_queue_transaction_fenced
 from rpacore._sqlite_retry import _sleep_before_sqlite_retry, is_transient_sqlite_lock
 from rpacore._validation import type_error
 from rpacore.context import ProcessContext
@@ -25,6 +25,7 @@ from rpacore.logger import bind_log_context, get_logger
 from rpacore.notify import Notifier, dispatch
 from rpacore.persistence import (
     TransactionFenceError,
+    _load_transaction_with_revision,
     _prepare_transaction_database,
     load_transaction,
 )
@@ -35,7 +36,7 @@ from rpacore.queue import (
     QueueProvider,
     SqliteQueue,
 )
-from rpacore.recovery import resume_transaction
+from rpacore.recovery import _prepare_resumed_transaction
 from rpacore.report import generate_report
 from rpacore.status import Status
 from rpacore.transaction import HistoryEvent, Transaction
@@ -980,17 +981,17 @@ def _transaction_for_queue_item(
     if item.transaction_id:
         try:
             candidate = build_transaction(item)
-            transaction = resume_transaction(
-                item.transaction_id,
-                candidate.steps,
-                db_path=transaction_db_path,
-                retry_business_failures=retry_business_failures,
-                definition_identity=candidate.definition_identity,
-            )
-            return transaction, _load_transaction_revision(
+            transaction, recovered_revision = _load_transaction_with_revision(
                 item.transaction_id,
                 transaction_db_path,
             )
+            transaction = _prepare_resumed_transaction(
+                transaction,
+                candidate.steps,
+                retry_business_failures=retry_business_failures,
+                definition_identity=candidate.definition_identity,
+            )
+            return transaction, recovered_revision
         except (
             KeyError,
             sqlite3.Error,

@@ -151,7 +151,11 @@ back.
 The token, revision, and queue-item binding are persistence-fencing records,
 not public `Transaction` attributes. `load_transaction()` returns the domain
 transaction snapshot; the runner owns the private fencing values needed to
-persist its next checkpoint safely.
+persist its next checkpoint safely. Queue recovery captures the transaction
+and its expected revision in the same read snapshot. If another save commits
+after that snapshot, the resumed runner's first checkpoint rejects its stale
+revision instead of overwriting the newer record. The read connection closes
+before executable steps are reattached or user code runs.
 
 Every new claim also opens one durable `QueueAttempt`. Completion, explicit
 retry, terminal failure, lease expiry, and an administrative override close that
@@ -518,6 +522,22 @@ and loaded through:
 load_transaction(transaction_id, db_path="rpacore.db")
 list_transactions(db_path="rpacore.db")
 ```
+
+Each individual transaction load captures its header, steps, exceptions,
+history, metadata and artifacts in one SQLite read transaction after schema
+handling. It fetches raw rows and closes the connection before decoding JSON
+or constructing domain objects. A concurrent save therefore cannot mix parts
+of different checkpoints in a loaded record. Missing rows and read errors
+also close the connection; decoding errors occur after it has closed.
+
+DELETE rollback journals mean a reader can delay a writer's commit during row
+capture. Records have no row or size limit, so large loads and concurrent
+writes can still reach the existing one-second SQLite busy timeout, including
+queue heartbeat writes when both components share a file. This adds no hidden
+retry, new timeout or throughput guarantee. Domain decoding, recovery
+preparation, callbacks, step execution and paused iteration hold no snapshot
+lock. Separate transaction loads and paginated exports do not share one global
+snapshot.
 
 CLI list and export select full records through `query_transactions()` summary
 pages ordered by normalized UTC creation time and transaction id. Each page is

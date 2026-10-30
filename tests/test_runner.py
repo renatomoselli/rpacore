@@ -2390,7 +2390,7 @@ class TestRunnerManagedTransactionPersistence:
         def _fail_resume(*args, **kwargs):
             raise sqlite3.OperationalError("database is locked")
 
-        monkeypatch.setattr(runner_module, "resume_transaction", _fail_resume)
+        monkeypatch.setattr(runner_module, "_load_transaction_with_revision", _fail_resume)
 
         summary, queue = _run(
             [item],
@@ -2417,7 +2417,7 @@ class TestRunnerManagedTransactionPersistence:
         def _fail_resume(*args: object, **kwargs: object) -> None:
             raise JsonStateError("invalid persisted metadata")
 
-        monkeypatch.setattr(runner_module, "resume_transaction", _fail_resume)
+        monkeypatch.setattr(runner_module, "_load_transaction_with_revision", _fail_resume)
 
         summary, queue = _run(
             [item],
