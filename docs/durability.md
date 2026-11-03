@@ -243,6 +243,18 @@ Worker transitions never double as operator overrides. `force_complete()` and
 reason, invalidate any active token, and append a durable `QueueAdminEvent`.
 Use `list_admin_events()` to inspect those overrides.
 
+The [administrative CLI](cli.md#queue-administration) exposes the terminal forms
+as `queue complete` and `queue fail`, requiring a reason and `--confirm` before
+storage access. It preserves the existing API's audit and fencing transaction,
+payload and transaction binding; it does not change transaction checkpoints.
+An acknowledgement follows commit and is not a later state read. Repeated
+overrides are not idempotent requests: `fail` increments retry count again.
+After confirmation the writable constructor can migrate supported storage,
+initialize a queue component in an existing file, or persistently convert WAL
+to DELETE journaling even if the requested item is later found missing. Stop
+workers and back up before migration or journal conversion. Lost-ack audit
+recovery still requires Python `list_admin_events()`; inspect before retrying.
+
 ## Runner Failure Policy
 
 `run_queue_loop()` keeps framework lifecycle behavior separate from user
@@ -480,7 +492,8 @@ application effects must tolerate replay across that gap.
 ## Read-only Queue Inspection
 
 `get_queue_item`, `query_queue_items`, `query_queue_attempts` and
-`query_queue_poison_events`, and the [queue CLI](cli.md#queue-commands), open only
+`query_queue_poison_events`, and the [queue inspection commands](cli.md#queue-commands)
+`list/show/attempts/poison`, open only
 existing storage through SQLite read-only URI connections. Inspection requires
 the current queue schema and compatible component markers. It does not create,
 migrate, claim, reclaim expired leases, quarantine payloads or repair storage.

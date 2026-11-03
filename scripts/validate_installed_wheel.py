@@ -394,6 +394,44 @@ for arguments, expected_code in (
     assert result.returncode == expected_code and result.stdout == "" and result.stderr, result
 print("Installed read-only queue APIs and console commands passed")
 
+# Administrative commands use a separate disposable queue and the installed console.
+admin_path = root / "administration-queue.db"
+admin = SqliteQueue({"db_path": str(admin_path)})
+admin_config_dir = root / "admin-config"
+admin_config_dir.mkdir()
+(admin_config_dir / "config.toml").write_text('[queue]\ndb_path = "../administration-queue.db"\n', encoding="utf-8")
+for command, item_id, selector, as_json in (
+    ("complete", "complete", ["--db", str(admin_path)], True),
+    ("fail", "fail", ["--db", str(admin_path)], True),
+    ("complete", "human\n\x1b[2Jtarget", ["--db", str(admin_path)], False),
+    ("fail", "configured", ["--config", "admin-config/config.toml"], True),
+):
+    admin.add(QueueItem(id=item_id, reference="admin-smoke", payload={"secret": "payload-secret"}))
+    arguments = console + ["queue", command, item_id, *selector, "--reason", "reason-secret", *(["--json"] if as_json else [])]
+    before_admin = {p: p.read_bytes() for p in root.glob("administration-queue.db*")}
+    refused = subprocess.run(arguments, cwd=root, capture_output=True, text=True)
+    assert refused.returncode == 2 and refused.stdout == "" and "--confirm" in refused.stderr, refused
+    assert {p: p.read_bytes() for p in root.glob("administration-queue.db*")} == before_admin
+    assert admin.list_admin_events(item_id) == []
+    applied = run(arguments + ["--confirm"], root)
+    assert applied.stderr == "", applied
+    if as_json:
+        assert json.loads(applied.stdout) == {
+            "schema_version": 2, "command": "queue:" + command, "item_id": item_id, "applied": True,
+        }, applied
+    else:
+        assert applied.stdout == f"Administrative {command} applied for queue item {item_id!r}\n", applied
+        assert "\x1b" not in applied.stdout and applied.stdout.count("\n") == 1
+    item = admin.get_item(item_id)
+    assert item.status.value == ("successful" if command == "complete" else "failed")
+    assert item.retry_count == int(command == "fail")
+    event, = admin.list_admin_events(item_id)
+    assert event.action == "force_" + command and event.reason == "reason-secret"
+    missing = subprocess.run(arguments[:3] + ["absent"] + arguments[4:] + ["--confirm"], cwd=root, capture_output=True, text=True)
+    assert missing.returncode == 1 and missing.stdout == "" and "not found" in missing.stderr, missing
+    assert "reason-secret" not in missing.stderr
+print("Installed confirmed queue administration commands passed")
+
 # Separate drain-once processes, suitable for an external scheduler. No task is
 # registered: the test proves durable timing and bound-transaction recovery.
 worker = root / "delayed_worker.py"

@@ -43,6 +43,17 @@ transaction IDs remain visible and can contain application data. Apply access
 controls and retention to captured human/JSON output. A cursor carries only a
 position and filter identity; it grants no storage access and is not a snapshot.
 
+Queue administrative commands require `--reason` and `--confirm` before storage
+access. This confirmation expresses operator intent; local file permissions
+remain the access boundary. Reasons are stored verbatim after trimming in the
+administrative audit and may also enter shell history or process argument
+records. Keep credentials and sensitive transaction contents out of reasons.
+Acknowledgements omit the reason, payload and claim token; human item IDs are
+quoted with control characters escaped. A lost acknowledgement may require
+Python audit inspection before retrying; repeated overrides can change durable
+counters again. See [queue administration](cli.md#queue-administration) for
+writable initialization, migration and journal-conversion effects.
+
 RPA Core does not persist `ProcessContext.resources` and does not serialize
 credential provider objects. That protection depends on users keeping runtime
 clients, sessions, handles, and secrets in `ctx.resources` or credential

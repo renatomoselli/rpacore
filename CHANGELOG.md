@@ -6,6 +6,13 @@ All notable user-facing changes are recorded here.
 
 ### Added
 
+- `rpacore queue complete` and terminal `queue fail` wrap the existing audited
+  overrides, requiring `--reason` and `--confirm` before storage access. They
+  reuse queue storage selection and return schema-2 JSON acknowledgements or
+  human output with escaped IDs. Confirmed commands inherit writable storage
+  initialization, migration and WAL-to-DELETE conversion; lost acknowledgements
+  require inspection before retrying. No new schema, dependency or
+  examples-repository update is required.
 - Notification dispatch retries selected transient SMTP/HTTP/socket failures
   up to three attempts, with 1- and 2-second waits and attempt logs. Terminal
   failure accounting and transaction outcomes remain separate. This replaces

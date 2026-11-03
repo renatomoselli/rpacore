@@ -206,7 +206,7 @@ rpacore queue poison [ITEM_ID] --db path/to/queue.db --json
 rpacore queue list --status pending --status failed --limit 20 --cursor TOKEN
 ```
 
-All four commands inspect existing storage without creating, migrating,
+These four inspection commands inspect existing storage without creating, migrating,
 reclaiming expired leases, quarantining malformed payloads, or repairing it.
 The queue schema must already be current, and all framework components must be
 compatible. WAL databases are refused before SQLite is opened, preserving their
@@ -253,6 +253,59 @@ bounded error categories and corrective guidance go to stderr without raw
 config, stored diagnostic content or exception messages. Item decode failures
 do not quarantine data; attempts/poison can still be inspected independently.
 
+### Queue administration
+
+```bash
+rpacore queue complete ITEM_ID --reason "External completion verified" --confirm --db path/to/queue.db
+rpacore queue fail ITEM_ID --reason "Operator resolved as terminal failure" --confirm --config path/to/config.toml --json
+```
+
+Use these administrative overrides after verifying the item's external outcome.
+Both require an opaque nonblank ID, a nonblank `--reason` and `--confirm`.
+Missing/invalid arguments or absent confirmation return `2` with empty stdout
+and stderr guidance before any manifest, config or database access. There is no
+interactive prompt or preview. IDs are preserved exactly; human acknowledgements
+quote them and escape control characters. The trimmed reason is stored in the
+durable audit and is never echoed in acknowledgements or application errors.
+
+`complete` wraps `force_complete()`: it marks the item `successful` and preserves
+its retry count. `fail` wraps `force_fail(retry=False)`: it marks the item
+terminally `failed` and increments that count; it does not requeue work. Both
+preserve payload and transaction binding, clear claim ownership/token and any
+delivery deadline, close an active attempt as `admin_override`, and append one
+reasoned administrative event. They need no worker token. Invalidating a claim
+cannot stop already-running step code or undo external side effects; these
+commands do not rewrite a transaction's checkpoint or certify external success.
+
+Storage selection follows the precedence above, including `--db` bypass of
+config even when both flags are supplied. A selected database must be an
+existing regular file; missing files and directories fail with `1` without
+creating storage. No project entrypoint or credential provider is invoked, and
+item payloads are not decoded before applying the override.
+
+After confirmation, construction uses the existing writable `SqliteQueue`
+policy. It can initialize a queue component in an existing compatible file,
+migrate supported old schemas, and persistently convert WAL to DELETE
+journaling. Journal conversion precedes schema setup and is outside the schema
+migration transaction. These initialization effects can remain even when the
+item is missing or a later mutation fails. Stop workers and back up storage
+before migration or WAL conversion. Future/unknown component schemas are still
+rejected before mutation; inspection commands retain their read-only policy.
+
+Exit `0` acknowledges the administrative API's successful return. Missing IDs,
+selection, storage and mutation errors return `1`, with empty stdout and bounded
+stderr guidance. The acknowledgement is prepared before mutation and emitted
+after it, without a later item/audit read; it does not assert the current state
+under concurrent activity. Human output names the operation and quoted ID;
+JSON uses the acknowledgement shape below.
+
+An interruption or output failure after commit can leave the override applied
+without a complete acknowledgement. Do not retry automatically: repeated calls
+append another event, and repeated `fail` increments retry count again. Inspect
+state and use the Python API `SqliteQueue.list_admin_events(item_id)` before
+retrying an unacknowledged call. There is no admin-event CLI command;
+`queue show` alone cannot establish whether that call applied.
+
 ### Queue machine-readable compatibility
 
 Queue JSON has its own `schema_version: 2`, independent of transaction/export
@@ -266,6 +319,17 @@ formats. Page envelopes have exactly these fields:
 integer, `records` an array, `has_more` a boolean and `next_cursor` a string when
 more records exist, otherwise null. Show has exactly `schema_version`,
 `command: "queue:show"`, and `item` (one item projection).
+
+Administrative acknowledgements add two command-specific schema-2 shapes;
+existing inspection envelopes are unchanged. They contain exactly these fields:
+
+```json
+{"schema_version":2,"command":"queue:complete","item_id":"ITEM_ID","applied":true}
+```
+
+`queue:fail` uses the same fields with `command: "queue:fail"`. `item_id` is the
+exact string supplied, and `applied` is the boolean `true`. There is no status,
+payload, claim token, reason or subsequent audit-record projection.
 
 | Record | Exact fields and types |
 | --- | --- |
@@ -282,7 +346,7 @@ authorization or completeness guarantees. Framework fields are closed for each
 version; consumers should check `schema_version`. Checked compatibility examples
 live under `tests/fixtures/record-contracts/cli-queue-*-v2.json`; v1 files remain
 historical examples. Consumers upgrading from v1 must accept schema 2 for all
-four queue commands and read the added nullable item `available_at` field.
+four inspection commands and read the added nullable item `available_at` field.
 Attempt/poison fields and envelope structure are unchanged. Cursor format remains
 v1, so saved query positions remain usable; library pages report format 2.
 

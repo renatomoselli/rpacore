@@ -169,6 +169,19 @@ def test_queue_v2_fixtures_match_all_live_commands(tmp_path: Path, capsys: pytes
         assert db_path.read_bytes() == before
 
 
+@pytest.mark.parametrize("command", ["complete", "fail"])
+def test_queue_admin_v2_fixtures_match_live_output(tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str) -> None:
+    db_path = tmp_path / "queue.db"
+    SqliteQueue({"db_path": str(db_path)}).add(QueueItem(id="queue-fixture", reference="fixture", payload={}))
+    assert cli_module.main([
+        "queue", command, "queue-fixture", "--db", str(db_path),
+        "--reason", "operator verified outcome", "--confirm", "--json",
+    ]) == 0
+    output = capsys.readouterr()
+    assert not output.err
+    assert json.loads(output.out) == _json_fixture(f"cli-queue-{command}-v2.json")
+
+
 def test_export_v2_fixtures_match_live_output(capsys: pytest.CaptureFixture[str]) -> None:
     transaction = _fixture_transaction()
 

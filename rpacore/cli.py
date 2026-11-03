@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from rpacore import __version__
+from rpacore._queue_admin_cli import _administer_queue
 from rpacore._queue_cli import _inspect_queue
 from rpacore._queue_read import QUERY_DEFAULT_LIMIT
 from rpacore._scaffold import _write_project_files
@@ -88,7 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     queue_parser = subparsers.add_parser(
         "queue",
-        help="Inspect the local queue without modifying it.",
+        help="Inspect the local queue or apply explicit administrative overrides.",
+        description="Inspect queue storage or apply confirmed, reasoned administrative overrides.",
     )
     queue_subparsers = queue_parser.add_subparsers(
         dest="queue_command",
@@ -99,12 +101,18 @@ def build_parser() -> argparse.ArgumentParser:
         ("show", "Show one queue item."),
         ("attempts", "List claim attempts in durable sequence order."),
         ("poison", "List malformed-payload dispositions in durable sequence order."),
+        ("complete", "Administratively mark an item successful (requires --confirm)."),
+        ("fail", "Administratively mark an item terminally failed (requires --confirm)."),
     ):
         command_parser = queue_subparsers.add_parser(name, help=help_text)
         command_parser.add_argument("--db", dest="db_path", help="Queue database path.")
         command_parser.add_argument("--config", dest="config_path", help="Configuration file path.")
         command_parser.add_argument("--json", action="store_true", help="Write JSON to stdout.")
-        if name == "show":
+        if name in ("complete", "fail"):
+            command_parser.add_argument("item_id", help="Exact queue item id to override.")
+            command_parser.add_argument("--reason", required=True, help="Nonblank reason recorded in the durable audit.")
+            command_parser.add_argument("--confirm", action="store_true", help="Confirm the administrative mutation and writable storage initialization.")
+        elif name == "show":
             command_parser.add_argument("item_id", help="Queue item id to inspect.")
         else:
             command_parser.add_argument(
@@ -150,6 +158,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "transaction":
         return _inspect_transactions(args)
     if args.command == "queue":
+        if args.queue_command in ("complete", "fail"):
+            return _administer_queue(args)
         return _inspect_queue(args)
     if args.command == "doctor":
         return _run_doctor(args)

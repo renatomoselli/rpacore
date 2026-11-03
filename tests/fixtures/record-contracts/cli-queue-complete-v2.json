@@ -1,0 +1,6 @@
+{
+  "schema_version": 2,
+  "command": "queue:complete",
+  "item_id": "queue-fixture",
+  "applied": true
+}
