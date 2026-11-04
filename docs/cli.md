@@ -21,7 +21,9 @@ directories may contain spaces. Invalid basenames return exit code `2` with an
 explanation on stderr before any directories or files are created. For example,
 use `rpacore init my-project` instead of `rpacore init "my project"`. Existing
 generated projects are unchanged and require no data migration. A valid package
-name still requires an available filesystem destination.
+name still requires an available filesystem destination. If the destination
+already exists, including when another creator makes it concurrently, init
+returns exit code `2` and leaves its contents intact.
 
 The generated `main.py` uses `execute_transaction(transaction_db_path=...)`
 with the project manifest's storage path, so execution and default inspection

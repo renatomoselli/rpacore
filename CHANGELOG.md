@@ -83,6 +83,9 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- `rpacore init` preserves a destination created concurrently and reports it
+  as an existing path with exit code `2`. No migration or examples-repository
+  update is required.
 - Transaction loads now capture all record rows and their private revision in
   one SQLite read snapshot, closing the connection before decoding or recovery
   preparation. Queue recovery keeps that matching revision so a concurrent save

@@ -522,6 +522,29 @@ class TestGeneratedProject:
         assert result.returncode == 2
         assert "Project path already exists" in result.stderr
 
+    def test_init_concurrent_destination_is_preserved(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        project = tmp_path / "demo_project"
+        original_mkdir = Path.mkdir
+
+        def collide(path: Path, *args, **kwargs) -> None:
+            if path == project:
+                original_mkdir(path)
+                original_mkdir(path / "nested")
+                (path / "nested" / "sentinel.bin").write_bytes(b"\x00\xffowner")
+            original_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", collide)
+        result = cli_module.main(["init", str(project)])
+        captured = capsys.readouterr()
+
+        assert result == 2
+        assert captured.out == ""
+        assert f"Project path already exists: {project}" in captured.err
+        assert sorted(str(path.relative_to(project)) for path in project.rglob("*")) == [
+            "nested", str(Path("nested") / "sentinel.bin")
+        ]
+        assert (project / "nested" / "sentinel.bin").read_bytes() == b"\x00\xffowner"
+
     def test_init_invalid_name_precedes_existing_path_error(self, tmp_path: Path) -> None:
         project = tmp_path / "my project"
         project.mkdir()
@@ -545,7 +568,8 @@ class TestGeneratedProject:
         monkeypatch,
     ) -> None:
         def fail_write(project_dir: Path) -> None:
-            raise OSError("disk full")
+            (project_dir / "partial.txt").write_text("partial", encoding="utf-8")
+            raise FileExistsError("write collision")
 
         monkeypatch.setattr(cli_module, "_write_project_files", fail_write)
 
@@ -554,5 +578,59 @@ class TestGeneratedProject:
         captured = capsys.readouterr()
         assert result == 1
         assert "Could not create project" in captured.err
-        assert "disk full" in captured.err
-        assert not (tmp_path / "demo_project").exists()
+        assert "write collision" in captured.err
+        assert "Project path already exists" not in captured.err
+        assert list(tmp_path.iterdir()) == []
+
+    def test_init_acquisition_failure_does_not_clean_target(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        sentinel = parent / "sentinel.bin"
+        sentinel.write_bytes(b"owner")
+        project = parent / "demo_project"
+        project_sentinel = project / "sentinel.bin"
+        original_mkdir = Path.mkdir
+        cleanup_calls = []
+
+        def fail_acquisition(path: Path, *args, **kwargs) -> None:
+            if path == project:
+                original_mkdir(path)
+                project_sentinel.write_bytes(b"concurrent owner")
+                raise PermissionError("acquisition denied")
+            original_mkdir(path, *args, **kwargs)
+
+        def fail_cleanup(path: Path) -> None:
+            cleanup_calls.append(path)
+
+        monkeypatch.setattr(Path, "mkdir", fail_acquisition)
+        monkeypatch.setattr(cli_module.shutil, "rmtree", fail_cleanup)
+        result = cli_module.main(["init", str(project)])
+        captured = capsys.readouterr()
+
+        assert result == 1
+        assert captured.out == ""
+        assert "Could not create project" in captured.err
+        assert "acquisition denied" in captured.err
+        assert cleanup_calls == []
+        assert set(parent.iterdir()) == {sentinel, project}
+        assert sentinel.read_bytes() == b"owner"
+        assert list(project.iterdir()) == [project_sentinel]
+        assert project_sentinel.read_bytes() == b"concurrent owner"
+
+    def test_init_reports_write_and_cleanup_failures(self, tmp_path: Path, capsys, monkeypatch) -> None:
+        def fail_write(project_dir: Path) -> None:
+            raise OSError("write failed")
+
+        def fail_cleanup(path: Path) -> None:
+            raise OSError("cleanup failed")
+
+        monkeypatch.setattr(cli_module, "_write_project_files", fail_write)
+        monkeypatch.setattr(cli_module.shutil, "rmtree", fail_cleanup)
+        result = cli_module.main(["init", str(tmp_path / "demo_project")])
+        captured = capsys.readouterr()
+
+        assert result == 1
+        assert "Could not create project" in captured.err
+        assert "write failed" in captured.err
+        assert "Could not remove partial project" in captured.err
+        assert "cleanup failed" in captured.err

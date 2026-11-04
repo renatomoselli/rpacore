@@ -219,12 +219,18 @@ def _init_project(project_dir: Path) -> int:
         )
         return USAGE_ERROR
 
-    if project_dir.exists():
-        _print_error(f"Project path already exists: {project_dir}")
-        return USAGE_ERROR
+    try:
+        project_dir.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            project_dir.mkdir()
+        except FileExistsError:
+            _print_error(f"Project path already exists: {project_dir}")
+            return USAGE_ERROR
+    except Exception as exc:
+        _print_error(f"Could not create project {project_dir}: {exc}")
+        return EXECUTION_ERROR
 
     try:
-        project_dir.mkdir(parents=True)
         (project_dir / "steps").mkdir()
         (project_dir / "tests").mkdir()
         _write_project_files(project_dir)
