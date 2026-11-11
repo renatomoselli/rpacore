@@ -183,13 +183,14 @@ class Engine:
             transaction.failure_code = ""
         else:
             transaction.status = Status.FAILED
-            terminal_exception = self._last_failed_exception(transaction)
-            if isinstance(terminal_exception, BusinessException):
-                transaction.outcome_category = OutcomeCategory.BUSINESS_FAILED
-                transaction.retry_disposition = RetryDisposition.NOT_REQUESTED
-            else:
+            terminal_exception = self._terminal_cause(transaction)
+            # A missing cause and a dual-category exception both stay system failures.
+            if terminal_exception is None or isinstance(terminal_exception, SystemException):
                 transaction.outcome_category = OutcomeCategory.SYSTEM_FAILED
                 transaction.retry_disposition = RetryDisposition.RETRY_EXHAUSTED
+            else:
+                transaction.outcome_category = OutcomeCategory.BUSINESS_FAILED
+                transaction.retry_disposition = RetryDisposition.NOT_REQUESTED
             transaction.failure_code = "" if terminal_exception is None else terminal_exception.code
         transaction.finished_at = datetime.now(timezone.utc)
         transitions.append(transaction, HistoryEvent.TRANSACTION_COMPLETED)
@@ -350,27 +351,36 @@ class Engine:
                 self._log_step_completed(transaction, step)
                 self._checkpoint(transaction, checkpoint)
 
-    def _last_failed_exception(
+    def _terminal_cause(
         self,
         transaction: Transaction,
     ) -> BusinessException | SystemException | None:
-        """Return the exception recorded by the last durable step failure."""
-        steps = {
-            (step.name, step.execution_order): step
-            for step in transaction.steps
+        """Select the latest unresolved cause, with system failures taking precedence.
+
+        Only the latest exception of each currently failed step is a candidate.
+        Return ``None`` when there is no failed step or any failed step has no
+        exception, so the caller applies the conservative system fallback.
+        """
+        failed = transaction.failed_steps()
+        if not failed or any(not step.exceptions for step in failed):
+            return None
+        candidates = {
+            (step.name, step.execution_order): step.exceptions[-1]
+            for step in failed
         }
-        for entry in reversed(transaction.history):
-            if entry.event is not HistoryEvent.STEP_FAILED:
+        system_candidates: dict[tuple[str, int], BusinessException | SystemException] = {
+            key: exc for key, exc in candidates.items()
+            if isinstance(exc, SystemException)
+        }
+        candidates = system_candidates or candidates
+        for entry in sorted(transaction.history, key=lambda entry: entry.sequence, reverse=True):
+            if entry.event is not HistoryEvent.STEP_FAILED or entry.step_execution_order is None:
                 continue
-            if entry.step_execution_order is None:
-                continue
-            step = steps.get((entry.step_name, entry.step_execution_order))
-            if step is None:
-                continue
-            for exc in reversed(step.exceptions):
-                if exc.retry_number == entry.retry_number:
-                    return exc
-        return None
+            exc = candidates.get((entry.step_name, entry.step_execution_order))
+            if exc is not None and exc.retry_number == entry.retry_number:
+                return exc
+        # Manually assembled state may omit history; execution order is deterministic.
+        return candidates[max(candidates, key=lambda key: key[1])]
 
     def _register_screenshot_artifact(
         self,

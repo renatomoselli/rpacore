@@ -133,6 +133,7 @@ import sys
 
 import rpacore
 from rpacore import (
+    BusinessException,
     ConfigField,
     Engine,
     ExecutionTransition,
@@ -230,6 +231,39 @@ default_report = generate_report(Transaction(reference="default-outcome-smoke"))
 assert default_report.outcome.category is OutcomeCategory.UNKNOWN
 assert default_report.outcome.retry_disposition is RetryDisposition.UNKNOWN
 assert default_report.outcome.failure_code == ""
+
+class RejectStep(Step):
+    def execute(self, ctx):
+        raise BusinessException("synthetic rejection", code="smoke.business")
+
+class RecoverStep(Step):
+    def execute(self, ctx):
+        if ctx.transaction.retry_count == 0:
+            raise SystemException("synthetic transient", code="smoke.system")
+
+mixed = Transaction(
+    reference="unresolved-outcome-smoke",
+    steps=[RejectStep("reject", 1), RecoverStep("recover", 2)],
+)
+mixed_transitions = []
+Engine(max_retries=1).run(
+    ProcessContext(transaction=mixed), transition_sink=mixed_transitions.append,
+)
+assert [step.status for step in mixed.steps] == [Status.FAILED, Status.SUCCESSFUL]
+assert mixed.status is Status.FAILED
+assert mixed.outcome_category is OutcomeCategory.BUSINESS_FAILED
+assert mixed.retry_disposition is RetryDisposition.NOT_REQUESTED
+assert mixed.failure_code == "smoke.business"
+terminal = mixed_transitions[-1]
+assert terminal.event == "transaction_completed"
+assert terminal.outcome_category == "business_failed"
+assert terminal.failure_code == "smoke.business"
+assert terminal.retry_recommended is False
+mixed_report = generate_report(mixed)
+assert mixed_report.outcome.category is OutcomeCategory.BUSINESS_FAILED
+assert mixed_report.outcome.retry_disposition is RetryDisposition.NOT_REQUESTED
+assert mixed_report.outcome.failure_code == "smoke.business"
+print("Installed unresolved terminal outcome passed")
 
 class ScreenshotLinks(HTMLParser):
     def __init__(self):

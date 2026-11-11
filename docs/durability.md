@@ -60,6 +60,20 @@ Legacy or incomplete rows use `unknown`; they are not backfilled with invented
 causes. Failure codes are empty or lowercase dot-separated ASCII namespaces;
 `rpacore.*` is reserved for framework-owned causes.
 
+At completion, only the latest exception on each currently failed step
+contributes to the terminal cause. System failures take precedence over business
+failures; within that category the latest matching failure history sequence
+selects the code. Exceptions on recovered or skipped steps remain diagnostic
+history. If matching history is absent, the highest execution order in the
+winning category supplies the cause. A failed step without an exception, or an
+unsuccessful execution with no failed step, yields `system_failed` /
+`retry_exhausted` with an empty code. A selected empty code stays empty.
+Explicit resume recomputes the outcome on completion while retaining transaction
+identity and diagnostics. Loading old completed records preserves their captured
+fields; there is no backfill or format/schema migration. Business-only terminal
+transactions still fail queue delivery without retry unless the caller sets
+`retry_business_failures=True`.
+
 `Transaction.artifacts` records generated or captured file paths as durable audit
 records. Steps register artifacts with
 `ProcessContext.add_artifact(name, path, kind="", metadata=None)`. Each artifact

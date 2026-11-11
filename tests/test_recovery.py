@@ -4,6 +4,8 @@ import pytest
 
 from rpacore.context import ProcessContext
 from rpacore.engine import Engine
+from rpacore.outcome import OutcomeCategory, RetryDisposition
+from rpacore.report import generate_report
 from rpacore.exceptions import BusinessException, DefinitionIdentityError, SystemException
 from rpacore.persistence import load_transaction, save_transaction as _save_transaction
 from rpacore.recovery import resume_transaction as _resume_transaction
@@ -63,6 +65,79 @@ def _save_stopped_transaction(db_path: str) -> Transaction:
     Engine().run(ProcessContext(transaction=transaction))
     save_transaction(transaction, db_path)
     return transaction
+
+
+def test_resumed_terminal_outcome_preserves_diagnostics_and_projects_remaining_failure(db_path):
+    counts: dict[str, int] = {}
+
+    class Reject(Step):
+        def execute(self, ctx):
+            raise BusinessException("rejected", code="test.business")
+
+    class Transient(Step):
+        def execute(self, ctx):
+            if not ctx.state.get("can_recover") or ctx.transaction.retry_count == 0:
+                raise SystemException("transient", code="test.system")
+
+    def steps():
+        return [_TrackingStep("done", 1, counts), Reject("reject", 2), Transient("transient", 3)]
+
+    tx = Transaction(reference="resume-outcome", steps=steps())
+    Engine(max_retries=1).run(ProcessContext(transaction=tx))
+    save_transaction(tx, db_path)
+    old_record = serialize_transaction(tx)
+    old_history = list(tx.history)
+    assert tx.outcome_category is OutcomeCategory.SYSTEM_FAILED
+    resumed = resume_transaction(tx.id, steps(), db_path=db_path)
+    resumed.state["can_recover"] = True
+    transitions = []
+    Engine(max_retries=1).run(
+        ProcessContext(transaction=resumed),
+        checkpoint=lambda current: save_transaction(current, db_path),
+        transition_sink=transitions.append,
+    )
+
+    loaded = load_transaction(tx.id, db_path)
+    assert loaded.id == resumed.id == tx.id
+    assert counts == {"done": 1}
+    assert [step.status for step in loaded.steps] == [Status.SUCCESSFUL, Status.FAILED, Status.SUCCESSFUL]
+    assert loaded.history[:len(old_history)] == old_history
+    assert [exc.retry_number for exc in loaded.steps[2].exceptions] == [0, 1, 0]
+    assert serialize_transaction(loaded)["steps"][2]["exceptions"][:2] == old_record["steps"][2]["exceptions"]
+    assert serialize_transaction(loaded) == serialize_transaction(resumed)
+    assert loaded.outcome_category is OutcomeCategory.BUSINESS_FAILED
+    assert loaded.retry_disposition is RetryDisposition.NOT_REQUESTED
+    assert loaded.failure_code == "test.business"
+    terminal = transitions[-1]
+    assert terminal.event == "transaction_completed"
+    assert terminal.outcome_category == "business_failed"
+    assert terminal.failure_code == "test.business"
+    assert terminal.retry_recommended is False
+    report = generate_report(loaded)
+    assert report.outcome.category is OutcomeCategory.BUSINESS_FAILED
+    assert report.outcome.retry_disposition is RetryDisposition.NOT_REQUESTED
+    assert report.outcome.failure_code == "test.business"
+
+
+def test_reload_old_completed_outcome_does_not_reinterpret_resolved_history(db_path):
+    business = Step("business", 1)
+    business.status = Status.FAILED
+    business.exceptions = [BusinessException("rejected", code="test.business")]
+    recovered = Step("recovered", 2)
+    recovered.status = Status.SUCCESSFUL
+    recovered.exceptions = [SystemException("recovered", code="test.system")]
+    tx = Transaction(
+        reference="old-captured-outcome", status=Status.FAILED, steps=[business, recovered],
+        outcome_category=OutcomeCategory.SYSTEM_FAILED,
+        retry_disposition=RetryDisposition.RETRY_EXHAUSTED, failure_code="test.system",
+    )
+    tx.append_history(HistoryEvent.STEP_FAILED, step=business)
+    tx.append_history(HistoryEvent.STEP_FAILED, step=recovered)
+    tx.append_history(HistoryEvent.STEP_SUCCEEDED, step=recovered)
+    tx.append_history(HistoryEvent.TRANSACTION_COMPLETED)
+    save_transaction(tx, db_path)
+
+    assert serialize_transaction(load_transaction(tx.id, db_path)) == serialize_transaction(tx)
 
 
 def test_resume_reruns_only_non_successful_steps(db_path) -> None:

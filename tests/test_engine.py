@@ -3,6 +3,7 @@
 import subprocess
 import sys
 import textwrap
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -45,6 +46,215 @@ class SystemFailStep(Step):
 class SkipStep(Step):
     def execute(self, ctx: ProcessContext) -> None:
         self.status = Status.SKIPPED
+
+
+@pytest.mark.parametrize("system_first", [False, True])
+@pytest.mark.parametrize("retries", [1, 3])
+@pytest.mark.parametrize("recovered_status", [Status.SUCCESSFUL, Status.SKIPPED])
+def test_terminal_outcome_excludes_recovered_system_failure(
+    system_first, retries, recovered_status,
+) -> None:
+    class Reject(Step):
+        def execute(self, ctx):
+            raise BusinessException("rejected", code="test.business")
+
+    class Recover(Step):
+        def execute(self, ctx):
+            if ctx.transaction.retry_count < retries:
+                raise SystemException("transient", code="test.system")
+            self.status = recovered_status
+
+    business = Reject("business", 2 if system_first else 1)
+    system = Recover("system", 1 if system_first else 2)
+    tx = Transaction(reference="unresolved", steps=[business, system])
+    transitions = []
+    Engine(max_retries=retries).run(_ctx(tx), transition_sink=transitions.append)
+
+    assert [business.status, system.status] == [Status.FAILED, recovered_status]
+    assert tx.status is Status.FAILED
+    assert tx.outcome_category is OutcomeCategory.BUSINESS_FAILED
+    assert tx.retry_disposition is RetryDisposition.NOT_REQUESTED
+    assert tx.failure_code == "test.business"
+    assert len(system.exceptions) == retries
+    assert transitions[-1].event == "transaction_completed"
+    assert transitions[-1].outcome_category == "business_failed"
+    assert transitions[-1].failure_code == "test.business"
+    assert transitions[-1].retry_recommended is False
+
+
+def _failed_step(name, order, *exceptions):
+    step = Step(name, order)
+    step.status = Status.FAILED
+    step.exceptions = list(exceptions)
+    return step
+
+
+@pytest.mark.parametrize("system_first", [False, True])
+def test_terminal_cause_system_precedes_business_in_either_history_order(system_first):
+    class SystemSubclass(SystemException):
+        pass
+
+    system = _failed_step("system", 1, SystemSubclass("system", code="test.system"))
+    business = _failed_step("business", 2, BusinessException("business", code="test.business"))
+    tx = Transaction(reference="mixed", steps=[system, business])
+    for step in ([system, business] if system_first else [business, system]):
+        tx.append_history(HistoryEvent.STEP_FAILED, step=step)
+
+    assert Engine()._terminal_cause(tx) is system.exceptions[-1]
+
+
+def test_terminal_outcome_prefers_system_for_dual_category_exception() -> None:
+    class DualFailure(SystemException, BusinessException):
+        # Resolve the bases' property/attribute collision so both initializers run.
+        halts_remaining_steps = True
+
+    class Fail(Step):
+        def execute(self, ctx: ProcessContext) -> None:
+            raise DualFailure("dual category", code="test.dual")
+
+    tx = Transaction(reference="dual-category", steps=[Fail("fail", 1)])
+    transitions = []
+    Engine().run(_ctx(tx), transition_sink=transitions.append)
+
+    assert tx.outcome_category is OutcomeCategory.SYSTEM_FAILED
+    assert tx.retry_disposition is RetryDisposition.RETRY_EXHAUSTED
+    assert tx.failure_code == "test.dual"
+    assert transitions[-1].retry_recommended is True
+
+
+@pytest.mark.parametrize("exception_type", [BusinessException, SystemException])
+def test_terminal_cause_uses_history_sequence_not_time_or_step_order(exception_type):
+    first = _failed_step("first", 3, exception_type("older", code="test.older"))
+    latest = _failed_step(
+        "latest", 1,
+        exception_type("previous pass", code="test.previous"),
+        exception_type("latest pass", code="test.latest"),
+    )
+    tx = Transaction(reference="sequence", steps=[latest, first])
+    now = datetime.now(timezone.utc)
+    tx.append_history(HistoryEvent.STEP_FAILED, step=latest, timestamp=now)
+    tx.append_history(HistoryEvent.STEP_FAILED, step=first, timestamp=now)
+    tx.append_history(HistoryEvent.TRANSACTION_RESUMED, timestamp=now)
+    tx.append_history(HistoryEvent.STEP_FAILED, step=latest, timestamp=now - timedelta(days=1))
+    # Retry zero repeats after resume; physical list order cannot decide the cause.
+    tx.history[1], tx.history[-1] = tx.history[-1], tx.history[1]
+
+    assert Engine()._terminal_cause(tx) is latest.exceptions[-1]
+
+
+class _BusinessSubclass(BusinessException):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("old_type", "latest_type"),
+    [(SystemException, _BusinessSubclass), (BusinessException, SystemException)],
+)
+def test_terminal_cause_uses_only_latest_exception_even_with_repeated_retry_number(
+    old_type, latest_type,
+):
+    changed = _failed_step(
+        "changed", 1,
+        old_type("old", code="test.old", retry_number=0),
+        latest_type("latest", retry_number=1),
+    )
+    other = _failed_step("other", 2, BusinessException("other", code="test.other"))
+    tx = Transaction(reference="latest-only", steps=[changed, other])
+    tx.append_history(HistoryEvent.STEP_FAILED, step=changed, retry_number=0)
+    tx.append_history(HistoryEvent.STEP_FAILED, step=other, retry_number=0)
+    tx.append_history(HistoryEvent.STEP_FAILED, step=changed, retry_number=1)
+    tx.append_history(HistoryEvent.TRANSACTION_RESUMED)
+    tx.append_history(HistoryEvent.STEP_FAILED, step=other, retry_number=0)
+    tx.append_history(HistoryEvent.STEP_FAILED, step=changed, retry_number=1)
+
+    assert Engine()._terminal_cause(tx) is changed.exceptions[-1]
+    assert changed.exceptions[-1].code == ""
+
+
+def test_terminal_cause_does_not_match_older_exception_retry_number():
+    changed = _failed_step(
+        "changed", 1, SystemException("old", retry_number=0),
+        BusinessException("latest", code="test.latest", retry_number=1),
+    )
+    other = _failed_step("other", 2, BusinessException("other", code="test.other"))
+    tx = Transaction(reference="latest-retry", steps=[changed, other])
+    tx.append_history(HistoryEvent.STEP_FAILED, step=other)
+    tx.append_history(HistoryEvent.STEP_FAILED, step=changed, retry_number=0)
+
+    assert Engine()._terminal_cause(tx) is other.exceptions[-1]
+
+
+@pytest.mark.parametrize("coded_type", [None, BusinessException, SystemException])
+def test_terminal_outcome_missing_exception_keeps_empty_system_fallback(monkeypatch, coded_type):
+    missing = _failed_step("missing", 1)
+    resolved = Step("resolved", 3)
+    resolved.status = Status.SUCCESSFUL
+    resolved.exceptions = [SystemException("resolved", code="test.resolved")]
+    steps = [missing, resolved]
+    if coded_type:
+        steps.append(_failed_step("coded", 2, coded_type("coded", code="test.coded")))
+    tx = Transaction(reference="missing-exception", steps=steps)
+    for step in reversed(steps):
+        tx.append_history(HistoryEvent.STEP_FAILED, step=step)
+    engine = Engine()
+    monkeypatch.setattr(engine, "_execute_pass", lambda *args, **kwargs: None)
+    engine.run(_ctx(tx))
+
+    assert tx.status is Status.FAILED
+    assert tx.outcome_category is OutcomeCategory.SYSTEM_FAILED
+    assert tx.retry_disposition is RetryDisposition.RETRY_EXHAUSTED
+    assert tx.failure_code == ""
+
+
+def test_terminal_outcome_unsuccessful_without_failed_steps(monkeypatch):
+    tx = Transaction(reference="incomplete", steps=[Step("pending", 1)])
+    engine = Engine()
+    monkeypatch.setattr(engine, "_execute_pass", lambda *args, **kwargs: None)
+    engine.run(_ctx(tx))
+
+    assert tx.status is Status.FAILED
+    assert tx.outcome_category is OutcomeCategory.SYSTEM_FAILED
+    assert tx.retry_disposition is RetryDisposition.RETRY_EXHAUSTED
+    assert tx.failure_code == ""
+
+
+@pytest.mark.parametrize("exception_type", [BusinessException, SystemException])
+def test_terminal_cause_missing_history_uses_highest_execution_order_in_winning_category(exception_type):
+    first = _failed_step("first", 1, exception_type("first", code="test.first"))
+    last = _failed_step("last", 3, exception_type("last"))
+    resolved = Step("resolved", 4)
+    resolved.status = Status.SKIPPED
+    resolved.exceptions = [SystemException("resolved", code="test.resolved")]
+    tx = Transaction(reference="no-history", steps=[last, first, resolved])
+    tx.append_history(HistoryEvent.STEP_FAILED, step=resolved)
+    tx.append_history(HistoryEvent.STEP_FAILED)  # Incomplete identity is not a candidate.
+
+    assert Engine()._terminal_cause(tx) is last.exceptions[-1]
+
+
+def test_all_recovered_failures_leave_successful_outcome():
+    class Recover(Step):
+        def execute(self, ctx):
+            if ctx.transaction.retry_count == 0:
+                raise SystemException("transient", code="test.recovered")
+
+    tx = Transaction(reference="recovered", steps=[Recover("recover", 1)])
+    Engine(max_retries=1).run(_ctx(tx))
+
+    assert tx.status is Status.SUCCESSFUL
+    assert tx.outcome_category is OutcomeCategory.SUCCESSFUL
+    assert tx.retry_disposition is RetryDisposition.NOT_APPLICABLE
+    assert tx.failure_code == ""
+    assert len(tx.steps[0].exceptions) == 1
+
+
+def test_terminal_cause_fallback_keeps_system_precedence_without_matching_history():
+    system = _failed_step("system", 1, SystemException("system", code="test.system"))
+    business = _failed_step("business", 3, BusinessException("business", code="test.business"))
+    tx = Transaction(reference="fallback-category", steps=[business, system])
+    tx.append_history(HistoryEvent.STEP_FAILED, step=business)
+
+    assert Engine()._terminal_cause(tx) is system.exceptions[-1]
 
 
 class TestEngineHappyPath:
@@ -247,11 +457,11 @@ class TestEngineBusinessException:
 
 
 class TestEngineSystemException:
-    def test_last_failed_exception_ignores_history_without_step_identity(self) -> None:
+    def test_terminal_cause_ignores_history_without_step_identity(self) -> None:
         tx = Transaction(reference="missing-step-history")
         tx.append_history(HistoryEvent.STEP_FAILED)
 
-        assert Engine()._last_failed_exception(tx) is None
+        assert Engine()._terminal_cause(tx) is None
 
     def test_step_marked_failed(self) -> None:
         tx = Transaction(

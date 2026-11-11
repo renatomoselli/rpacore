@@ -19,6 +19,7 @@ from rpacore._json_state import JsonStateError
 from rpacore.context import ProcessContext
 from rpacore.credentials import EnvCredentialProvider
 from rpacore.engine import Engine
+from rpacore.outcome import OutcomeCategory, RetryDisposition
 from rpacore.exceptions import (
     BusinessException,
     DefinitionIdentityError,
@@ -45,6 +46,55 @@ from rpacore.transaction import HistoryEvent, Transaction as _Transaction
 
 
 _DEFINITION_IDENTITY = "tests.runner/v1"
+
+
+@pytest.mark.parametrize("retry_business", [False, True])
+@pytest.mark.parametrize("recovers", [False, True])
+def test_unresolved_terminal_outcome_queue_delivery_policy(tmp_path, retry_business, recovers):
+    class Reject(Step):
+        def execute(self, ctx):
+            raise BusinessException("rejected", code="test.business")
+
+    class Transient(Step):
+        def execute(self, ctx):
+            if not recovers or ctx.transaction.retry_count == 0:
+                raise SystemException("transient", code="test.system")
+
+    queue = SqliteQueue({
+        "db_path": str(tmp_path / "queue.db"), "max_retries": 1, "retry_delay": 0,
+    })
+    item = QueueItem(reference="outcome-policy", payload={})
+    queue.add(item)
+    transaction_db = str(tmp_path / "transactions.db")
+    summary = run_queue_loop(
+        queue=queue, engine=Engine(max_retries=1),
+        build_transaction=lambda item: Transaction(
+            reference=item.reference, steps=[Reject("reject", 1), Transient("transient", 2)],
+        ),
+        config={}, credentials=EnvCredentialProvider(), worker_id="outcome-worker",
+        transaction_db_path=transaction_db,
+        retry_business_failures=retry_business,
+    )
+
+    retries = int(retry_business or not recovers)
+    assert summary.processed == summary.failed == 1 + retries
+    assert summary.completed == summary.transition_unknown == summary.lease_lost == 0
+    assert summary.retry_scheduled == retries
+    assert summary.terminal_failed == 1
+    attempts = queue.list_attempts(item.id)
+    assert [attempt.outcome for attempt in attempts] == (
+        [QueueAttemptOutcome.RETRY_SCHEDULED] * retries + [QueueAttemptOutcome.FAILED]
+    )
+    stored_item = queue.get_item(item.id)
+    assert stored_item.status is QueueStatus.FAILED
+    loaded = load_transaction(stored_item.transaction_id, transaction_db)
+    assert loaded.outcome_category is (
+        OutcomeCategory.BUSINESS_FAILED if recovers else OutcomeCategory.SYSTEM_FAILED
+    )
+    assert loaded.retry_disposition is (
+        RetryDisposition.NOT_REQUESTED if recovers else RetryDisposition.RETRY_EXHAUSTED
+    )
+    assert loaded.failure_code == ("test.business" if recovers else "test.system")
 
 
 class Transaction(_Transaction):

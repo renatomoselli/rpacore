@@ -83,6 +83,15 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- Terminal transaction outcomes now use unresolved failures. Recovered system
+  errors no longer override a remaining business failure. Unresolved system
+  failures take precedence, with the latest matching failure history selecting
+  the code. New completion, including same-ID resume, captures the correction;
+  loading old records preserves their original fields and diagnostic history.
+  No API, record version or schema migration changes. Existing examples need
+  no migration; outcome-consuming examples should add a regression against the
+  corrected wheel.
+
 - `rpacore init` preserves a destination created concurrently and reports it
   as an existing path with exit code `2`. No migration or examples-repository
   update is required.

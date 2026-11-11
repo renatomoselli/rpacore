@@ -95,6 +95,17 @@ records remain explicit rather than guessed. Validation failures receive their
 in-memory outcome before they are re-raised, but strict persistence still does
 not create a transaction row for invalid wiring or durable data.
 
+Terminal failure selection uses only the latest exception on each step still
+`FAILED`. Recovered or skipped steps retain diagnostic exceptions but do not
+select the outcome. An unresolved system failure takes precedence over business
+failures; the latest matching failure history sequence in that category supplies
+the code, including an empty code. Without matching history, the highest
+execution order in that category supplies the cause. A failed step with no
+exception, or unsuccessful execution with no failed step, conservatively yields
+`system_failed` / `retry_exhausted` with an empty code. Loading an existing
+completed record preserves its captured outcome; a new completion, including
+explicit same-ID resume, applies this rule.
+
 ## Persistence, Serialization, and Recovery
 
 | Symbol | Purpose | Side effects |
