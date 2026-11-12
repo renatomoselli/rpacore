@@ -795,9 +795,15 @@ discarding their transaction binding, so they must be reacquired with a token.
 Version 4 begins attempt history for future claims; it does not invent attempt
 records for older rows. Version 5 adds nullable `available_at` UTC timestamps;
 existing items retain NULL (immediately eligible when pending), unchanged IDs,
-bindings and history. The column and schema marker migrate in one transaction;
-a failed upgrade rolls back both. Read-only inspection rejects older schemas
-without migrating them.
+bindings and history. The whole sequential upgrade from any supported version
+(every schema change, data update and version-marker write from the starting
+schema through version 5) commits or rolls back as one transaction. If a
+statement is rejected before execution, an exception occurs between
+statements, or the process is killed before commit, the next writable open can
+retry from the prior schema, rows, and version marker. The queue sets journal
+mode to `DELETE` before the transaction and keeps that mode after failure.
+Mid-statement I/O errors and failed commits are outside this guarantee.
+Read-only inspection rejects older schemas without migrating them.
 
 Treat transaction-schema upgrades and the queue-v5 upgrade as offline: stop every worker, back up
 both database files together, upgrade and open both with the new runtime, then

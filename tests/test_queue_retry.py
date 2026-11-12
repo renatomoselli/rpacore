@@ -2,9 +2,15 @@
 
 import base64
 import json
+import shutil
 import sqlite3
+import tempfile
 import threading
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache, partial
+from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -399,32 +405,111 @@ def test_drain_once_then_resume_same_bound_transaction(tmp_path):
     assert load_transaction(bound, db).state["done"] is True
 
 
+def _create_attempt_table(conn):
+    conn.execute("""
+        CREATE TABLE queue_attempts (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id TEXT NOT NULL,
+            claim_token TEXT NOT NULL,
+            claimed_by TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            outcome TEXT NOT NULL DEFAULT '',
+            UNIQUE (item_id, claim_token),
+            FOREIGN KEY (item_id) REFERENCES queue_items(id)
+        )
+    """)
+    conn.execute("CREATE INDEX idx_queue_attempts_item_sequence ON queue_attempts (item_id, sequence)")
+
+
 def legacy_database(path, version):
-    """Published storage shapes, independent from current migration helpers."""
-    conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE queue_items (id TEXT PRIMARY KEY, reference TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'pending', retry_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, claimed_by TEXT NOT NULL DEFAULT '', claimed_at TEXT)")
-    if version:
-        conn.execute("CREATE TABLE rpacore_schema_versions (component TEXT PRIMARY KEY, version INTEGER NOT NULL)")
-        conn.execute("INSERT INTO rpacore_schema_versions VALUES ('queue',?)", (version,))
-    if version >= 2:
-        conn.execute("ALTER TABLE queue_items ADD COLUMN transaction_id TEXT NOT NULL DEFAULT ''")
-    if version >= 3:
-        conn.execute("ALTER TABLE queue_items ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''")
-        conn.execute("CREATE TABLE queue_admin_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,action TEXT NOT NULL,reason TEXT NOT NULL,previous_status TEXT NOT NULL,new_status TEXT NOT NULL,created_at TEXT NOT NULL)")
-    if version >= 4:
-        conn.execute("CREATE TABLE queue_attempts (sequence INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,claim_token TEXT NOT NULL,claimed_by TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,outcome TEXT NOT NULL DEFAULT '',UNIQUE(item_id,claim_token))")
-        conn.execute("CREATE TABLE queue_poison_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT NOT NULL,error_type TEXT NOT NULL,created_at TEXT NOT NULL)")
-    for index, status in enumerate(QueueStatus):
-        conn.execute("INSERT INTO queue_items (id,reference,status,created_at,claimed_at) VALUES (?,?,?,?,?)", (f"{index:032x}", status.value, status.value, STAMP.isoformat(), STAMP.isoformat()))
-    if version >= 2:
-        conn.execute("UPDATE queue_items SET transaction_id='binding'")
-    if version >= 3:
-        conn.execute("UPDATE queue_items SET claim_token='existing-token' WHERE status='in_progress'")
-    if version >= 4:
-        conn.execute("INSERT INTO queue_attempts (item_id,claim_token,claimed_by,started_at) VALUES (?,?,?,?)", (f"{1:032x}", "existing-token", "", STAMP.isoformat()))
-        conn.execute("INSERT INTO queue_poison_events (item_id,error_type,created_at) VALUES (?,?,?)", (f"{3:032x}", "JSONDecodeError", STAMP.isoformat()))
-    conn.commit()
-    conn.close()
+    """Build historical schemas and the expected v5 schema without running the migrator."""
+    stamp = STAMP.isoformat()
+    leased_id = f"{1:032x}"
+    with closing(sqlite3.connect(path)) as conn, conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("""
+            CREATE TABLE queue_items (
+                id TEXT PRIMARY KEY,
+                reference TEXT NOT NULL,
+                payload TEXT NOT NULL DEFAULT '{}',
+                status TEXT NOT NULL DEFAULT 'pending',
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                claimed_by TEXT NOT NULL DEFAULT '',
+                claimed_at TEXT
+            )
+        """)
+        if version:
+            conn.execute("""
+                CREATE TABLE rpacore_schema_versions (
+                    component TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL
+                )
+            """)
+            conn.execute("INSERT INTO rpacore_schema_versions VALUES ('queue', ?)", (version,))
+        if version >= 2:
+            conn.execute("ALTER TABLE queue_items ADD COLUMN transaction_id TEXT NOT NULL DEFAULT ''")
+            conn.execute("CREATE INDEX idx_queue_items_created_at_id ON queue_items (created_at ASC, id ASC)")
+            conn.execute("CREATE INDEX idx_queue_items_status_created_at_id ON queue_items (status, created_at ASC, id ASC)")
+            conn.execute("CREATE INDEX idx_queue_items_reference_status ON queue_items (reference, status)")
+        if version >= 3:
+            conn.execute("ALTER TABLE queue_items ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''")
+            conn.execute("""
+                CREATE TABLE queue_admin_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    previous_status TEXT NOT NULL,
+                    new_status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (item_id) REFERENCES queue_items(id)
+                )
+            """)
+            conn.execute("CREATE INDEX idx_queue_admin_events_item_sequence ON queue_admin_events (item_id, sequence)")
+        if version >= 4:
+            _create_attempt_table(conn)
+            conn.execute("""
+                CREATE TABLE queue_poison_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id TEXT NOT NULL,
+                    error_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (item_id) REFERENCES queue_items(id)
+                )
+            """)
+            conn.execute("CREATE INDEX idx_queue_poison_events_item_sequence ON queue_poison_events (item_id, sequence)")
+        if version == 5:
+            conn.execute("ALTER TABLE queue_items ADD COLUMN available_at TEXT")
+
+        conn.executemany(
+            "INSERT INTO queue_items (id, reference, status, created_at) VALUES (?, ?, ?, ?)",
+            [(f"{index:032x}", status.value, status.value, stamp) for index, status in enumerate(QueueStatus)],
+        )
+        conn.execute(
+            "UPDATE queue_items SET claimed_by = 'legacy-worker', claimed_at = ? WHERE id = ?",
+            (stamp, leased_id),
+        )
+        if version >= 2:
+            conn.execute("UPDATE queue_items SET transaction_id = 'binding'")
+        if version >= 3:
+            conn.execute("UPDATE queue_items SET claim_token = 'existing-token' WHERE id = ?", (leased_id,))
+            conn.execute(
+                "INSERT INTO queue_admin_events "
+                "(item_id, action, reason, previous_status, new_status, created_at) "
+                "VALUES (?, 'requeue', 'operator retry', 'failed', 'pending', ?)",
+                (f"{0:032x}", stamp),
+            )
+        if version >= 4:
+            conn.execute(
+                "INSERT INTO queue_attempts (item_id, claim_token, claimed_by, started_at) VALUES (?, ?, ?, ?)",
+                (leased_id, "existing-token", "legacy-worker", stamp),
+            )
+            conn.execute(
+                "INSERT INTO queue_poison_events (item_id, error_type, created_at) VALUES (?, ?, ?)",
+                (f"{3:032x}", "JSONDecodeError", stamp),
+            )
 
 
 @pytest.mark.parametrize("version", range(5))
@@ -515,3 +600,287 @@ def test_concurrent_migrations_reread_version_under_lock(tmp_path, monkeypatch):
     assert errors == []
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT version FROM rpacore_schema_versions").fetchone()[0] == 5
+
+
+_MUTATING_ACTIONS = {
+    getattr(sqlite3, f"SQLITE_{name}"): name
+    for name in (
+        "CREATE_TABLE", "CREATE_INDEX", "CREATE_VIEW", "CREATE_TRIGGER", "CREATE_VTABLE",
+        "CREATE_TEMP_TABLE", "CREATE_TEMP_INDEX", "CREATE_TEMP_VIEW", "CREATE_TEMP_TRIGGER",
+        "DROP_TABLE", "DROP_INDEX", "DROP_VIEW", "DROP_TRIGGER", "DROP_VTABLE",
+        "DROP_TEMP_TABLE", "DROP_TEMP_INDEX", "DROP_TEMP_VIEW", "DROP_TEMP_TRIGGER",
+        "ALTER_TABLE", "INSERT", "UPDATE", "DELETE", "REINDEX", "ANALYZE",
+    )
+}
+_NON_MUTATING_ACTIONS = {
+    sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION,
+    sqlite3.SQLITE_RECURSIVE, sqlite3.SQLITE_TRANSACTION,
+}
+_SCHEMA_CATALOGS = {"sqlite_master", "sqlite_temp_master", "sqlite_schema", "sqlite_temp_schema"}
+_MARKER_TABLE = "rpacore_schema_versions"
+
+
+def _injection_object(action, arg1, arg2):
+    if action == sqlite3.SQLITE_ALTER_TABLE:
+        return arg2
+    if action == sqlite3.SQLITE_UPDATE:
+        return f"{arg1}.{arg2}"
+    return arg1
+
+
+@contextmanager
+def _record_migration_actions(deny_ordinal=None):
+    """Record mutating authorizer actions only inside the schema migration."""
+    seen = []
+    unclassified = []
+    original = queue_module._ensure_schema
+
+    def authorize(action, arg1, arg2, database, source):
+        if action in _NON_MUTATING_ACTIONS or (action == sqlite3.SQLITE_PRAGMA and arg1 == "table_info"):
+            return sqlite3.SQLITE_OK
+        mutation = _MUTATING_ACTIONS.get(action)
+        if mutation is None:
+            unclassified.append((action, arg1, arg2, database, source))
+            return sqlite3.SQLITE_DENY
+        # SQLite emits these operations for DDL already covered by its own action.
+        if mutation in {"INSERT", "UPDATE", "DELETE"} and arg1 in _SCHEMA_CATALOGS:
+            return sqlite3.SQLITE_OK
+        if mutation == "CREATE_INDEX" and (arg1 or "").startswith("sqlite_autoindex_"):
+            return sqlite3.SQLITE_OK
+        if mutation == "CREATE_TABLE" and arg1 == "sqlite_sequence":
+            return sqlite3.SQLITE_OK
+        seen.append((len(seen) + 1, mutation, _injection_object(action, arg1, arg2)))
+        return sqlite3.SQLITE_DENY if len(seen) == deny_ordinal else sqlite3.SQLITE_OK
+
+    def migrate(conn):
+        conn.set_authorizer(authorize)
+        try:
+            original(conn)
+        finally:
+            conn.set_authorizer(None)
+            assert not unclassified, f"Unclassified migration authorizer actions: {unclassified}"
+
+    # SQLite calls the authorizer at prepare time. Repeated SQL must be re-prepared.
+    connect = partial(sqlite3.connect, cached_statements=0)
+    with patch.object(sqlite3, "connect", connect), patch.object(queue_module, "_ensure_schema", migrate):
+        yield seen
+
+
+def _open_queue(path):
+    return SqliteQueue({"db_path": str(path)})
+
+
+def _logical_state(path):
+    """Schema entries, every table's rows and the queue marker; no page bytes."""
+    with closing(sqlite3.connect(path)) as conn:
+        schema = conn.execute("SELECT type, name, sql FROM sqlite_master ORDER BY type, name").fetchall()
+        tables = [name for kind, name, _ in schema if kind == "table"]
+        rows = {name: conn.execute(f'SELECT * FROM "{name}" ORDER BY 1').fetchall() for name in tables}
+        marker = (
+            conn.execute(f"SELECT version FROM {_MARKER_TABLE} WHERE component = 'queue'").fetchone()
+            if _MARKER_TABLE in tables else None
+        )
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    return {"schema": schema, "rows": rows, "marker": marker and marker[0]}
+
+
+def _queue_item_columns(path):
+    with closing(sqlite3.connect(path)) as conn:
+        return {row[1] for row in conn.execute("PRAGMA table_info(queue_items)")}
+
+
+def _schema_shape(state):
+    return [
+        (kind, name, " ".join(sql.split()) if sql is not None else None)
+        for kind, name, sql in state["schema"]
+    ]
+
+
+@pytest.fixture(scope="module")
+def canonical_v5_schema(tmp_path_factory):
+    path = tmp_path_factory.mktemp("queue-v5") / "queue.db"
+    legacy_database(path, 5)
+    return _schema_shape(_logical_state(path))
+
+
+@lru_cache(maxsize=None)
+def _injection_points(version):
+    """Mutating statements of one successful upgrade, recorded in execution order."""
+    with tempfile.TemporaryDirectory(prefix="rpacore-injection-") as directory:
+        path = Path(directory) / "queue.db"
+        legacy_database(path, version)
+        with _record_migration_actions() as seen:
+            _open_queue(path)
+        return tuple(seen)
+
+
+def _point_id(version, point):
+    ordinal, action, target = point
+    return f"v{version}-{ordinal:02d}-{action}-{target}"
+
+
+INJECTION_POINTS = [
+    pytest.param(version, point, id=_point_id(version, point))
+    for version in range(5) for point in _injection_points(version)
+]
+
+
+def _deny(path, point):
+    with _record_migration_actions(deny_ordinal=point[0]) as seen:
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            _open_queue(path)
+    assert seen[-1] == point
+
+
+def test_migration_recorder_rejects_unclassified_pragma(tmp_path, monkeypatch):
+    path = tmp_path / "queue.db"
+    legacy_database(path, 4)
+    original = queue_module._migrate_queue_to_v5
+
+    def migrate(conn):
+        conn.execute("PRAGMA user_version = 1")
+        original(conn)
+
+    monkeypatch.setattr(queue_module, "_migrate_queue_to_v5", migrate)
+    with _record_migration_actions(), pytest.raises(AssertionError, match="Unclassified.*user_version"):
+        _open_queue(path)
+    with closing(sqlite3.connect(path)) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("version", range(5))
+def test_recorded_injection_points_cover_every_object_the_schema_lacks(tmp_path, version, canonical_v5_schema):
+    path = tmp_path / "queue.db"
+    legacy_database(path, version)
+    before = _logical_state(path)
+    before_columns = _queue_item_columns(path)
+    _open_queue(path)
+    after = _logical_state(path)
+    assert _schema_shape(after) == canonical_v5_schema
+    points = _injection_points(version)
+    assert points
+    created = {(action, target) for _, action, target in points}
+    existing_objects = {(kind, name) for kind, name, _ in before["schema"]}
+    assert {
+        (f"CREATE_{kind.upper()}", name)
+        for kind, name, sql in after["schema"]
+        if kind in {"table", "index"} and sql is not None
+        and (kind, name) not in existing_objects and name != "sqlite_sequence"
+    } <= created
+    missing_columns = _queue_item_columns(path) - before_columns
+    assert sum(p[1:] == ("ALTER_TABLE", "queue_items") for p in points) >= len(missing_columns)
+    assert sum(p[1:] == ("INSERT", _MARKER_TABLE) for p in points) >= 5 - version
+    if version < 3:
+        assert ("UPDATE", "queue_items.status") in {p[1:] for p in points}
+    assert (before["marker"], after["marker"]) == (version or None, 5)
+
+
+@pytest.mark.parametrize("version,point", INJECTION_POINTS)
+def test_denied_statement_rolls_back_whole_upgrade(tmp_path, version, point):
+    path = tmp_path / "queue.db"
+    legacy_database(path, version)
+    before = _logical_state(path)
+    _deny(path, point)
+    assert not Path(f"{path}-journal").exists()
+    assert _logical_state(path) == before
+
+
+@pytest.mark.parametrize("version,point", INJECTION_POINTS)
+def test_retry_after_denied_statement_matches_never_failed_upgrade(tmp_path, version, point, canonical_v5_schema):
+    failed, clean = tmp_path / "failed.db", tmp_path / "clean.db"
+    legacy_database(failed, version)
+    shutil.copyfile(failed, clean)
+    _deny(failed, point)
+    _open_queue(clean)
+    _open_queue(failed)
+    retried = _logical_state(failed)
+    assert retried == _logical_state(clean)
+    assert retried["marker"] == 5
+    assert _schema_shape(retried) == canonical_v5_schema
+
+
+_STEP_BOUNDARIES = [(version, target) for version in range(5) for target in range(version + 1, 6)]
+
+
+@pytest.mark.parametrize(
+    "version,target", _STEP_BOUNDARIES, ids=[f"v{v}-before-marker-{t}" for v, t in _STEP_BOUNDARIES],
+)
+def test_exception_at_any_step_boundary_rolls_back_whole_upgrade(tmp_path, monkeypatch, version, target):
+    path = tmp_path / "queue.db"
+    legacy_database(path, version)
+    before = _logical_state(path)
+    original = queue_module._record_queue_schema_version
+
+    def fail_before(conn, recorded):
+        if recorded == target:
+            raise RuntimeError("injected step failure")
+        original(conn, recorded)
+
+    monkeypatch.setattr(queue_module, "_record_queue_schema_version", fail_before)
+    with pytest.raises(RuntimeError, match="injected step failure"):
+        _open_queue(path)
+    assert not Path(f"{path}-journal").exists()
+    assert _logical_state(path) == before
+
+
+def _point(version, action, target):
+    return next(p for p in _injection_points(version) if p[1:] == (action, target))
+
+
+def test_v3_poison_table_denial_leaves_no_attempt_table_or_index(tmp_path):
+    path = tmp_path / "queue.db"
+    legacy_database(path, 3)
+    _deny(path, _point(3, "CREATE_TABLE", "queue_poison_events"))
+    state = _logical_state(path)
+    assert state["marker"] == 3
+    names = {name for _, name, _ in state["schema"]}
+    assert not {"queue_attempts", "idx_queue_attempts_item_sequence",
+                "queue_poison_events", "idx_queue_poison_events_item_sequence"} & names
+
+
+def test_v4_marker_denial_leaves_no_available_at_column(tmp_path):
+    path = tmp_path / "queue.db"
+    legacy_database(path, 4)
+    _deny(path, _point(4, "INSERT", _MARKER_TABLE))
+    assert _logical_state(path)["marker"] == 4
+    assert "available_at" not in _queue_item_columns(path)
+
+
+def test_v0_first_marker_write_denial_leaves_no_marker_table(tmp_path):
+    path = tmp_path / "queue.db"
+    legacy_database(path, 0)
+    _deny(path, _point(0, "INSERT", _MARKER_TABLE))
+    state = _logical_state(path)
+    assert state["marker"] is None
+    assert _MARKER_TABLE not in state["rows"]
+
+
+@pytest.mark.parametrize("column", ["status", "claimed_by", "claimed_at"])
+@pytest.mark.parametrize("version", [0, 1, 2])
+def test_denied_lease_invalidation_keeps_statuses_claimants_and_timestamps(tmp_path, version, column):
+    path = tmp_path / "queue.db"
+    legacy_database(path, version)
+    _deny(path, _point(version, "UPDATE", f"queue_items.{column}"))
+    with closing(sqlite3.connect(path)) as conn:
+        lease = conn.execute(
+            "SELECT status, claimed_by, claimed_at FROM queue_items WHERE id = ?", (f"{1:032x}",),
+        ).fetchone()
+    assert lease == ("in_progress", "legacy-worker", STAMP.isoformat())
+
+
+def test_v3_with_attempt_table_from_interrupted_v030_upgrade_finishes(tmp_path, canonical_v5_schema):
+    path = tmp_path / "queue.db"
+    legacy_database(path, 3)
+    with closing(sqlite3.connect(path)) as conn, conn:
+        _create_attempt_table(conn)
+    before = _logical_state(path)
+
+    _open_queue(path)
+
+    after = _logical_state(path)
+    assert after["marker"] == 5
+    assert _schema_shape(after) == canonical_v5_schema
+    assert [entry for entry in after["schema"] if entry[1] == "queue_attempts"] == [
+        entry for entry in before["schema"] if entry[1] == "queue_attempts"
+    ]
+    assert after["rows"]["queue_attempts"] == after["rows"]["queue_poison_events"] == []

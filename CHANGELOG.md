@@ -83,6 +83,15 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- A failed `v0.3.0` queue upgrade could leave part of the new schema committed
+  under the old version marker. The whole upgrade now runs in one transaction.
+  If a statement is rejected before execution, an exception occurs between
+  statements, or the process is killed before commit, the next writable open
+  can retry from the previous schema, rows, and marker. Journal mode remains
+  `DELETE`. A `v0.3.0` queue still marked v3 with the published v4 attempts
+  table and index already present can finish upgrading on writable open when
+  the rest of the schema still matches v3. This fix requires no separate
+  migration or example-project update.
 - Terminal transaction outcomes now use unresolved failures. Recovered system
   errors no longer override a remaining business failure. Unresolved system
   failures take precedence, with the latest matching failure history selecting

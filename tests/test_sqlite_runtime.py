@@ -197,21 +197,23 @@ sqlite3.connect = paused_connect
 
 
 @contextmanager
-def _worker(queue_path, transaction_path, ready, release, *, phase=None):
+def _reaped_worker(script, *args):
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
-    process = subprocess.Popen(
-        [sys.executable, "-c", (_INITIAL_PAUSE if phase else "") + _WORKER,
-         str(queue_path), str(transaction_path), str(ready), str(release),
-         *([phase] if phase else [])],
-        env=env,
-    )
+    process = subprocess.Popen([sys.executable, "-c", script, *map(str, args)], env=env)
     try:
         yield process
     finally:
         if process.poll() is None:
             process.kill()
         process.wait(timeout=10)
+
+
+def _worker(queue_path, transaction_path, ready, release, *, phase=None):
+    script = _INITIAL_PAUSE + _WORKER if phase else _WORKER
+    return _reaped_worker(
+        script, queue_path, transaction_path, ready, release, *([phase] if phase else []),
+    )
 
 
 def _wait_ready(process, ready):
@@ -628,3 +630,125 @@ def test_transaction_load_errors_release_the_reader(tmp_path, monkeypatch, failu
                          str(db_path), readonly=readonly)
     assert db_path.read_bytes() == before
     save_transaction(transaction, str(db_path))
+
+
+_MIGRATION_WORKER = """
+import sys, time
+from pathlib import Path
+import rpacore.queue as queue_module
+from rpacore import SqliteQueue
+
+path, ready, pause_version, probe = sys.argv[1], Path(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+connect = queue_module._connect
+record = queue_module._record_queue_schema_version
+
+def connect_with_spill(db_path):
+    conn = connect(db_path)
+    # Spill uncommitted pages so recovery has work to do after the kill.
+    conn.execute("PRAGMA cache_size = 1")
+    return conn
+
+def pause(conn, version):
+    if version == pause_version:
+        assert conn.in_transaction, "queue migration has no open transaction"
+        assert conn.execute(probe).fetchone() is not None, "upgrade DDL is not visible"
+        ready.touch()
+        while True:  # the parent kills this process; it is never released
+            time.sleep(0.05)
+    record(conn, version)
+
+queue_module._connect = connect_with_spill
+queue_module._record_queue_schema_version = pause
+SqliteQueue({"db_path": path})
+raise SystemExit("migration finished without pausing")
+"""
+
+_OBJECT_PROBE = "SELECT 1 FROM sqlite_master WHERE name = '{}'"
+_COLUMN_PROBE = "SELECT 1 FROM pragma_table_info('queue_items') WHERE name = 'available_at'"
+
+
+def _published_queue_database(path, version):
+    """Unversioned (0) or v3 queue file, independent from the migration helpers."""
+    stamp = "2026-10-28T12:00:00+00:00"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(
+            "CREATE TABLE queue_items (id TEXT PRIMARY KEY, reference TEXT NOT NULL, "
+            "payload TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'pending', "
+            "retry_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, "
+            "claimed_by TEXT NOT NULL DEFAULT '', claimed_at TEXT)"
+        )
+        if version == 3:
+            connection.execute(
+                "CREATE TABLE rpacore_schema_versions "
+                "(component TEXT PRIMARY KEY, version INTEGER NOT NULL)"
+            )
+            connection.execute("INSERT INTO rpacore_schema_versions VALUES ('queue', 3)")
+            connection.execute("ALTER TABLE queue_items ADD COLUMN transaction_id TEXT NOT NULL DEFAULT ''")
+            connection.execute("CREATE INDEX idx_queue_items_created_at_id ON queue_items (created_at ASC, id ASC)")
+            connection.execute("CREATE INDEX idx_queue_items_status_created_at_id ON queue_items (status, created_at ASC, id ASC)")
+            connection.execute("CREATE INDEX idx_queue_items_reference_status ON queue_items (reference, status)")
+            connection.execute("ALTER TABLE queue_items ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''")
+            connection.execute(
+                "CREATE TABLE queue_admin_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "item_id TEXT NOT NULL, action TEXT NOT NULL, reason TEXT NOT NULL, "
+                "previous_status TEXT NOT NULL, new_status TEXT NOT NULL, created_at TEXT NOT NULL, "
+                "FOREIGN KEY (item_id) REFERENCES queue_items(id))"
+            )
+            connection.execute("CREATE INDEX idx_queue_admin_events_item_sequence ON queue_admin_events (item_id, sequence)")
+        for item_id, status in (("a", "pending"), ("b", "in_progress"), ("c", "successful")):
+            connection.execute(
+                "INSERT INTO queue_items (id, reference, status, created_at, claimed_at) "
+                "VALUES (?, ?, ?, ?, ?)", (item_id, item_id, status, stamp, stamp),
+            )
+        if version == 3:
+            connection.execute(
+                "UPDATE queue_items SET claim_token = 'token', transaction_id = 'binding' "
+                "WHERE status = 'in_progress'"
+            )
+            connection.execute(
+                "INSERT INTO queue_admin_events (item_id, action, reason, previous_status, new_status, created_at) "
+                "VALUES ('a', 'requeue', 'operator retry', 'failed', 'pending', ?)", (stamp,),
+            )
+
+
+def _queue_logical_state(path):
+    with closing(sqlite3.connect(path)) as connection:
+        schema = connection.execute(
+            "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+        ).fetchall()
+        rows = {name: connection.execute(f'SELECT * FROM "{name}" ORDER BY 1').fetchall()
+                for kind, name, _ in schema if kind == "table"}
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    return {"schema": schema, "rows": rows}
+
+
+@pytest.mark.parametrize("version,pause_version,probe", [
+    (0, 1, _OBJECT_PROBE.format("rpacore_schema_versions")),
+    (0, 5, _COLUMN_PROBE),
+    (3, 4, _OBJECT_PROBE.format("queue_attempts")),
+    (3, 5, _COLUMN_PROBE),
+], ids=["v0-first-step", "v0-last-step", "v3-first-step", "v3-last-step"])
+def test_killed_queue_migration_leaves_pre_upgrade_file_and_migrates_on_reopen(
+    tmp_path, version, pause_version, probe,
+):
+    queue_path, ready = tmp_path / "queue.db", tmp_path / "ready"
+    _published_queue_database(queue_path, version)
+    before = _queue_logical_state(queue_path)
+    before_pages = queue_path.read_bytes()
+    with _reaped_worker(_MIGRATION_WORKER, queue_path, ready, pause_version, probe) as process:
+        _wait_ready(process, ready)
+        process.kill()
+        # Windows releases the killed process's file handles asynchronously.
+        assert process.wait(timeout=10) != 0
+    journal = Path(f"{queue_path}-journal")
+    assert journal.exists()
+    assert queue_path.read_bytes() != before_pages, "uncommitted pages did not spill to disk"
+    assert _queue_logical_state(queue_path) == before
+    assert not journal.exists(), "the first SQLite open did not recover the hot journal"
+    queue = SqliteQueue({"db_path": str(queue_path)})
+    assert [item.id for item in queue.list_items()] == ["a", "b", "c"]
+    with closing(sqlite3.connect(queue_path)) as connection:
+        assert connection.execute(
+            "SELECT version FROM rpacore_schema_versions WHERE component = 'queue'"
+        ).fetchone()[0] == 5
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
