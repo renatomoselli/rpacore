@@ -2010,6 +2010,26 @@ name = "rpacore"
         assert ".rpiv" not in validate.call_args.kwargs["output_dir"].parts
         assert not work_dir.exists()
 
+    def test_main_omitted_output_dir_keeps_parser_default(self, tmp_path: Path) -> None:
+        module = _load_script()
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+
+        with patch.object(
+            module,
+            "validate_release_candidate",
+            return_value={"result": {"status": "pass"}},
+        ) as validate:
+            result = module.main(
+                ["--repo-root", str(tmp_path), "--work-dir", str(work_dir)]
+            )
+
+        assert result == 0
+        assert validate.call_args.kwargs["work_dir"] == work_dir.resolve()
+        assert validate.call_args.kwargs["output_dir"] == (
+            Path("validation-artifacts/release-candidate-validation").resolve()
+        )
+
     def test_main_passes_resolved_prebuilt_artifact_directory(self, tmp_path: Path) -> None:
         module = _load_script()
         work_dir = tmp_path / "work"
@@ -2053,3 +2073,486 @@ name = "rpacore"
 
         assert result == 0
         assert not work_dir.exists()
+
+
+def _snapshot(root: Path) -> dict[str, bytes | tuple[str, ...]]:
+    """File bytes and directory listings under ``root``."""
+    entries: dict[str, bytes | tuple[str, ...]] = {}
+    if not root.exists():
+        return entries
+    if root.is_file():
+        entries[""] = root.read_bytes()
+        return entries
+    entries[""] = tuple(sorted(child.name for child in root.iterdir()))
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink() or path.is_file():
+            entries[relative] = path.read_bytes()
+        elif path.is_dir():
+            entries[relative] = tuple(sorted(child.name for child in path.iterdir()))
+    return entries
+
+
+def _release_kwargs(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    values: dict[str, object] = {
+        "repo_root": repo_root,
+        "examples_repo": None,
+        "work_dir": tmp_path / "work",
+        "output_dir": tmp_path / "out",
+        "examples_pytest": [],
+        "example_cli_project": None,
+        "example_cli_db": "rpacore.db",
+        "examples_wheel_matrix": False,
+        "prebuilt_artifacts_dir": None,
+    }
+    values.update(overrides)
+    return values
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["child_file", "child_folder", "work_dir_file", "stale_evidence"],
+)
+def test_refuses_non_empty_work_dir_without_touching_it(tmp_path: Path, case: str) -> None:
+    module = _load_script()
+    work_dir = tmp_path / "work"
+    if case == "child_file":
+        target = work_dir / "venv" / "keep.txt"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"keep")
+    elif case == "child_folder":
+        (work_dir / "notes").mkdir(parents=True)
+    elif case == "work_dir_file":
+        work_dir.write_bytes(b"not-a-directory")
+    else:
+        evidence = work_dir / "sqlite-runtime" / "sqlite-runtime.json"
+        evidence.parent.mkdir(parents=True)
+        evidence.write_bytes(b'{"status":"pass","proof":"stale"}\n')
+
+    kwargs = _release_kwargs(tmp_path, work_dir=work_dir)
+    before = _snapshot(tmp_path)
+    with pytest.raises(module.ValidationError, match="new or empty") as caught:
+        module.validate_release_candidate(**kwargs)
+
+    assert str(work_dir.resolve()) in str(caught.value)
+    assert _snapshot(tmp_path) == before
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {"examples_repo": "examples"},
+            "--examples-pytest, --example-cli-project, or --examples-wheel-matrix "
+            "is required when --examples-repo is provided",
+        ),
+        (
+            {"example_cli_project": "examples/demo"},
+            "--examples-repo is required when --example-cli-project is used",
+        ),
+        (
+            {"examples_wheel_matrix": True},
+            "--examples-repo is required when --examples-wheel-matrix is used",
+        ),
+        (
+            {"examples_pytest": ["examples/demo/tests"]},
+            "--examples-repo is required when --examples-pytest is used",
+        ),
+    ],
+)
+def test_argument_errors_leave_work_dir_untouched(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    module = _load_script()
+    work_dir = tmp_path / "work"
+    sentinel = work_dir / "source" / "keep.txt"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_bytes(b"keep")
+    kwargs = _release_kwargs(tmp_path, work_dir=work_dir)
+    if overrides.get("examples_repo") == "examples":
+        examples_repo = tmp_path / "examples"
+        examples_repo.mkdir()
+        overrides = {**overrides, "examples_repo": examples_repo}
+    kwargs.update(overrides)
+
+    before = _snapshot(tmp_path)
+    with pytest.raises(module.ValidationError) as caught:
+        module.validate_release_candidate(**kwargs)
+
+    assert str(caught.value) == message
+    assert _snapshot(tmp_path) == before
+    assert not (tmp_path / "out").exists()
+    assert sentinel.read_bytes() == b"keep"
+
+
+def test_missing_input_directory_is_refused_not_created(tmp_path: Path) -> None:
+    module = _load_script()
+    missing = tmp_path / "missing-artifacts"
+    work_dir = tmp_path / "work"
+    kwargs = _release_kwargs(tmp_path, work_dir=work_dir, prebuilt_artifacts_dir=missing)
+
+    before = _snapshot(tmp_path)
+    with pytest.raises(module.ValidationError) as caught:
+        module.validate_release_candidate(**kwargs)
+
+    assert str(missing.resolve()) in str(caught.value)
+    assert not missing.exists()
+    assert not work_dir.exists()
+    assert not (tmp_path / "out").exists()
+    assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "work_inside_prebuilt",
+        "output_inside_work",
+        "work_inside_output",
+        "work_inside_repo",
+        "work_inside_examples",
+        "explicit_validation_results_output",
+    ],
+)
+def test_work_dir_overlaps_are_refused_or_accepted(tmp_path: Path, case: str) -> None:
+    module = _load_script()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "README.txt").write_bytes(b"repo-sentinel")
+    output_dir = tmp_path / "out"
+    prebuilt = None
+    examples_repo = None
+    examples_pytest: list[str] = []
+    if case == "work_inside_prebuilt":
+        prebuilt = tmp_path / "artifacts"
+        prebuilt.mkdir()
+        (prebuilt / "keep.txt").write_bytes(b"prebuilt-sentinel")
+        work_dir = prebuilt / "work"
+        work_dir.mkdir()
+    elif case == "output_inside_work":
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_dir = work_dir / "custom-results"
+    elif case == "work_inside_output":
+        output_dir.mkdir()
+        (output_dir / "keep.txt").write_bytes(b"output-sentinel")
+        work_dir = output_dir / "work"
+    elif case == "work_inside_repo":
+        work_dir = repo_root / "validation-artifacts" / "rc"
+        work_dir.mkdir(parents=True)
+    elif case == "work_inside_examples":
+        examples_repo = tmp_path / "examples"
+        work_dir = examples_repo / "nested-work"
+        work_dir.mkdir(parents=True)
+        examples_pytest = ["examples/demo/tests"]
+    else:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        output_dir = work_dir / "validation-results"
+
+    if case == "explicit_validation_results_output":
+        def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+            assert (work_dir / "venv").is_dir()
+            assert (work_dir / "examples-wheel-validation").is_dir()
+            raise module.ValidationError("reached-run")
+
+        with patch.object(
+            module,
+            "_repo_state",
+            return_value=module.RepoState("rpacore", str(repo_root), "abc", "main", False, []),
+        ):
+            with patch.object(module, "_copy_tree"):
+                with patch.object(module, "_run", side_effect=fake_run):
+                    with pytest.raises(module.ValidationError, match="reached-run"):
+                        module.validate_release_candidate(
+                            repo_root=repo_root,
+                            examples_repo=None,
+                            work_dir=work_dir,
+                            output_dir=output_dir,
+                            examples_pytest=[],
+                            example_cli_project=None,
+                            example_cli_db="rpacore.db",
+                        )
+        assert (repo_root / "README.txt").read_bytes() == b"repo-sentinel"
+        return
+
+    before = _snapshot(tmp_path)
+    with pytest.raises(module.ValidationError) as caught:
+        module.validate_release_candidate(
+            repo_root=repo_root,
+            examples_repo=examples_repo,
+            work_dir=work_dir,
+            output_dir=output_dir,
+            examples_pytest=examples_pytest,
+            example_cli_project=None,
+            example_cli_db="rpacore.db",
+            prebuilt_artifacts_dir=prebuilt,
+        )
+    message = str(caught.value)
+    assert "--work-dir" in message
+    assert str(work_dir.resolve()) in message
+    if case == "work_inside_prebuilt":
+        assert "--prebuilt-artifacts-dir" in message
+        assert str(prebuilt.resolve()) in message
+    elif case == "output_inside_work":
+        assert "--output-dir" in message
+        assert str(output_dir.resolve()) in message
+        assert not output_dir.exists()
+    elif case == "work_inside_output":
+        assert "--output-dir" in message
+        assert str(output_dir.resolve()) in message
+        assert not work_dir.exists()
+    elif case == "work_inside_repo":
+        assert "--repo-root" in message
+        assert str(repo_root.resolve()) in message
+    else:
+        assert "--examples-repo" in message
+        assert str(examples_repo.resolve()) in message
+    assert _snapshot(tmp_path) == before
+
+
+def test_absent_nested_work_dir_reaches_run(tmp_path: Path) -> None:
+    module = _load_script()
+    prebuilt = tmp_path / "artifacts"
+    prebuilt.mkdir()
+    (prebuilt / "keep.txt").write_bytes(b"prebuilt-sentinel")
+    work_dir = tmp_path / "validation-artifacts" / "rc"
+    kwargs = _release_kwargs(
+        tmp_path,
+        work_dir=work_dir,
+        prebuilt_artifacts_dir=prebuilt,
+    )
+    repo_root = kwargs["repo_root"]
+    assert isinstance(repo_root, Path)
+    (repo_root / "README.txt").write_bytes(b"repo-sentinel")
+    assert not work_dir.parent.exists()
+
+    def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+        assert (work_dir / "source").is_dir()
+        assert (work_dir / "venv").is_dir()
+        raise module.ValidationError("reached-run")
+
+    with patch.object(
+        module,
+        "_repo_state",
+        return_value=module.RepoState("rpacore", str(repo_root), "abc", "main", False, []),
+    ):
+        with patch.object(module, "_copy_tree"):
+            with patch.object(module, "_run", side_effect=fake_run):
+                with pytest.raises(module.ValidationError, match="reached-run"):
+                    module.validate_release_candidate(**kwargs)
+
+    assert (repo_root / "README.txt").read_bytes() == b"repo-sentinel"
+    assert (prebuilt / "keep.txt").read_bytes() == b"prebuilt-sentinel"
+    assert not (work_dir / "source").exists()
+    assert not work_dir.exists()
+
+
+def _patched_release_failure(module, failure: BaseException):
+    return (
+        patch.object(
+            module,
+            "_repo_state",
+            return_value=module.RepoState("rpacore", "repo", "abc", "main", False, []),
+        ),
+        patch.object(module, "_copy_tree"),
+        patch.object(module, "_run", side_effect=failure),
+    )
+
+
+@pytest.mark.parametrize("kind", ["validation", "interrupt"])
+def test_failure_removes_only_acquired_directories(tmp_path: Path, kind: str) -> None:
+    module = _load_script()
+    prebuilt = tmp_path / "artifacts"
+    prebuilt.mkdir()
+    (prebuilt / "keep.txt").write_bytes(b"prebuilt-sentinel")
+    work_dir = tmp_path / "work"
+    failure: BaseException
+    if kind == "validation":
+        failure = module.ValidationError("framework tests failed")
+    else:
+        failure = KeyboardInterrupt()
+    repo_state, copy_tree, run = _patched_release_failure(module, failure)
+    with repo_state, copy_tree, run:
+        with pytest.raises(type(failure)) as caught:
+            module.validate_release_candidate(
+                **_release_kwargs(
+                    tmp_path,
+                    work_dir=work_dir,
+                    prebuilt_artifacts_dir=prebuilt,
+                )
+            )
+
+    assert caught.value is failure
+    assert not work_dir.exists()
+    assert not (work_dir / "source").exists()
+    assert (prebuilt / "keep.txt").read_bytes() == b"prebuilt-sentinel"
+
+
+def test_concurrent_reserved_folder_creator_is_preserved(tmp_path: Path) -> None:
+    module = _load_script()
+    prebuilt = tmp_path / "artifacts"
+    prebuilt.mkdir()
+    (prebuilt / "keep.txt").write_bytes(b"prebuilt-sentinel")
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    real_acquire = module._acquire_dir
+
+    def seam(path: Path) -> None:
+        if path.name == "outside":
+            path.mkdir()
+            (path / "keep.txt").write_bytes(b"keep")
+            raise FileExistsError(path)
+        real_acquire(path)
+
+    with patch.object(module, "_acquire_dir", side_effect=seam):
+        with pytest.raises(module.ValidationError) as caught:
+            module.validate_release_candidate(
+                **_release_kwargs(
+                    tmp_path,
+                    work_dir=work_dir,
+                    prebuilt_artifacts_dir=prebuilt,
+                )
+            )
+
+    outside = work_dir / "outside"
+    assert str(outside.resolve()) in str(caught.value)
+    assert (outside / "keep.txt").read_bytes() == b"keep"
+    assert not (work_dir / "source").exists()
+    assert not (work_dir / "venv").exists()
+    assert (prebuilt / "keep.txt").read_bytes() == b"prebuilt-sentinel"
+
+
+def test_interrupt_during_acquire_removes_recorded_folders_only(tmp_path: Path) -> None:
+    module = _load_script()
+    prebuilt = tmp_path / "artifacts"
+    prebuilt.mkdir()
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    real_acquire = module._acquire_dir
+    calls: list[str] = []
+
+    def seam(path: Path) -> None:
+        calls.append(path.name)
+        if len(calls) == 2:
+            raise KeyboardInterrupt()
+        real_acquire(path)
+
+    with patch.object(module, "_acquire_dir", side_effect=seam):
+        with pytest.raises(KeyboardInterrupt):
+            module.validate_release_candidate(
+                **_release_kwargs(
+                    tmp_path,
+                    work_dir=work_dir,
+                    prebuilt_artifacts_dir=prebuilt,
+                )
+            )
+
+    assert calls[0] == "source"
+    assert not (work_dir / "source").exists()
+    assert not (work_dir / "outside").exists()
+    assert work_dir.is_dir()
+    assert list(work_dir.iterdir()) == []
+
+
+def test_rerun_on_used_work_dir_is_refused_and_keeps_evidence(tmp_path: Path) -> None:
+    module = _load_script()
+    repo_root = tmp_path / "repo"
+    work_dir = tmp_path / "work"
+    output_dir = tmp_path / "out"
+    prebuilt = tmp_path / "artifacts"
+    repo_root.mkdir()
+    prebuilt.mkdir()
+    transaction_list_json = '{"transactions": [{"id": "12345678-1234-1234-1234-123456789abc"}]}'
+    transaction_show_json = '{"transaction": {"id": "12345678-1234-1234-1234-123456789abc"}}'
+    transaction_export_ndjson = '{"id": "12345678-1234-1234-1234-123456789abc"}\n'
+    stdout_by_name = {
+        "installed_import_smoke": '{"version": "0.1.0", "module_file": "venv/rpacore/__init__.py", "exports": []}',
+        "installed_environment_probe": '{"journal": {"policy": "rollback_delete"}, "python": "3.12"}',
+        "framework_tests": "1 passed in 0.01s",
+        "cli_transaction_list_json": transaction_list_json,
+        "cli_transaction_show_json": transaction_show_json,
+        "cli_transaction_export_json": transaction_list_json,
+        "cli_transaction_export_ndjson": transaction_export_ndjson,
+    }
+
+    def fake_copy_tree(source: Path, destination: Path) -> None:
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "pyproject.toml").write_text(
+            '[project]\nname = "rpacore"\n',
+            encoding="utf-8",
+        )
+
+    def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+        if name == "create_venv":
+            Path(command[-1]).mkdir(parents=True, exist_ok=True)
+        return module.CommandRecord(
+            name=name,
+            command=command,
+            cwd=str(cwd),
+            exit_code=0,
+            duration_seconds=0.01,
+            stdout=stdout_by_name.get(name, ""),
+        )
+
+    def fake_artifacts(wheelhouse: Path):
+        wheelhouse.mkdir(parents=True, exist_ok=True)
+        wheel = wheelhouse / "rpacore-0.1.0-py3-none-any.whl"
+        sdist = wheelhouse / "rpacore-0.1.0.tar.gz"
+        wheel.write_bytes(b"wheel")
+        sdist.write_bytes(b"sdist")
+        records = []
+        for path in (wheel, sdist):
+            records.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "sha256": "abc",
+                    "size_bytes": path.stat().st_size,
+                    "contains_license": True,
+                    "contains_notice": True,
+                    "contains_metadata": True,
+                    "contains_record": True,
+                    "contains_entry_points": True,
+                    "contains_examples": False,
+                    "contains_private_paths": False,
+                    "private_paths": [],
+                }
+            )
+        return records
+
+    def run_once() -> None:
+        module.validate_release_candidate(
+            repo_root=repo_root,
+            examples_repo=None,
+            work_dir=work_dir,
+            output_dir=output_dir,
+            examples_pytest=[],
+            example_cli_project=None,
+            example_cli_db="rpacore.db",
+            prebuilt_artifacts_dir=prebuilt,
+        )
+
+    with patch.object(
+        module,
+        "_repo_state",
+        return_value=module.RepoState("rpacore", str(repo_root), "abc", "main", False, []),
+    ):
+        with patch.object(module, "_copy_tree", side_effect=fake_copy_tree):
+            with patch.object(module, "_run", side_effect=fake_run):
+                with patch.object(module, "_artifact_records", side_effect=fake_artifacts):
+                    with patch.object(module, "_publish_artifacts", side_effect=lambda artifacts, **kwargs: artifacts):
+                        run_once()
+                        manifest = output_dir / "release-candidate-validation-results.json"
+                        evidence = manifest.read_bytes()
+                        assert (work_dir / "source").is_dir()
+                        assert (work_dir / "venv").is_dir()
+                        assert (work_dir / "outside").is_dir()
+                        with pytest.raises(module.ValidationError, match="new or empty"):
+                            run_once()
+
+    assert manifest.read_bytes() == evidence

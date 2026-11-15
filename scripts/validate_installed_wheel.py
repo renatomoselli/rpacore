@@ -744,6 +744,112 @@ print("Limitation: custom checkpoint injection bypasses transient SQLite retries
 '''.replace("__RECOVERY_RECIPE_FILES__", repr(recipe_files))
 
 
+def _acquire_dir(path: Path) -> None:
+    path.mkdir(exist_ok=False)
+
+
+def _require_existing_directory(path: Path, description: str) -> None:
+    if not path.is_dir():
+        raise ValidationError(f"{description} does not exist: {path}")
+
+
+def _require_absent_or_empty_work_dir(work_dir: Path) -> None:
+    if not work_dir.exists():
+        return
+    if work_dir.is_dir() and not any(work_dir.iterdir()):
+        return
+    raise ValidationError(
+        f"{work_dir} is not a new or empty directory; use a new or empty --work-dir"
+    )
+
+
+def _overlaps(left: Path, right: Path) -> bool:
+    """Return whether two resolved paths are equal or one contains the other."""
+    return left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _cleanup_acquired(acquired: list[Path], *, work_dir: Path, created_work_dir: bool) -> None:
+    """Remove only what this run acquired: reserved folders, then an empty work dir it created."""
+    cleanup_failures: list[Path] = []
+    for generated_dir in reversed(acquired):
+        try:
+            _remove_tree(generated_dir)
+        except OSError:
+            logging.warning("Failed to clean generated directory %s", generated_dir, exc_info=True)
+            cleanup_failures.append(generated_dir)
+    for generated_dir in reversed(acquired):
+        if generated_dir.exists() and generated_dir not in cleanup_failures:
+            cleanup_failures.append(generated_dir)
+    if created_work_dir and work_dir.is_dir():
+        try:
+            if not any(work_dir.iterdir()):
+                work_dir.rmdir()
+        except OSError:
+            logging.warning("Failed to clean generated directory %s", work_dir, exc_info=True)
+    if cleanup_failures:
+        logging.warning(
+            "Installed-wheel cleanup left generated directories behind: %s",
+            ", ".join(str(path) for path in cleanup_failures),
+        )
+
+
+def _acquire_work_dirs(work_dir: Path, reserved: list[Path]) -> tuple[list[Path], bool]:
+    """Create an absent work dir, then each reserved folder, recording each right after creation.
+
+    Returns the acquired reserved folders and whether this run created the work dir.
+    """
+    acquired: list[Path] = []
+    created_work_dir = False
+    current = work_dir
+    try:
+        if not work_dir.exists():
+            # A caller-supplied work dir may sit under folders that do not exist yet:
+            # CI passes validation-artifacts/installed-wheel on a fresh checkout.
+            work_dir.mkdir(parents=True, exist_ok=False)
+            created_work_dir = True
+        for folder in reserved:
+            current = folder
+            _acquire_dir(folder)
+            acquired.append(folder)
+    except BaseException as exc:
+        _cleanup_acquired(acquired, work_dir=work_dir, created_work_dir=created_work_dir)
+        if isinstance(exc, FileExistsError):
+            raise ValidationError(
+                f"validation directory already exists: {current}; use a new or empty --work-dir"
+            ) from exc
+        raise
+    return acquired, created_work_dir
+
+
+def _preflight_and_acquire_installed(
+    *,
+    repo_root: Path,
+    work_dir: Path,
+    wheel_dir: Path | None,
+    examples_repo: Path | None,
+    examples_pytest: list[str],
+    reserved: list[Path],
+) -> tuple[list[Path], bool]:
+    """Refuse unsafe arguments before touching disk, then acquire ``reserved``.
+
+    Expects resolved paths. Checks run in order: argument consistency, input
+    existence, the absent-or-empty work-dir rule, then path overlaps.
+    """
+    if examples_repo is not None and not examples_pytest:
+        raise ValidationError("--examples-pytest is required when --examples-repo is provided")
+    if examples_pytest and examples_repo is None:
+        raise ValidationError("--examples-repo is required when --examples-pytest is used")
+    _require_existing_directory(repo_root, "repository root")
+    if examples_repo is not None:
+        _require_existing_directory(examples_repo, "examples repository")
+    if wheel_dir is not None:
+        _require_existing_directory(wheel_dir, "wheel directory")
+    _require_absent_or_empty_work_dir(work_dir)
+    if wheel_dir is not None and _overlaps(work_dir, wheel_dir):
+        raise ValidationError(f"--work-dir {work_dir} overlaps --wheel-dir {wheel_dir}")
+    return _acquire_work_dirs(work_dir, reserved)
+
+
 def validate_installed_wheel(
     *,
     repo_root: Path,
@@ -752,25 +858,28 @@ def validate_installed_wheel(
     examples_repo: Path | None,
     examples_pytest: list[str],
 ) -> None:
+    repo_root = repo_root.resolve()
+    work_dir = work_dir.resolve()
+    if wheel_dir is not None:
+        wheel_dir = wheel_dir.resolve()
+    if examples_repo is not None:
+        examples_repo = examples_repo.resolve()
     generated_wheelhouse = work_dir / "wheelhouse"
     wheelhouse = wheel_dir if wheel_dir is not None else generated_wheelhouse
     venv_dir = work_dir / "venv"
     outside_dir = work_dir / "outside"
-    generated_dirs = (venv_dir, outside_dir) if wheel_dir is not None else (generated_wheelhouse, venv_dir, outside_dir)
-
-    # An attempted invocation must not retain an earlier passing safety report.
-    for name in ("sqlite-runtime.json", "sqlite-runtime.xml"):
-        (work_dir / "sqlite-runtime" / name).unlink(missing_ok=True)
-    if examples_repo is not None and not examples_pytest:
-        raise ValidationError("--examples-pytest is required when --examples-repo is provided")
-    if examples_pytest and examples_repo is None:
-        raise ValidationError("--examples-repo is required when --examples-pytest is used")
+    reserved = [venv_dir, outside_dir] if wheel_dir is not None else [generated_wheelhouse, venv_dir, outside_dir]
+    acquired, created_work_dir = _preflight_and_acquire_installed(
+        repo_root=repo_root,
+        work_dir=work_dir,
+        wheel_dir=wheel_dir,
+        examples_repo=examples_repo,
+        examples_pytest=examples_pytest,
+        reserved=reserved,
+    )
     allowed_run_roots = (repo_root, work_dir)
 
     try:
-        wheelhouse.mkdir(parents=True, exist_ok=True)
-        outside_dir.mkdir(parents=True, exist_ok=True)
-
         if wheel_dir is None:
             # Build the wheel from the freshly produced sdist. A direct wheel
             # build can reuse build/lib and accidentally package a source
@@ -803,8 +912,6 @@ def validate_installed_wheel(
         _run([str(rpacore_cli), "version"], cwd=outside_dir, allowed_roots=allowed_run_roots)
         _run([str(python), "-c", _scaffold_smoke_code()], cwd=outside_dir, allowed_roots=allowed_run_roots)
         generated_project = outside_dir / "installed_project"
-        if generated_project.exists():
-            _remove_tree(generated_project)
         _run([str(rpacore_cli), "init", "installed_project"], cwd=outside_dir, allowed_roots=allowed_run_roots)
         _run(
             [
@@ -840,22 +947,8 @@ def validate_installed_wheel(
                     allowed_roots=(examples_repo,),
                 )
     except BaseException:
-        # Keep generated-directory cleanup deterministic, then re-raise interrupts unchanged.
-        cleanup_failures: list[Path] = []
-        for generated_dir in generated_dirs:
-            try:
-                _remove_tree(generated_dir)
-            except OSError:
-                logging.warning("Failed to clean generated directory %s", generated_dir, exc_info=True)
-                cleanup_failures.append(generated_dir)
-        for generated_dir in generated_dirs:
-            if generated_dir.exists() and generated_dir not in cleanup_failures:
-                cleanup_failures.append(generated_dir)
-        if cleanup_failures:
-            logging.warning(
-                "Installed-wheel cleanup left generated directories behind: %s",
-                ", ".join(str(path) for path in cleanup_failures),
-            )
+        # Keep acquired-directory cleanup deterministic, then re-raise interrupts unchanged.
+        _cleanup_acquired(acquired, work_dir=work_dir, created_work_dir=created_work_dir)
         raise
 
 
@@ -886,8 +979,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     owns_work_dir = args.work_dir is None
-    work_dir = args.work_dir or Path(tempfile.mkdtemp(prefix="rpacore-installed-wheel-"))
-    work_dir.mkdir(parents=True, exist_ok=True)
+    if owns_work_dir:
+        work_dir = Path(tempfile.mkdtemp(prefix="rpacore-installed-wheel-"))
+        # mkdtemp already created it; exist_ok mkdir also covers tests that
+        # patch mkdtemp to return a path without creating it.
+        work_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        work_dir = args.work_dir
 
     try:
         validate_installed_wheel(

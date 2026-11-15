@@ -83,6 +83,14 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- The release-candidate and installed-wheel validators no longer delete
+  pre-existing work-directory content or inputs placed inside the work
+  directory. A caller-supplied `--work-dir` must be new or empty and must not
+  overlap `--wheel-dir` or `--prebuilt-artifacts-dir`. For the
+  release-candidate validator it must not lie inside either repository, and
+  `--output-dir` may sit inside it only as `<work-dir>/validation-results`. A
+  missing `--wheel-dir` or `--prebuilt-artifacts-dir` is refused instead of
+  being created. No migration or examples-repository update is required.
 - A failed `v0.3.0` queue upgrade could leave part of the new schema committed
   under the old version marker. The whole upgrade now runs in one transaction.
   If a statement is rejected before execution, an exception occurs between

@@ -265,8 +265,6 @@ def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
 
 
 def _copy_tree(source: Path, destination: Path) -> None:
-    if destination.exists():
-        _remove_tree(destination)
     shutil.copytree(source, destination, ignore=_copy_ignore_for_source(), symlinks=True)
 
 
@@ -917,6 +915,128 @@ def _run_examples_wheel_matrix(
     }
 
 
+def _acquire_dir(path: Path) -> None:
+    path.mkdir(exist_ok=False)
+
+
+def _require_existing_directory(path: Path, description: str) -> None:
+    if not path.is_dir():
+        raise ValidationError(f"{description} does not exist: {path}")
+
+
+def _require_absent_or_empty_work_dir(work_dir: Path) -> None:
+    if not work_dir.exists():
+        return
+    if work_dir.is_dir() and not any(work_dir.iterdir()):
+        return
+    raise ValidationError(
+        f"{work_dir} is not a new or empty directory; use a new or empty --work-dir"
+    )
+
+
+def _overlaps(left: Path, right: Path) -> bool:
+    """Return whether two resolved paths are equal or one contains the other."""
+    return left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _cleanup_acquired(acquired: list[Path], *, work_dir: Path, created_work_dir: bool) -> None:
+    """Remove only what this run acquired: reserved folders, then an empty work dir it created."""
+    cleanup_failures: list[Path] = []
+    for generated_dir in reversed(acquired):
+        try:
+            _remove_tree(generated_dir)
+        except OSError:
+            logging.warning("Failed to clean generated directory %s", generated_dir, exc_info=True)
+            cleanup_failures.append(generated_dir)
+    for generated_dir in reversed(acquired):
+        if generated_dir.exists() and generated_dir not in cleanup_failures:
+            cleanup_failures.append(generated_dir)
+    if created_work_dir and work_dir.is_dir():
+        try:
+            if not any(work_dir.iterdir()):
+                work_dir.rmdir()
+        except OSError:
+            logging.warning("Failed to clean generated directory %s", work_dir, exc_info=True)
+    if cleanup_failures:
+        logging.warning(
+            "Validation cleanup left generated directories behind: %s",
+            ", ".join(str(path) for path in cleanup_failures),
+        )
+
+
+def _acquire_work_dirs(work_dir: Path, reserved: list[Path]) -> tuple[list[Path], bool]:
+    """Create an absent work dir, then each reserved folder, recording each right after creation.
+
+    Returns the acquired reserved folders and whether this run created the work dir.
+    """
+    acquired: list[Path] = []
+    created_work_dir = False
+    current = work_dir
+    try:
+        if not work_dir.exists():
+            # A caller-supplied work dir may sit under folders that do not exist yet.
+            work_dir.mkdir(parents=True, exist_ok=False)
+            created_work_dir = True
+        for folder in reserved:
+            current = folder
+            _acquire_dir(folder)
+            acquired.append(folder)
+    except BaseException as exc:
+        _cleanup_acquired(acquired, work_dir=work_dir, created_work_dir=created_work_dir)
+        if isinstance(exc, FileExistsError):
+            raise ValidationError(
+                f"validation directory already exists: {current}; use a new or empty --work-dir"
+            ) from exc
+        raise
+    return acquired, created_work_dir
+
+
+def _preflight_and_acquire_release(
+    *,
+    repo_root: Path,
+    examples_repo: Path | None,
+    work_dir: Path,
+    output_dir: Path,
+    examples_pytest: list[str],
+    example_cli_project: str | None,
+    examples_wheel_matrix: bool,
+    prebuilt_artifacts_dir: Path | None,
+    reserved: list[Path],
+) -> tuple[list[Path], bool]:
+    """Refuse unsafe arguments before touching disk, then acquire ``reserved``.
+
+    Expects resolved paths. Checks run in order: argument consistency, input
+    existence, the absent-or-empty work-dir rule, then path overlaps.
+    """
+    if examples_repo is not None and not examples_pytest and example_cli_project is None and not examples_wheel_matrix:
+        raise ValidationError("--examples-pytest, --example-cli-project, or --examples-wheel-matrix is required when --examples-repo is provided")
+    if example_cli_project is not None and examples_repo is None:
+        raise ValidationError("--examples-repo is required when --example-cli-project is used")
+    if examples_wheel_matrix and examples_repo is None:
+        raise ValidationError("--examples-repo is required when --examples-wheel-matrix is used")
+    if examples_pytest and examples_repo is None:
+        raise ValidationError("--examples-repo is required when --examples-pytest is used")
+    _require_existing_directory(repo_root, "repository root")
+    if examples_repo is not None:
+        _require_existing_directory(examples_repo, "examples repository")
+    if prebuilt_artifacts_dir is not None:
+        _require_existing_directory(prebuilt_artifacts_dir, "prebuilt artifact directory")
+    _require_absent_or_empty_work_dir(work_dir)
+    # The source copy would recurse into a work dir placed inside either repository.
+    if _overlaps(work_dir, repo_root):
+        raise ValidationError(f"--work-dir {work_dir} overlaps --repo-root {repo_root}")
+    if examples_repo is not None and _overlaps(work_dir, examples_repo):
+        raise ValidationError(f"--work-dir {work_dir} overlaps --examples-repo {examples_repo}")
+    if prebuilt_artifacts_dir is not None and _overlaps(work_dir, prebuilt_artifacts_dir):
+        raise ValidationError(
+            f"--work-dir {work_dir} overlaps --prebuilt-artifacts-dir {prebuilt_artifacts_dir}"
+        )
+    # work_dir/validation-results is the one output location allowed inside the work dir.
+    if output_dir != work_dir / "validation-results" and _overlaps(work_dir, output_dir):
+        raise ValidationError(f"--work-dir {work_dir} overlaps --output-dir {output_dir}")
+    return _acquire_work_dirs(work_dir, reserved)
+
+
 def validate_release_candidate(
     *,
     repo_root: Path,
@@ -930,41 +1050,36 @@ def validate_release_candidate(
     prebuilt_artifacts_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run release-candidate validation and return the validation manifest."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+    repo_root = repo_root.resolve()
     work_dir = work_dir.resolve()
+    output_dir = output_dir.resolve()
+    if examples_repo is not None:
+        examples_repo = examples_repo.resolve()
+    if prebuilt_artifacts_dir is not None:
+        prebuilt_artifacts_dir = prebuilt_artifacts_dir.resolve()
     source_dir = work_dir / "source"
     framework_copy = source_dir / "rpacore"
     examples_copy = source_dir / "rpacore-examples"
-    wheelhouse = (
-        prebuilt_artifacts_dir.resolve()
-        if prebuilt_artifacts_dir is not None
-        else work_dir / "wheelhouse"
-    )
+    wheelhouse = prebuilt_artifacts_dir if prebuilt_artifacts_dir is not None else work_dir / "wheelhouse"
     outside_dir = work_dir / "outside"
     venv_dir = work_dir / "venv"
     examples_matrix_work_dir = work_dir / "examples-wheel-validation"
-    generated_dirs = (source_dir, outside_dir, venv_dir, examples_matrix_work_dir)
+    reserved = [source_dir, outside_dir, venv_dir, examples_matrix_work_dir]
     if prebuilt_artifacts_dir is None:
-        generated_dirs = (source_dir, wheelhouse, outside_dir, venv_dir, examples_matrix_work_dir)
-
-    for generated_dir in generated_dirs:
-        if generated_dir.exists():
-            _remove_tree(generated_dir)
-    if examples_repo is not None and not examples_pytest and example_cli_project is None and not examples_wheel_matrix:
-        raise ValidationError("--examples-pytest, --example-cli-project, or --examples-wheel-matrix is required when --examples-repo is provided")
-    if example_cli_project is not None and examples_repo is None:
-        raise ValidationError("--examples-repo is required when --example-cli-project is used")
-    if examples_wheel_matrix and examples_repo is None:
-        raise ValidationError("--examples-repo is required when --examples-wheel-matrix is used")
-    cleanup_failures: list[Path] = []
+        reserved.insert(1, wheelhouse)
+    acquired, created_work_dir = _preflight_and_acquire_release(
+        repo_root=repo_root,
+        examples_repo=examples_repo,
+        work_dir=work_dir,
+        output_dir=output_dir,
+        examples_pytest=examples_pytest,
+        example_cli_project=example_cli_project,
+        examples_wheel_matrix=examples_wheel_matrix,
+        prebuilt_artifacts_dir=prebuilt_artifacts_dir,
+        reserved=reserved,
+    )
     try:
-        source_dir.mkdir(parents=True)
-        if prebuilt_artifacts_dir is None:
-            wheelhouse.mkdir(parents=True)
-        elif not wheelhouse.is_dir():
-            raise ValidationError(f"prebuilt artifact directory does not exist: {wheelhouse}")
-        outside_dir.mkdir(parents=True)
-
+        output_dir.mkdir(parents=True, exist_ok=True)
         repos = [_repo_state("rpacore", repo_root)]
         if examples_repo is not None:
             repos.append(_repo_state("rpacore-examples", examples_repo))
@@ -1048,8 +1163,6 @@ def validate_release_candidate(
         rpacore_cli = _venv_script(venv_dir, "rpacore")
         commands.append(_run("cli_version", [str(rpacore_cli), "version"], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
         generated_project = outside_dir / "installed_project"
-        if generated_project.exists():
-            _remove_tree(generated_project)
         commands.append(_run("cli_init", [str(rpacore_cli), "init", "installed_project"], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
         commands.append(_run("cli_run_generated_project", [str(rpacore_cli), "run"], cwd=generated_project, allowed_roots=allowed_run_roots, env=env))
         _append_cli_transaction_inspection(
@@ -1090,8 +1203,6 @@ def validate_release_candidate(
             )
 
         if examples_pytest:
-            if examples_repo is None:
-                raise ValidationError("--examples-repo is required when --examples-pytest is used")
             commands.append(
                 _run(
                     "install_pytest_for_examples",
@@ -1162,21 +1273,8 @@ def validate_release_candidate(
         _write_manifest(manifest, output_dir)
         return manifest
     except BaseException:
-        # Keep generated-directory cleanup deterministic, then re-raise interrupts unchanged.
-        for generated_dir in generated_dirs:
-            try:
-                _remove_tree(generated_dir)
-            except OSError:
-                logging.warning("Failed to clean generated directory %s", generated_dir, exc_info=True)
-                cleanup_failures.append(generated_dir)
-        for generated_dir in generated_dirs:
-            if generated_dir.exists() and generated_dir not in cleanup_failures:
-                cleanup_failures.append(generated_dir)
-        if cleanup_failures:
-            logging.warning(
-                "Validation cleanup left generated directories behind: %s",
-                ", ".join(str(path) for path in cleanup_failures),
-            )
+        # Keep acquired-directory cleanup deterministic, then re-raise interrupts unchanged.
+        _cleanup_acquired(acquired, work_dir=work_dir, created_work_dir=created_work_dir)
         raise
 
 
@@ -1310,9 +1408,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     owns_work_dir = args.work_dir is None
-    work_dir = args.work_dir or Path(tempfile.mkdtemp(prefix="rpacore-rc-"))
-    output_dir = args.output_dir or (work_dir / "validation-results")
-    work_dir.mkdir(parents=True, exist_ok=True)
+    if owns_work_dir:
+        work_dir = Path(tempfile.mkdtemp(prefix="rpacore-rc-"))
+        # mkdtemp already created it; exist_ok mkdir also covers tests that
+        # patch mkdtemp to return a path without creating it.
+        work_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        work_dir = args.work_dir
+    output_dir = args.output_dir
     try:
         manifest = validate_release_candidate(
             repo_root=args.repo_root.resolve(),
