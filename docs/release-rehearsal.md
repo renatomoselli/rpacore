@@ -75,6 +75,8 @@ python scripts/validate_release_candidate.py \
 
 A caller-supplied `--work-dir` for the release-candidate and installed-wheel
 validators must be new or empty, and reuse is refused rather than cleaned.
+Candidate validation runs the installed-wheel contract checks on the exact
+candidate wheel.
 
 With `--examples-wheel-matrix`, the candidate validator runs the frozen,
 deterministic external examples against its exact candidate wheel and records

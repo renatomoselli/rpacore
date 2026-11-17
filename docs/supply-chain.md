@@ -39,8 +39,9 @@ in [Release Rehearsal](release-rehearsal.md).
 
 The release-candidate validator accepts wheels and `.tar.gz` source
 distributions, then records artifact hashes, dependency inventory, package
-metadata presence, wheel `RECORD`, wheel entry points, license files, and
-private-path checks in its validation manifest. After every validation step
+metadata presence, wheel `RECORD`, wheel entry points, license files,
+installed-wheel contract checks, and private-path checks in its validation
+manifest. After every validation step
 passes, it preserves the exact artifact set in an immutable content-addressed
 directory beneath the candidate output's `artifacts/` directory. The manifest
 records those durable files; publication must use them without rebuilding.

@@ -83,6 +83,8 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- Candidate validation runs the installed-wheel contract checks on the exact
+  candidate wheel. No migration or examples-repository update is required.
 - The release-candidate and installed-wheel validators no longer delete
   pre-existing work-directory content or inputs placed inside the work
   directory. A caller-supplied `--work-dir` must be new or empty and must not
