@@ -85,6 +85,9 @@ All notable user-facing changes are recorded here.
 
 - Candidate validation runs the installed-wheel contract checks on the exact
   candidate wheel. No migration or examples-repository update is required.
+- Candidate validation reads transaction IDs from `transaction list --json`
+  entries as `entry.transaction.id`, matching the documented list shape,
+  instead of failing every full run with a missing-`id` error.
 - The release-candidate and installed-wheel validators no longer delete
   pre-existing work-directory content or inputs placed inside the work
   directory. A caller-supplied `--work-dir` must be new or empty and must not

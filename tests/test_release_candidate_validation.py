@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tarfile
 import zipfile
+from contextlib import nullcontext
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
@@ -531,15 +532,33 @@ class TestReleaseCandidateValidationScript:
         else:
             raise AssertionError("Expected ValidationError")
 
-        try:
-            module._transaction_ids([{"reference": "missing-id"}])
-        except module.ValidationError as exc:
-            assert "string 'id'" in str(exc)
-        else:
-            raise AssertionError("Expected ValidationError")
+        with pytest.raises(module.ValidationError, match="created no transactions"):
+            module._transaction_ids([])
 
-        assert module._transaction_ids([{"id": "not a uuid"}]) == ["not a uuid"]
-        assert module._transaction_ids([{"id": "abc123-000"}]) == ["abc123-000"]
+        assert module._transaction_ids(
+            [
+                {"transaction": {"id": "not a uuid"}, "outcome": {}},
+                {"transaction": {"id": "abc123-000"}, "outcome": {}},
+            ]
+        ) == ["not a uuid", "abc123-000"]
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            pytest.param({"id": "abc123-000"}, id="bare-record"),
+            pytest.param({"transaction": "abc123-000"}, id="non-object-transaction"),
+            pytest.param({"transaction": {"reference": "missing-id"}}, id="missing-id"),
+            pytest.param({"transaction": {"id": 7}}, id="non-string-id"),
+            pytest.param({"transaction": {"id": ""}}, id="empty-id"),
+        ],
+    )
+    def test_transaction_ids_require_nested_transaction_id(self, entry: dict[str, object]) -> None:
+        module = _load_script()
+
+        with pytest.raises(module.ValidationError) as caught:
+            module._transaction_ids([{"transaction": {"id": "ok-000"}}, entry])
+
+        assert str(caught.value) == "transaction list JSON item 1 did not include a string 'transaction.id'"
 
     def test_transaction_command_adds_db_only_when_explicit(self, tmp_path: Path) -> None:
         module = _load_script()
@@ -604,6 +623,60 @@ class TestReleaseCandidateValidationScript:
                 raise AssertionError("Expected ValidationError")
 
         assert commands == []
+
+    def test_append_cli_transaction_inspection_unwraps_list_entries(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        module = _load_script()
+        commands: list[object] = []
+        tx_id = "12345678-1234-1234-1234-123456789abc"
+        stdout_by_name = {
+            "demo_transaction_list_json": json.dumps(
+                {
+                    "schema_version": 3,
+                    "transactions": [
+                        {"transaction": {"id": tx_id}, "outcome": {"category": "success"}}
+                    ],
+                }
+            ),
+            "demo_transaction_show_json": json.dumps(
+                {"schema_version": 3, "transaction": {"id": tx_id}, "outcome": {}}
+            ),
+            "demo_transaction_export_json": json.dumps({"transactions": [{"id": tx_id}]}),
+            "demo_transaction_export_ndjson": json.dumps({"id": tx_id}) + "\n",
+        }
+        commands_by_name: dict[str, list[str]] = {}
+
+        def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+            commands_by_name[name] = command
+            return module.CommandRecord(
+                name=name,
+                command=command,
+                cwd=str(cwd),
+                exit_code=0,
+                duration_seconds=0.01,
+                stdout=stdout_by_name.get(name, ""),
+            )
+
+        with patch.object(module, "_run", side_effect=fake_run):
+            module._append_cli_transaction_inspection(
+                commands,  # type: ignore[arg-type]
+                name_prefix="demo",
+                rpacore_cli=tmp_path / "rpacore",
+                cwd=tmp_path,
+                db_path=None,
+                allowed_roots=(tmp_path,),
+                env={},
+            )
+
+        assert commands_by_name["demo_transaction_show"][-1] == tx_id
+        assert commands_by_name["demo_transaction_show_json"][-2:] == [tx_id, "--json"]
+        parsed = {record.name: record.parsed for record in commands}  # type: ignore[attr-defined]
+        assert parsed["demo_transaction_list_json"] == {"transaction_count": 1}
+        assert parsed["demo_transaction_show_json"] == {"transaction_id": tx_id}
+        assert parsed["demo_transaction_export_json"] == {"transaction_count": 1}
+        assert parsed["demo_transaction_export_ndjson"] == {"record_count": 1}
 
     def test_validation_error_uses_shared_base(self) -> None:
         module = _load_script()
@@ -1508,7 +1581,8 @@ dev = ["pytest"]
                     encoding="utf-8",
                 )
 
-        transaction_list_json = '{"transactions": [{"id": "12345678-1234-1234-1234-123456789abc"}]}'
+        transaction_list_json = '{"transactions": [{"transaction": {"id": "12345678-1234-1234-1234-123456789abc"}, "outcome": {}}]}'
+        transaction_export_json = '{"transactions": [{"id": "12345678-1234-1234-1234-123456789abc"}]}'
         transaction_show_json = '{"transaction": {"id": "12345678-1234-1234-1234-123456789abc"}}'
         transaction_export_ndjson = '{"id": "12345678-1234-1234-1234-123456789abc"}\n'
         stdout_by_name = {
@@ -1517,11 +1591,11 @@ dev = ["pytest"]
             "framework_tests": "1 passed in 0.01s",
             "cli_transaction_list_json": transaction_list_json,
             "cli_transaction_show_json": transaction_show_json,
-            "cli_transaction_export_json": transaction_list_json,
+            "cli_transaction_export_json": transaction_export_json,
             "cli_transaction_export_ndjson": transaction_export_ndjson,
             "example_cli_transaction_list_json": transaction_list_json,
             "example_cli_transaction_show_json": transaction_show_json,
-            "example_cli_transaction_export_json": transaction_list_json,
+            "example_cli_transaction_export_json": transaction_export_json,
             "example_cli_transaction_export_ndjson": transaction_export_ndjson,
             "example_pytest:examples/demo/tests": "1 passed in 0.01s",
         }
@@ -1533,9 +1607,7 @@ dev = ["pytest"]
                 (cwd / "rpacore.db").write_text("", encoding="utf-8")
             stdout = stdout_by_name.get(name, "")
             if name == "installed_wheel_contract":
-                wheel_dir = Path(command[command.index("--wheel-dir") + 1])
-                copied_wheel = next(wheel_dir.iterdir())
-                stdout = f"Core wheel: {copied_wheel.name}; SHA-256: {module._sha256(copied_wheel)}"
+                stdout = _fake_core_wheel_report(module, command)
             return module.CommandRecord(
                 name=name,
                 command=command,
@@ -2474,7 +2546,8 @@ def test_rerun_on_used_work_dir_is_refused_and_keeps_evidence(tmp_path: Path) ->
     prebuilt = tmp_path / "artifacts"
     repo_root.mkdir()
     prebuilt.mkdir()
-    transaction_list_json = '{"transactions": [{"id": "12345678-1234-1234-1234-123456789abc"}]}'
+    transaction_list_json = '{"transactions": [{"transaction": {"id": "12345678-1234-1234-1234-123456789abc"}, "outcome": {}}]}'
+    transaction_export_json = '{"transactions": [{"id": "12345678-1234-1234-1234-123456789abc"}]}'
     transaction_show_json = '{"transaction": {"id": "12345678-1234-1234-1234-123456789abc"}}'
     transaction_export_ndjson = '{"id": "12345678-1234-1234-1234-123456789abc"}\n'
     stdout_by_name = {
@@ -2483,7 +2556,7 @@ def test_rerun_on_used_work_dir_is_refused_and_keeps_evidence(tmp_path: Path) ->
         "framework_tests": "1 passed in 0.01s",
         "cli_transaction_list_json": transaction_list_json,
         "cli_transaction_show_json": transaction_show_json,
-        "cli_transaction_export_json": transaction_list_json,
+        "cli_transaction_export_json": transaction_export_json,
         "cli_transaction_export_ndjson": transaction_export_ndjson,
     }
 
@@ -2499,9 +2572,7 @@ def test_rerun_on_used_work_dir_is_refused_and_keeps_evidence(tmp_path: Path) ->
             Path(command[-1]).mkdir(parents=True, exist_ok=True)
         stdout = stdout_by_name.get(name, "")
         if name == "installed_wheel_contract":
-            wheel_dir = Path(command[command.index("--wheel-dir") + 1])
-            copied_wheel = next(wheel_dir.iterdir())
-            stdout = f"Core wheel: {copied_wheel.name}; SHA-256: {module._sha256(copied_wheel)}"
+            stdout = _fake_core_wheel_report(module, command)
         return module.CommandRecord(
             name=name,
             command=command,
@@ -2568,6 +2639,13 @@ def test_rerun_on_used_work_dir_is_refused_and_keeps_evidence(tmp_path: Path) ->
                             run_once()
 
     assert manifest.read_bytes() == evidence
+
+
+def _fake_core_wheel_report(module, command: list[str]) -> str:
+    """Print the line validate_installed_wheel.py emits for its selected wheel."""
+    wheel_dir = Path(command[command.index("--wheel-dir") + 1])
+    copied_wheel = next(wheel_dir.iterdir())
+    return f"Core wheel: {copied_wheel.name}; SHA-256: {module._sha256(copied_wheel)}"
 
 
 def _installed_wheel_contract_case(tmp_path: Path):
@@ -2688,18 +2766,16 @@ def test_installed_wheel_contract_refuses_changed_wheel_before_child(
     def fake_copy(src, dst, *, follow_symlinks=True):
         Path(dst).write_bytes(b"other-bytes")
 
-    with patch.object(module, "_run") as run:
-        copy_patch = patch.object(module.shutil, "copy2", side_effect=fake_copy)
-        if case == "copy":
-            copy_patch.start()
-        try:
-            with pytest.raises(module.ValidationError) as caught:
-                _call_installed_wheel_contract(
-                    module, framework_copy, wheel, wheel_dir, work_dir, expected
-                )
-        finally:
-            if case == "copy":
-                copy_patch.stop()
+    copy_patch = (
+        patch.object(module.shutil, "copy2", side_effect=fake_copy)
+        if case == "copy"
+        else nullcontext()
+    )
+    with patch.object(module, "_run") as run, copy_patch:
+        with pytest.raises(module.ValidationError) as caught:
+            _call_installed_wheel_contract(
+                module, framework_copy, wheel, wheel_dir, work_dir, expected
+            )
 
     assert str(caught.value) == "candidate wheel changed before the installed-wheel checks started"
     run.assert_not_called()

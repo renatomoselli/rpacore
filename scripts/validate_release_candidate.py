@@ -43,6 +43,8 @@ from rpacore._validation import (
 
 TRUNCATE_OUTPUT_CHARS = 12_000
 DEFAULT_OUTPUT_DIR = Path("validation-artifacts/release-candidate-validation")
+# The line validate_installed_wheel.py prints for the wheel it selected.
+CORE_WHEEL_LINE = re.compile(r"Core wheel: (?P<name>.+); SHA-256: (?P<sha256>[0-9a-f]{64})")
 VALIDATION_FINDINGS = (
     "G2-001",
     "G2-002",
@@ -579,10 +581,16 @@ def _validation_index(commands: list[CommandRecord]) -> dict[str, list[str]]:
     }
 
 
+def _full_stdout(command_record: CommandRecord) -> str:
+    """Return untruncated stdout; the recorded ``stdout`` is head-kept."""
+    if command_record.raw_stdout is not None:
+        return command_record.raw_stdout
+    return command_record.stdout
+
+
 def _parse_json_output(command_record: CommandRecord) -> dict[str, Any]:
-    stdout = command_record.raw_stdout if command_record.raw_stdout is not None else command_record.stdout
     try:
-        parsed = json.loads(stdout)
+        parsed = json.loads(_full_stdout(command_record))
     except json.JSONDecodeError as exc:
         raise ValidationError(f"{command_record.name} did not produce valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
@@ -592,8 +600,7 @@ def _parse_json_output(command_record: CommandRecord) -> dict[str, Any]:
 
 def _parse_ndjson_output(command_record: CommandRecord) -> list[dict[str, Any]]:
     records = []
-    stdout = command_record.raw_stdout if command_record.raw_stdout is not None else command_record.stdout
-    for line_number, line in enumerate(stdout.splitlines(), start=1):
+    for line_number, line in enumerate(_full_stdout(command_record).splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -624,13 +631,26 @@ def _transactions_from_list_payload(payload: dict[str, Any]) -> list[dict[str, A
     return transactions
 
 
-def _transaction_ids(transactions: list[dict[str, Any]]) -> list[str]:
-    if not transactions:
+def _wrapped_transaction_id(payload: dict[str, Any], *, source: str) -> str:
+    """Return ``payload["transaction"]["id"]`` from a CLI inspection payload.
+
+    ``transaction list --json`` entries and ``transaction show --json`` both
+    wrap the canonical record under ``transaction`` beside its ``outcome``.
+    """
+    transaction = payload.get("transaction")
+    transaction_id = transaction.get("id") if isinstance(transaction, dict) else None
+    if not isinstance(transaction_id, str) or not transaction_id:
+        raise ValidationError(f"{source} did not include a string 'transaction.id'")
+    return transaction_id
+
+
+def _transaction_ids(entries: list[dict[str, Any]]) -> list[str]:
+    if not entries:
         raise ValidationError("generated project created no transactions for CLI inspection")
-    tx_ids = [tx["id"] for tx in transactions if isinstance(tx.get("id"), str) and tx["id"]]
-    if not tx_ids:
-        raise ValidationError("transaction list JSON entries did not include string 'id' values")
-    return tx_ids
+    return [
+        _wrapped_transaction_id(entry, source=f"transaction list JSON item {index}")
+        for index, entry in enumerate(entries)
+    ]
 
 
 def _installed_smoke_code(
@@ -788,10 +808,9 @@ def _append_cli_transaction_inspection(
         allowed_roots=allowed_roots,
         env=env,
     )
-    list_payload = _parse_json_output(list_json)
-    transactions = _transactions_from_list_payload(list_payload)
-    list_json.parsed = {"transaction_count": len(transactions)}
-    tx_ids = _transaction_ids(transactions)
+    list_entries = _transactions_from_list_payload(_parse_json_output(list_json))
+    list_json.parsed = {"transaction_count": len(list_entries)}
+    tx_ids = _transaction_ids(list_entries)
     inspection_commands.append(list_json)
 
     inspection_commands.append(
@@ -810,7 +829,11 @@ def _append_cli_transaction_inspection(
         allowed_roots=allowed_roots,
         env=env,
     )
-    show_json.parsed = {"transaction_id": _parse_json_output(show_json)["transaction"]["id"]}
+    show_json.parsed = {
+        "transaction_id": _wrapped_transaction_id(
+            _parse_json_output(show_json), source=show_json.name
+        )
+    }
     inspection_commands.append(show_json)
 
     export_json = _run(
@@ -915,6 +938,19 @@ def _run_examples_wheel_matrix(
     }
 
 
+def _require_sha256(path: Path, expected_sha256: str, message: str) -> None:
+    if _sha256(path) != expected_sha256:
+        raise ValidationError(message)
+
+
+def _reported_core_wheel(command_record: CommandRecord) -> tuple[str, str] | None:
+    for line in _full_stdout(command_record).splitlines():
+        match = CORE_WHEEL_LINE.fullmatch(line)
+        if match is not None:
+            return match.group("name"), match.group("sha256")
+    return None
+
+
 def _run_installed_wheel_contract(
     *,
     framework_copy: Path,
@@ -925,12 +961,17 @@ def _run_installed_wheel_contract(
     allowed_roots: tuple[Path, ...],
     env: dict[str, str],
 ) -> CommandRecord:
-    if _sha256(wheel) != expected_wheel_sha256:
-        raise ValidationError("candidate wheel changed before the installed-wheel checks started")
+    """Run the frozen copy's installed-wheel checks on a run-owned wheel copy.
+
+    Hashing the copy before and after the child brackets what its
+    ``pip install`` read; the child's reported hash shows which bytes it chose.
+    """
+    changed_before = "candidate wheel changed before the installed-wheel checks started"
+    _require_sha256(wheel, expected_wheel_sha256, changed_before)
     copied_wheel = wheel_dir / wheel.name
     shutil.copy2(wheel, copied_wheel)
-    if _sha256(copied_wheel) != expected_wheel_sha256:
-        raise ValidationError("candidate wheel changed before the installed-wheel checks started")
+    _require_sha256(copied_wheel, expected_wheel_sha256, changed_before)
+
     command_record = _run(
         "installed_wheel_contract",
         [
@@ -947,23 +988,16 @@ def _run_installed_wheel_contract(
         allowed_roots=allowed_roots,
         env=env,
     )
-    stdout = command_record.raw_stdout if command_record.raw_stdout is not None else command_record.stdout
-    reported_name = None
-    reported_sha256 = None
-    for line in stdout.splitlines():
-        match = re.fullmatch(
-            r"Core wheel: (?P<name>.+); SHA-256: (?P<sha256>[0-9a-f]{64})",
-            line,
-        )
-        if match is not None:
-            reported_name = match.group("name")
-            reported_sha256 = match.group("sha256")
-            break
-    if reported_name is None or reported_sha256 != expected_wheel_sha256:
+    reported = _reported_core_wheel(command_record)
+    if reported is None or reported[1] != expected_wheel_sha256:
         raise ValidationError("installed-wheel checks did not validate the candidate wheel hash")
+    reported_name, reported_sha256 = reported
     command_record.parsed = {"wheel": reported_name, "wheel_sha256": reported_sha256}
-    if _sha256(copied_wheel) != expected_wheel_sha256:
-        raise ValidationError("candidate wheel changed during the installed-wheel checks")
+    _require_sha256(
+        copied_wheel,
+        expected_wheel_sha256,
+        "candidate wheel changed during the installed-wheel checks",
+    )
     return command_record
 
 
