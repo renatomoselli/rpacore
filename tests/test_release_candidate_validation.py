@@ -1531,13 +1531,18 @@ dev = ["pytest"]
             command_details[name] = (command, cwd)
             if name == "example_cli_run":
                 (cwd / "rpacore.db").write_text("", encoding="utf-8")
+            stdout = stdout_by_name.get(name, "")
+            if name == "installed_wheel_contract":
+                wheel_dir = Path(command[command.index("--wheel-dir") + 1])
+                copied_wheel = next(wheel_dir.iterdir())
+                stdout = f"Core wheel: {copied_wheel.name}; SHA-256: {module._sha256(copied_wheel)}"
             return module.CommandRecord(
                 name=name,
                 command=command,
                 cwd=str(cwd),
                 exit_code=0,
                 duration_seconds=0.01,
-                stdout=stdout_by_name.get(name, ""),
+                stdout=stdout,
             )
 
         def fake_artifacts(wheelhouse: Path):
@@ -1624,6 +1629,7 @@ dev = ["pytest"]
             "install_wheel",
             "installed_environment_probe",
             "installed_import_smoke",
+            "installed_wheel_contract",
             "cli_version",
             "cli_init",
             "cli_run_generated_project",
@@ -1659,6 +1665,7 @@ dev = ["pytest"]
             "example_pytest:examples/demo/tests"
         ]
         assert manifest["artifacts"][0]["contains_examples"] is False
+        assert manifest["result"]["status"] == "pass"
         assert manifest["schema_version"] == 3
         assert manifest["environment"]["sqlite"]["library_version"] == "3.45.1"
         assert manifest["environment"]["journal"]["queue"]["effective_mode"] == "delete"
@@ -2490,13 +2497,18 @@ def test_rerun_on_used_work_dir_is_refused_and_keeps_evidence(tmp_path: Path) ->
     def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
         if name == "create_venv":
             Path(command[-1]).mkdir(parents=True, exist_ok=True)
+        stdout = stdout_by_name.get(name, "")
+        if name == "installed_wheel_contract":
+            wheel_dir = Path(command[command.index("--wheel-dir") + 1])
+            copied_wheel = next(wheel_dir.iterdir())
+            stdout = f"Core wheel: {copied_wheel.name}; SHA-256: {module._sha256(copied_wheel)}"
         return module.CommandRecord(
             name=name,
             command=command,
             cwd=str(cwd),
             exit_code=0,
             duration_seconds=0.01,
-            stdout=stdout_by_name.get(name, ""),
+            stdout=stdout,
         )
 
     def fake_artifacts(wheelhouse: Path):
@@ -2511,7 +2523,7 @@ def test_rerun_on_used_work_dir_is_refused_and_keeps_evidence(tmp_path: Path) ->
                 {
                     "name": path.name,
                     "path": str(path),
-                    "sha256": "abc",
+                    "sha256": module._sha256(path),
                     "size_bytes": path.stat().st_size,
                     "contains_license": True,
                     "contains_notice": True,
@@ -2556,3 +2568,280 @@ def test_rerun_on_used_work_dir_is_refused_and_keeps_evidence(tmp_path: Path) ->
                             run_once()
 
     assert manifest.read_bytes() == evidence
+
+
+def _installed_wheel_contract_case(tmp_path: Path):
+    module = _load_script()
+    framework_copy = tmp_path / "source" / "rpacore"
+    wheel = tmp_path / "wheelhouse" / "rpacore-0.1.0-py3-none-any.whl"
+    wheel_dir = tmp_path / "work" / "candidate-wheel"
+    work_dir = tmp_path / "work" / "installed-wheel-validation"
+    framework_copy.mkdir(parents=True)
+    wheel.parent.mkdir()
+    wheel_dir.mkdir(parents=True)
+    work_dir.mkdir()
+    wheel.write_bytes(b"wheel")
+    return module, framework_copy, wheel, wheel_dir, work_dir
+
+
+def _call_installed_wheel_contract(module, framework_copy, wheel, wheel_dir, work_dir, expected):
+    return module._run_installed_wheel_contract(
+        framework_copy=framework_copy,
+        wheel=wheel,
+        expected_wheel_sha256=expected,
+        wheel_dir=wheel_dir,
+        work_dir=work_dir,
+        allowed_roots=(work_dir.parent,),
+        env={"PYTHONDONTWRITEBYTECODE": "1"},
+    )
+
+
+def test_installed_wheel_contract_runs_frozen_copy_on_run_owned_wheel(tmp_path: Path) -> None:
+    module, framework_copy, wheel, wheel_dir, work_dir = _installed_wheel_contract_case(tmp_path)
+    expected = module._sha256(wheel)
+    captured: dict[str, object] = {}
+
+    def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+        captured["name"] = name
+        captured["command"] = command
+        captured["cwd"] = cwd
+        captured["allowed_roots"] = allowed_roots
+        captured["env"] = env
+        captured["check"] = check
+        return module.CommandRecord(
+            name=name,
+            command=command,
+            cwd=str(cwd),
+            exit_code=0,
+            duration_seconds=0.01,
+            stdout=f"Core wheel: {wheel.name}; SHA-256: {expected}",
+        )
+
+    with patch.object(module, "_run", side_effect=fake_run):
+        record = _call_installed_wheel_contract(
+            module, framework_copy, wheel, wheel_dir, work_dir, expected
+        )
+
+    assert captured["command"] == [
+        sys.executable,
+        str(framework_copy / "scripts" / "validate_installed_wheel.py"),
+        "--repo-root",
+        str(framework_copy),
+        "--wheel-dir",
+        str(wheel_dir),
+        "--work-dir",
+        str(work_dir),
+    ]
+    assert captured["cwd"] == framework_copy
+    assert captured["name"] == "installed_wheel_contract"
+    assert captured["check"] is True
+    assert captured["allowed_roots"] == (work_dir.parent,)
+    assert captured["env"] == {"PYTHONDONTWRITEBYTECODE": "1"}
+    copied = list(wheel_dir.iterdir())
+    assert len(copied) == 1
+    assert copied[0].name == wheel.name
+    assert copied[0].read_bytes() == wheel.read_bytes()
+    assert record.name == "installed_wheel_contract"
+    assert record.exit_code == 0
+    assert record.parsed == {"wheel": wheel.name, "wheel_sha256": expected}
+
+
+@pytest.mark.parametrize("case", ["absent", "one-char"])
+def test_installed_wheel_contract_rejects_unreported_wheel_hash(tmp_path: Path, case: str) -> None:
+    module, framework_copy, wheel, wheel_dir, work_dir = _installed_wheel_contract_case(tmp_path)
+    expected = module._sha256(wheel)
+    if case == "absent":
+        stdout = "installed wheel checks passed\n"
+    else:
+        flipped = expected[:-1] + ("0" if expected[-1] != "0" else "1")
+        stdout = f"Core wheel: {wheel.name}; SHA-256: {flipped}"
+
+    def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+        return module.CommandRecord(
+            name=name,
+            command=command,
+            cwd=str(cwd),
+            exit_code=0,
+            duration_seconds=0.01,
+            stdout=stdout,
+        )
+
+    with patch.object(module, "_run", side_effect=fake_run):
+        with pytest.raises(module.ValidationError) as caught:
+            _call_installed_wheel_contract(
+                module, framework_copy, wheel, wheel_dir, work_dir, expected
+            )
+
+    assert str(caught.value) == "installed-wheel checks did not validate the candidate wheel hash"
+
+
+@pytest.mark.parametrize("case", ["source", "copy"])
+def test_installed_wheel_contract_refuses_changed_wheel_before_child(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    module, framework_copy, wheel, wheel_dir, work_dir = _installed_wheel_contract_case(tmp_path)
+    expected = module._sha256(wheel)
+    if case == "source":
+        wheel.write_bytes(b"changed-wheel")
+
+    def fake_copy(src, dst, *, follow_symlinks=True):
+        Path(dst).write_bytes(b"other-bytes")
+
+    with patch.object(module, "_run") as run:
+        copy_patch = patch.object(module.shutil, "copy2", side_effect=fake_copy)
+        if case == "copy":
+            copy_patch.start()
+        try:
+            with pytest.raises(module.ValidationError) as caught:
+                _call_installed_wheel_contract(
+                    module, framework_copy, wheel, wheel_dir, work_dir, expected
+                )
+        finally:
+            if case == "copy":
+                copy_patch.stop()
+
+    assert str(caught.value) == "candidate wheel changed before the installed-wheel checks started"
+    run.assert_not_called()
+
+
+def test_installed_wheel_contract_failure_keeps_output_and_cleans_acquired(tmp_path: Path) -> None:
+    module = _load_script()
+    repo_root = tmp_path / "repo"
+    work_dir = tmp_path / "work"
+    output_dir = tmp_path / "validation-results"
+    prebuilt = tmp_path / "prebuilt-artifacts"
+    kept = tmp_path / "caller-kept.txt"
+    repo_root.mkdir()
+    prebuilt.mkdir()
+    kept.write_bytes(b"keep")
+
+    def fake_copy_tree(source: Path, destination: Path) -> None:
+        destination.mkdir(parents=True)
+        (destination / "pyproject.toml").write_text(
+            '[project]\nname = "rpacore"\n',
+            encoding="utf-8",
+        )
+
+    def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+        if name == "installed_wheel_contract":
+            raise module.ValidationError(
+                "installed_wheel_contract failed with exit code 1\n"
+                "stdout:\n\n"
+                "stderr:\ninstalled package missing py.typed"
+            )
+        stdout = ""
+        if name in {"installed_environment_probe", "installed_import_smoke"}:
+            stdout = "{}"
+        return module.CommandRecord(
+            name=name,
+            command=command,
+            cwd=str(cwd),
+            exit_code=0,
+            duration_seconds=0.01,
+            stdout=stdout,
+        )
+
+    def fake_artifacts(wheelhouse: Path):
+        wheelhouse.mkdir(parents=True, exist_ok=True)
+        wheel = wheelhouse / "rpacore-0.1.0-py3-none-any.whl"
+        wheel.write_bytes(b"wheel")
+        return [
+            {
+                "name": wheel.name,
+                "path": str(wheel),
+                "sha256": module._sha256(wheel),
+                "size_bytes": wheel.stat().st_size,
+                "contains_license": True,
+                "contains_notice": True,
+                "contains_metadata": True,
+                "contains_record": True,
+                "contains_entry_points": True,
+                "contains_examples": False,
+                "contains_private_paths": False,
+                "private_paths": [],
+            }
+        ]
+
+    with patch.object(
+        module,
+        "_repo_state",
+        return_value=module.RepoState("rpacore", str(repo_root), "abc", "main", False, []),
+    ):
+        with patch.object(module, "_copy_tree", side_effect=fake_copy_tree):
+            with patch.object(module, "_run", side_effect=fake_run):
+                with patch.object(module, "_artifact_records", side_effect=fake_artifacts):
+                    with pytest.raises(module.ValidationError) as caught:
+                        module.validate_release_candidate(
+                            repo_root=repo_root,
+                            examples_repo=None,
+                            work_dir=work_dir,
+                            output_dir=output_dir,
+                            examples_pytest=[],
+                            example_cli_project=None,
+                            example_cli_db="rpacore.db",
+                            prebuilt_artifacts_dir=prebuilt,
+                        )
+
+    message = str(caught.value)
+    assert message.startswith("installed_wheel_contract failed with exit code 1")
+    assert "installed package missing py.typed" in message
+    assert not (output_dir / "release-candidate-validation-results.json").exists()
+    assert not (work_dir / "candidate-wheel").exists()
+    assert not (work_dir / "installed-wheel-validation").exists()
+    assert kept.read_bytes() == b"keep"
+
+
+def test_validation_index_lists_installed_wheel_contract() -> None:
+    module = _load_script()
+
+    def record(name: str):
+        return module.CommandRecord(
+            name=name,
+            command=["python"],
+            cwd=".",
+            exit_code=0,
+            duration_seconds=0.01,
+        )
+
+    present = [
+        record("installed_import_smoke"),
+        record("example_cli_run"),
+        record("installed_wheel_contract"),
+    ]
+    index = module._validation_index(present)
+    assert index["G2-002"] == [
+        "installed_import_smoke",
+        "example_cli_run",
+        "installed_wheel_contract",
+    ]
+    assert index["G2-007"] == ["installed_import_smoke", "installed_wheel_contract"]
+    assert index["G2-008"] == ["installed_import_smoke", "installed_wheel_contract"]
+
+    omitted = module._validation_index(present[:2])
+    assert all("installed_wheel_contract" not in names for names in omitted.values())
+
+
+def test_installed_wheel_contract_rejects_wheel_changed_during_child(tmp_path: Path) -> None:
+    module, framework_copy, wheel, wheel_dir, work_dir = _installed_wheel_contract_case(tmp_path)
+    expected = module._sha256(wheel)
+
+    def fake_run(name, command, *, cwd, allowed_roots, env=None, check=True):
+        copied = wheel_dir / wheel.name
+        copied.write_bytes(b"rewritten-during-child")
+        return module.CommandRecord(
+            name=name,
+            command=command,
+            cwd=str(cwd),
+            exit_code=0,
+            duration_seconds=0.01,
+            stdout=f"Core wheel: {wheel.name}; SHA-256: {expected}",
+        )
+
+    with patch.object(module, "_run", side_effect=fake_run):
+        with pytest.raises(module.ValidationError) as caught:
+            _call_installed_wheel_contract(
+                module, framework_copy, wheel, wheel_dir, work_dir, expected
+            )
+
+    assert str(caught.value) == "candidate wheel changed during the installed-wheel checks"

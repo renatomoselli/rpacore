@@ -560,15 +560,15 @@ def _validation_index(commands: list[CommandRecord]) -> dict[str, list[str]]:
     command_names = {command.name for command in commands}
     index = {
         "G2-001": ["framework_tests"],
-        "G2-002": ["installed_import_smoke", "example_cli_run"],
+        "G2-002": ["installed_import_smoke", "example_cli_run", "installed_wheel_contract"],
         "G2-004": [
             "example_cli_transaction_list_json",
             "example_cli_transaction_show_json",
             "example_cli_transaction_export_json",
             "example_cli_transaction_export_ndjson",
         ],
-        "G2-007": ["installed_import_smoke"],
-        "G2-008": ["installed_import_smoke"],
+        "G2-007": ["installed_import_smoke", "installed_wheel_contract"],
+        "G2-008": ["installed_import_smoke", "installed_wheel_contract"],
         "G2-013": sorted(
             name for name in command_names if name.startswith("example_pytest:")
         ),
@@ -915,6 +915,58 @@ def _run_examples_wheel_matrix(
     }
 
 
+def _run_installed_wheel_contract(
+    *,
+    framework_copy: Path,
+    wheel: Path,
+    expected_wheel_sha256: str,
+    wheel_dir: Path,
+    work_dir: Path,
+    allowed_roots: tuple[Path, ...],
+    env: dict[str, str],
+) -> CommandRecord:
+    if _sha256(wheel) != expected_wheel_sha256:
+        raise ValidationError("candidate wheel changed before the installed-wheel checks started")
+    copied_wheel = wheel_dir / wheel.name
+    shutil.copy2(wheel, copied_wheel)
+    if _sha256(copied_wheel) != expected_wheel_sha256:
+        raise ValidationError("candidate wheel changed before the installed-wheel checks started")
+    command_record = _run(
+        "installed_wheel_contract",
+        [
+            sys.executable,
+            str(framework_copy / "scripts" / "validate_installed_wheel.py"),
+            "--repo-root",
+            str(framework_copy),
+            "--wheel-dir",
+            str(wheel_dir),
+            "--work-dir",
+            str(work_dir),
+        ],
+        cwd=framework_copy,
+        allowed_roots=allowed_roots,
+        env=env,
+    )
+    stdout = command_record.raw_stdout if command_record.raw_stdout is not None else command_record.stdout
+    reported_name = None
+    reported_sha256 = None
+    for line in stdout.splitlines():
+        match = re.fullmatch(
+            r"Core wheel: (?P<name>.+); SHA-256: (?P<sha256>[0-9a-f]{64})",
+            line,
+        )
+        if match is not None:
+            reported_name = match.group("name")
+            reported_sha256 = match.group("sha256")
+            break
+    if reported_name is None or reported_sha256 != expected_wheel_sha256:
+        raise ValidationError("installed-wheel checks did not validate the candidate wheel hash")
+    command_record.parsed = {"wheel": reported_name, "wheel_sha256": reported_sha256}
+    if _sha256(copied_wheel) != expected_wheel_sha256:
+        raise ValidationError("candidate wheel changed during the installed-wheel checks")
+    return command_record
+
+
 def _acquire_dir(path: Path) -> None:
     path.mkdir(exist_ok=False)
 
@@ -1064,7 +1116,16 @@ def validate_release_candidate(
     outside_dir = work_dir / "outside"
     venv_dir = work_dir / "venv"
     examples_matrix_work_dir = work_dir / "examples-wheel-validation"
-    reserved = [source_dir, outside_dir, venv_dir, examples_matrix_work_dir]
+    candidate_wheel_dir = work_dir / "candidate-wheel"
+    installed_wheel_work_dir = work_dir / "installed-wheel-validation"
+    reserved = [
+        source_dir,
+        outside_dir,
+        venv_dir,
+        examples_matrix_work_dir,
+        candidate_wheel_dir,
+        installed_wheel_work_dir,
+    ]
     if prebuilt_artifacts_dir is None:
         reserved.insert(1, wheelhouse)
     acquired, created_work_dir = _preflight_and_acquire_release(
@@ -1159,6 +1220,17 @@ def validate_release_candidate(
             )
         )
         commands[-1].parsed = _parse_json_output(commands[-1])
+        commands.append(
+            _run_installed_wheel_contract(
+                framework_copy=framework_copy,
+                wheel=wheel,
+                expected_wheel_sha256=wheel_sha256,
+                wheel_dir=candidate_wheel_dir,
+                work_dir=installed_wheel_work_dir,
+                allowed_roots=allowed_run_roots,
+                env=env,
+            )
+        )
 
         rpacore_cli = _venv_script(venv_dir, "rpacore")
         commands.append(_run("cli_version", [str(rpacore_cli), "version"], cwd=outside_dir, allowed_roots=allowed_run_roots, env=env))
