@@ -28,6 +28,20 @@ from rpacore.status import Status
 from rpacore.transaction import Artifact, HistoryEvent, Transaction
 
 
+class DomainRejection(BusinessException):
+    """Application-level business rejection used by category tests."""
+
+
+class PortalDown(SystemException):
+    """Application-level system failure used by category tests."""
+
+
+# User classes whose names contradict the category they inherit. Built with
+# type() so the misleading names do not shadow the real imports.
+NamedBusinessButSystem = type("BusinessException", (SystemException,), {})
+NamedSystemButBusiness = type("SystemException", (BusinessException,), {})
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -271,7 +285,7 @@ class TestGenerateReport:
 
         assert isinstance(report.record, ReportRecord)
         payload = report.record.to_dict()
-        assert payload["report_format_version"] == 2
+        assert payload["report_format_version"] == 3
         assert payload["complete"] is True
         payload["transaction"]["metadata"]["nested"]["values"].append("view")
         assert report.record.to_dict()["transaction"]["metadata"] == {
@@ -322,7 +336,7 @@ class TestGenerateReport:
 
         payload = json.loads(render_json(report))
 
-        assert payload["report_format_version"] == 2
+        assert payload["report_format_version"] == 3
         assert payload["transaction"]["id"] == "manual-001"
 
     def test_text_renderer_uses_recorded_transaction_truth(self):
@@ -515,6 +529,128 @@ class TestGenerateReport:
         assert report.status == Status.FAILED
         assert report.retry_count == 3
         assert report.transaction_id == tx.id
+
+
+# ---------------------------------------------------------------------------
+# TestExceptionCategory — business/system labels come from isinstance, not names
+# ---------------------------------------------------------------------------
+
+class TestExceptionCategory:
+    @pytest.mark.parametrize(
+        ("exc", "category", "type_name"),
+        [
+            pytest.param(DomainRejection("bad row"), "business", "DomainRejection", id="business_subclass"),
+            pytest.param(BusinessException("x"), "business", "BusinessException", id="business_base"),
+            pytest.param(PortalDown("portal"), "system", "PortalDown", id="system_subclass"),
+            pytest.param(SystemException("x"), "system", "SystemException", id="system_base"),
+        ],
+    )
+    def test_record_exception_category_and_type(self, exc, category, type_name):
+        step = make_step("s1", 1, Status.FAILED)
+        step.exceptions = [exc]
+
+        report = generate_report(make_transaction(status=Status.FAILED, steps=[step]))
+
+        entry = report.record.to_dict()["steps"][0]["exceptions"][0]
+        assert set(entry) == {
+            "action", "category", "halts_remaining_steps", "message",
+            "retry_number", "screenshot_path", "type",
+        }
+        assert entry["category"] == category
+        assert entry["type"] == type_name
+
+    @pytest.mark.parametrize(
+        "case",
+        ["complete", "transaction_serialization_failed", "record_serialization_failed"],
+    )
+    def test_report_record_format_version_is_3(self, case):
+        tx = make_transaction()
+        if case == "transaction_serialization_failed":
+            tx.state = {"runtime": object()}
+        elif case == "record_serialization_failed":
+            tx.metadata = {"ratio": float("nan")}
+
+        report = generate_report(tx)
+        payload = report.record.to_dict()
+
+        assert report.record.format_version == 3
+        assert payload["report_format_version"] == 3
+        if case == "complete":
+            assert payload["errors"] == []
+        else:
+            assert payload["errors"][0]["code"] == f"rpacore.report.{case}"
+
+    def test_text_labels_exceptions_by_category(self):
+        step = make_step("s1", 1, Status.FAILED)
+        step.exceptions = [DomainRejection("bad row"), PortalDown("portal")]
+
+        report = generate_report(make_transaction(status=Status.FAILED, steps=[step]))
+
+        lines = render_text(report).splitlines()
+        assert "      [BIZ] retry=0: bad row" in lines
+        assert "      [SYS] retry=0 halts_remaining_steps=true: portal" in lines
+        assert not any("[SYS] retry=0: bad row" in line for line in lines)
+
+    def test_html_labels_exceptions_by_category(self):
+        step = make_step("s1", 1, Status.FAILED)
+        step.exceptions = [DomainRejection("bad row"), PortalDown("portal")]
+
+        report = generate_report(make_transaction(status=Status.FAILED, steps=[step]))
+
+        html = render_html(report)
+        assert '<div class="exc biz"><strong>[BIZ]</strong> retry=0: bad row' in html
+        assert '<div class="exc sys"><strong>[SYS]</strong> retry=0 halts_remaining_steps=true: portal' in html
+        assert '<div class="exc sys"><strong>[SYS]</strong> retry=0: bad row' not in html
+
+    @pytest.mark.parametrize(
+        ("exc_cls", "category", "text_line", "html_prefix"),
+        [
+            pytest.param(
+                NamedBusinessButSystem, "system",
+                "      [SYS] retry=0 halts_remaining_steps=true: misleading",
+                '<div class="exc sys"><strong>[SYS]</strong>',
+                id="named_business_is_system",
+            ),
+            pytest.param(
+                NamedSystemButBusiness, "business",
+                "      [BIZ] retry=0: misleading",
+                '<div class="exc biz"><strong>[BIZ]</strong>',
+                id="named_system_is_business",
+            ),
+        ],
+    )
+    def test_class_name_does_not_decide_label(
+        self, exc_cls, category, text_line, html_prefix,
+    ):
+        step = make_step("s1", 1, Status.FAILED)
+        step.exceptions = [exc_cls("misleading")]
+
+        report = generate_report(make_transaction(status=Status.FAILED, steps=[step]))
+
+        entry = report.record.to_dict()["steps"][0]["exceptions"][0]
+        assert entry["category"] == category
+        assert entry["type"] == exc_cls.__name__
+        assert text_line in render_text(report).splitlines()
+        assert html_prefix in render_html(report)
+
+    def test_reloaded_report_keeps_exception_category(self, tmp_path):
+        step = make_step("s1", 1, Status.FAILED)
+        step.exceptions = [DomainRejection("bad row"), PortalDown("portal")]
+        tx = make_transaction(status=Status.FAILED, steps=[step])
+        tx.definition_identity = "report-category-test/v1"
+        db = str(tmp_path / "report.db")
+        save_transaction(tx, db)
+
+        report = generate_report(load_transaction(tx.id, db))
+
+        entries = report.record.to_dict()["steps"][0]["exceptions"]
+        assert [entry["category"] for entry in entries] == ["business", "system"]
+        assert [entry["type"] for entry in entries] == [
+            "BusinessException", "SystemException",
+        ]
+        text = render_text(report)
+        assert "[BIZ] retry=0: bad row" in text
+        assert "[SYS] retry=0 halts_remaining_steps=true: portal" in text
 
 
 # ---------------------------------------------------------------------------

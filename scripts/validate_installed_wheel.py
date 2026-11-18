@@ -154,6 +154,7 @@ from rpacore import (
     serialize_transaction,
     render_html,
     render_json,
+    render_text,
     validate_config,
 )
 
@@ -223,7 +224,7 @@ report = generate_report(tx)
 assert isinstance(report.outcome, OutcomeReport)
 assert isinstance(report.record, ReportRecord)
 report_payload = json.loads(render_json(report))
-assert report_payload["report_format_version"] == 2
+assert report_payload["report_format_version"] == 3
 assert report_payload["complete"] is True
 assert report.outcome.category is OutcomeCategory.SUCCESSFUL
 assert report.outcome.retry_disposition is RetryDisposition.NOT_APPLICABLE
@@ -231,6 +232,15 @@ default_report = generate_report(Transaction(reference="default-outcome-smoke"))
 assert default_report.outcome.category is OutcomeCategory.UNKNOWN
 assert default_report.outcome.retry_disposition is RetryDisposition.UNKNOWN
 assert default_report.outcome.failure_code == ""
+
+class DomainRejection(BusinessException):
+    pass
+
+rejected_step = Step("reject", 1)
+rejected_step.exceptions = [DomainRejection("bad row")]
+rejection_report = generate_report(Transaction(reference="category-smoke", steps=[rejected_step]))
+assert rejection_report.record.to_dict()["steps"][0]["exceptions"][0]["category"] == "business"
+assert "[BIZ] retry=0: bad row" in render_text(rejection_report)
 
 class RejectStep(Step):
     def execute(self, ctx):
@@ -695,7 +705,7 @@ assert not (replay_project / "wrong.txt").exists()
 assert not list(replay_project.glob(".greeting.txt.*.tmp"))
 report_path = replay_project / f"report-{saved['id']}.json"
 report = json.loads(report_path.read_text(encoding="utf-8"))
-assert report["report_format_version"] == 2 and report["transaction"]["id"] == saved["id"]
+assert report["report_format_version"] == 3 and report["transaction"]["id"] == saved["id"]
 assert report["transaction"]["outcome"]["category"] == "successful"
 for format in ("json", "ndjson"):
     result = run(cli + ["transaction", "export", "--db", str(replay_db), "--transaction-id", saved["id"], "--format", format], root)

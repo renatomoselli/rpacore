@@ -41,6 +41,10 @@ from rpacore.status import Status
 from rpacore.transaction import Transaction
 
 
+class DomainRejection(BusinessException):
+    """Application-level business rejection used by category tests."""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -82,6 +86,16 @@ def _make_report(reference: str = "ref-test", status: Status = Status.SUCCESSFUL
         },
         generated_at=datetime(2026, 4, 21, 12, 0, 0, tzinfo=timezone.utc),
     )
+
+
+def _business_subclass_report() -> TransactionReport:
+    """A failed report whose only exception is a ``BusinessException`` subclass."""
+    report = _make_report(status=Status.FAILED)
+    report.steps = [StepReport(
+        name="reject", execution_order=1, status=Status.FAILED, icon="✗",
+        exceptions=[DomainRejection("bad row")],
+    )]
+    return report
 
 
 def _email_config(host: str = "smtp.example.com", port: int = 587) -> dict:
@@ -751,12 +765,15 @@ class TestWebhookNotifierSend:
         payload = json.loads(body)
         assert "transaction" not in payload
 
-    def test_json_contains_opt_in_report_v2(self):
-        body = self._send(include_report=True)
+    def test_json_contains_opt_in_report_v3(self):
+        body = self._send(_business_subclass_report(), include_report=True)
         payload = json.loads(body)
 
-        assert payload["report"]["report_format_version"] == 2
+        assert payload["report"]["report_format_version"] == 3
         assert payload["report"]["transaction"]["id"] == "tx-001"
+        entry = payload["report"]["steps"][0]["exceptions"][0]
+        assert entry["category"] == "business"
+        assert entry["type"] == "DomainRejection"
 
     def test_incomplete_record_is_disclosed_only_in_opt_in_report(self):
         transaction = Transaction(reference="incomplete-webhook")
@@ -1108,6 +1125,45 @@ class TestDispatch:
         assert first_report is not report
         assert second_report is not report
         assert first_report is not second_report
+
+    def test_dispatch_bodies_label_business_subclass_as_biz(self):
+        report = _business_subclass_report()
+        posted: list[bytes] = []
+
+        def fake_urlopen(req, timeout=None):
+            posted.append(req.data)
+            resp = MagicMock()
+            resp.__enter__ = MagicMock(return_value=resp)
+            resp.__exit__ = MagicMock(return_value=False)
+            resp.read = MagicMock(return_value=b"ok")
+            return resp
+
+        with patch("rpacore.notify.smtplib.SMTP") as smtp_cls, patch(
+            "rpacore.notify.urllib.request.urlopen", side_effect=fake_urlopen,
+        ):
+            dispatch([
+                EmailNotifier(_email_config(), _creds()),
+                WebhookNotifier(_webhook_config()),
+            ], report)
+
+        smtp = smtp_cls.return_value.__enter__.return_value
+        message = message_from_string(smtp.sendmail.call_args.args[2])
+        html_part = next(
+            part for part in message.walk() if part.get_content_type() == "text/html"
+        )
+        text_part = next(
+            part for part in message.walk() if part.get_content_type() == "text/plain"
+        )
+        text_body = text_part.get_payload(decode=True).decode("utf-8")
+        html_body = html_part.get_payload(decode=True).decode("utf-8")
+        webhook_text = json.loads(posted[0])["text"]
+
+        assert "[BIZ] retry=0: bad row" in text_body
+        assert '<div class="exc biz"><strong>[BIZ]</strong> retry=0: bad row' in html_body
+        assert "[BIZ] retry=0: bad row" in webhook_text
+        assert "[SYS] retry=0: bad row" not in text_body
+        assert "[SYS] retry=0: bad row" not in html_body
+        assert "[SYS] retry=0: bad row" not in webhook_text
 
     def test_notifier_exception_swallowed(self):
         bad = MagicMock(spec=Notifier)

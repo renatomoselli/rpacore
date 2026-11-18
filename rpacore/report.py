@@ -26,7 +26,7 @@ _ICONS: dict[Status, str] = {
     Status.PENDING: "⏸",
     Status.IN_PROGRESS: "⏸",
 }
-REPORT_FORMAT_VERSION = 2
+REPORT_FORMAT_VERSION = 3
 
 
 @dataclass
@@ -70,7 +70,7 @@ class OutcomeReport:
 class ReportRecord:
     """Immutable JSON-safe report record.
 
-    ``payload_json`` is the canonical v2 representation. ``to_dict()`` returns
+    ``payload_json`` is the canonical v3 representation. ``to_dict()`` returns
     a fresh mutable view for consumers that need to inspect it.
     """
 
@@ -156,7 +156,7 @@ def generate_report(transaction: Transaction) -> TransactionReport:
 
 
 def _build_report_record(report: TransactionReport) -> ReportRecord:
-    """Build the immutable report-v2 record without changing work truth."""
+    """Build the immutable report-v3 record without changing work truth."""
     serialization_error = ""
     transaction_record: dict[str, object] | None = report.transaction_record
     if not transaction_record:
@@ -194,6 +194,9 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
                 "exceptions": [
                     {
                         "type": type(exc).__name__,
+                        "category": (
+                            "business" if isinstance(exc, BusinessException) else "system"
+                        ),
                         "message": str(exc),
                         "retry_number": exc.retry_number,
                         "action": exc.action,
@@ -272,14 +275,14 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
 
 
 def render_json(report: TransactionReport) -> str:
-    """Render the immutable report-v2 record as canonical JSON."""
+    """Render the immutable report-v3 record as canonical JSON."""
     if report.record is None:
         return _build_report_record(report).payload_json
     return report.record.payload_json
 
 
 def _record_payload(report: TransactionReport) -> dict[str, object]:
-    """Return the immutable report-v2 payload used by renderers."""
+    """Return the immutable report-v3 payload used by renderers."""
     return json.loads(render_json(report))
 
 
@@ -405,7 +408,7 @@ def render_text(report: TransactionReport) -> str:
         assert isinstance(exceptions, list)
         for exc in exceptions:
             assert isinstance(exc, dict)
-            kind = "BIZ" if exc["type"] == "BusinessException" else "SYS"
+            kind = "BIZ" if exc.get("category") == "business" else "SYS"
             halt_text = (
                 " halts_remaining_steps=true"
                 if exc["halts_remaining_steps"]
@@ -589,7 +592,7 @@ def render_html(report: TransactionReport) -> str:
         assert isinstance(exceptions, list)
         for exc in exceptions:
             assert isinstance(exc, dict)
-            kind = "BIZ" if exc["type"] == "BusinessException" else "SYS"
+            kind = "BIZ" if exc.get("category") == "business" else "SYS"
             exc_class = "biz" if kind == "BIZ" else "sys"
             halt_html = (
                 " halts_remaining_steps=true"

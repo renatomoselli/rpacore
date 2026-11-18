@@ -14,11 +14,14 @@ import pytest
 import rpacore.cli as cli_module
 import rpacore._transaction_cli as transaction_cli
 from rpacore import (
+    BusinessException,
     ExecutionTransition,
     QueueItem,
     QueueStatus,
     SqliteQueue,
     Status,
+    Step,
+    SystemException,
     Transaction,
     generate_report,
     query_transactions,
@@ -63,6 +66,35 @@ def _fixture_transaction(*, transaction_id: str = "transaction-v3", hour: int = 
     )
 
 
+class DomainRejection(BusinessException):
+    """A business exception subclass recorded in the v3 report fixture."""
+
+
+class PortalDown(SystemException):
+    """A system exception subclass recorded in the v3 report fixture."""
+
+
+def _v3_report_transaction() -> Transaction:
+    """Build the v3 report fixture's own transaction (distinct from transaction-v3.json)."""
+    step = Step("validate", 1)
+    step.status = Status.FAILED
+    stamp = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
+    step.exceptions = [
+        DomainRejection("bad row", occurred_at=stamp),
+        PortalDown("portal", occurred_at=stamp),
+    ]
+    return Transaction(
+        id="report-v3-fixture",
+        reference="report-v3-fixture",
+        definition_identity="fixture/report-v3",
+        status=Status.FAILED,
+        created_at=datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc),
+        state={"invoice": "002"},
+        metadata={"customer": "acme"},
+        steps=[step],
+    )
+
+
 def _normalize_export(payload: dict[str, object]) -> dict[str, object]:
     payload = dict(payload)
     payload["framework_version"] = "fixture-framework"
@@ -86,6 +118,8 @@ def test_checked_examples_are_json_and_have_the_frozen_framework_envelopes() -> 
         ("export-json-v2.json", "export_format_version", 2),
         ("report-v2-complete.json", "report_format_version", 2),
         ("report-v2-incomplete.json", "report_format_version", 2),
+        ("report-v3-complete.json", "report_format_version", 3),
+        ("report-v3-incomplete.json", "report_format_version", 3),
         ("transition-v2.json", "schema_version", 2),
         ("log-v3.json", "log_format_version", 3),
         ("doctor-v1.json", "doctor_format_version", 1),
@@ -195,12 +229,12 @@ def test_export_v2_fixtures_match_live_output(capsys: pytest.CaptureFixture[str]
     )
 
 
-def test_report_v2_complete_and_incomplete_fixtures_match_live_output() -> None:
-    complete = generate_report(_fixture_transaction()).record
+def test_report_v3_complete_and_incomplete_fixtures_match_live_output() -> None:
+    complete = generate_report(_v3_report_transaction()).record
     assert complete is not None
     complete_payload = complete.to_dict()
     complete_payload["generated_at"] = "fixture-generated-at"
-    assert complete_payload == _json_fixture("report-v2-complete.json")
+    assert complete_payload == _json_fixture("report-v3-complete.json")
 
     incomplete_transaction = _fixture_transaction()
     incomplete_transaction.state = {"not_json": object()}
@@ -208,7 +242,7 @@ def test_report_v2_complete_and_incomplete_fixtures_match_live_output() -> None:
     assert incomplete is not None
     incomplete_payload = incomplete.to_dict()
     incomplete_payload["generated_at"] = "fixture-generated-at"
-    assert incomplete_payload == _json_fixture("report-v2-incomplete.json")
+    assert incomplete_payload == _json_fixture("report-v3-incomplete.json")
 
 
 def test_json_log_v3_fixture_matches_live_output() -> None:

@@ -1,0 +1,32 @@
+{
+  "artifacts": [],
+  "complete": false,
+  "errors": [
+    {
+      "code": "rpacore.report.transaction_serialization_failed",
+      "scope": "transaction_record"
+    }
+  ],
+  "generated_at": "fixture-generated-at",
+  "history": [],
+  "report_format_version": 3,
+  "steps": [],
+  "transaction": {
+    "created_at": "2026-07-27T12:00:00+00:00",
+    "finished_at": "unknown",
+    "id": "transaction-v3",
+    "metadata": {
+      "customer": "acme"
+    },
+    "outcome": {
+      "category": "unknown",
+      "failure_code": "",
+      "retry_disposition": "unknown"
+    },
+    "reference": "fixture",
+    "retry_count": 0,
+    "started_at": "unknown",
+    "status": "successful"
+  },
+  "transaction_record": null
+}
