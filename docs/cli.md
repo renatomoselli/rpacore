@@ -450,7 +450,7 @@ and `outcome` with the same meanings. Consumers migrating from CLI v2 must check
 `schema_version`, unwrap list entries as `entry.transaction` instead of treating
 entries as transaction records, keep show access at `payload.transaction`, and
 read the new outcome beside the record. There is no compatibility-mode flag.
-SQLite schema 10, query/cursor-v1, transaction-v3, export-v2, and report-v2 remain
+SQLite schema 10, query/cursor-v1, transaction-v3, and export-v2 remain
 unchanged; this CLI consumer migration requires no database migration.
 
 Continue using the same filters and the returned `next_cursor` while

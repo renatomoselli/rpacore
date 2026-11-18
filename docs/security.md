@@ -172,7 +172,7 @@ Email notifications can attach screenshots referenced by reports when
 Reports and notification payloads include artifact records and paths, not
 artifact file contents.
 
-The optional `notification.webhook.include_report` payload is report format v2
+The optional `notification.webhook.include_report` payload is report format v3
 and includes the existing report diagnostic surfaces: metadata, artifact paths,
 and exception messages/actions/screenshot paths. It is disabled by default;
 enable it only for a trusted endpoint with an appropriate retention policy.

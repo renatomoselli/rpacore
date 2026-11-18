@@ -380,7 +380,7 @@ directly projects the transaction's captured terminal category, retry
 disposition, and optional failure code; it reports `unknown` rather than
 reconstructing missing truth from lifecycle status, history, or queue attempts.
 Canonical transaction format v3 includes the caller-owned definition identity
-and current step vocabulary. Report format v2 embeds that canonical record.
+and current step vocabulary. Report format v3 embeds that canonical record.
 `dispatch()` gives each notifier
 a fresh snapshot, so one notifier cannot mutate the transaction, the source
 report, or a later notifier's view. Unsupported arbitrary runtime objects are

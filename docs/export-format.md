@@ -26,8 +26,9 @@ or successful empty export. Without this option, the uncapped all-record
 traversal below is unchanged. Both paths buffer serialization before publishing
 stdout, so record/serialization failures publish no partial export.
 
-Canonical exports do not include captured outcome projections; use report-v2
-or [CLI list/show v3](cli.md#machine-readable-compatibility) for that truth.
+Canonical exports do not include captured outcome projections; use report
+format v3 or [CLI list/show v3](cli.md#machine-readable-compatibility) for that
+truth.
 
 ## JSON
 
@@ -47,7 +48,7 @@ contains `transaction_format_version`. The current transaction format is version
 3 and includes the caller-owned `definition_identity` used for recovery
 compatibility. An empty identity marks a legacy or inspection-only record.
 
-Report and notifier payloads use the separate report format version 2, which
+Report and notifier payloads use the separate report format version 3, which
 embeds the canonical transaction-v3 record.
 
 ## Compatibility

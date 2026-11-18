@@ -73,8 +73,16 @@ All notable user-facing changes are recorded here.
   outcomes beside unchanged transaction-v3 records. List consumers must read
   `entry.transaction` and `entry.outcome`; show retains `payload.transaction`
   and adds `payload.outcome`. Gate interpretation on `schema_version`.
-  List adds `has_more` and `next_cursor`. SQLite, query/cursor, export and report
+  List adds `has_more` and `next_cursor`. SQLite, query/cursor and export
   formats remain unchanged; no database migration is required.
+
+- Report records advance from format v2 to v3. Each `steps[].exceptions[]`
+  entry gains a `category` of `business` (any `BusinessException` instance,
+  subclasses included) or `system` (every other recorded exception), beside the
+  existing `type` class name. Consumers must gate on `report_format_version`
+  before reading `category`. No database migration is needed because Core does
+  not persist report records. Example tests in `rpacore-examples` that assert
+  `report_format_version == 2` need an update.
 
 - `rpacore init` now rejects invalid package basenames with usage error `2`
   before creating directories or files. Use a valid basename such as

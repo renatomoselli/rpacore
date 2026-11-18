@@ -166,7 +166,7 @@ and the [existing-project edit](config.md#credential-selection-in-existing-proje
 | --- | --- | --- |
 | `CredentialProvider`, `EnvCredentialProvider`, `KeyringCredentialProvider`, `CredentialNotFoundError`, `build_credential_provider` | Resolve credentials from documented providers. | Environment/keyring reads depending on provider. Credentials are not persisted by RPA Core. |
 | `configure_logger`, `get_logger`, `bind_log_context` | Configure stdlib logging and scoped correlation. | Successful configuration atomically replaces RPA Core-owned handlers while preserving application handlers. Invalid configuration leaves the logger unchanged. Context is restored when a binding scope exits. |
-| `ArtifactReport`, `OutcomeReport`, `ReportRecord`, `StepReport`, `TransactionReport`, `generate_report`, `render_json`, `render_html`, `render_text` | Build and render transaction reports. | `TransactionReport.outcome` directly projects captured terminal category, retry disposition, and optional failure code; it does not infer them from status, history, or queue attempts. `TransactionReport.record` is an immutable, JSON-safe report-v2 record; `render_json()` returns its canonical JSON. Report generation snapshots JSON-safe nested data and exceptions; rendering has no file I/O. |
+| `ArtifactReport`, `OutcomeReport`, `ReportRecord`, `StepReport`, `TransactionReport`, `generate_report`, `render_json`, `render_html`, `render_text` | Build and render transaction reports. | `TransactionReport.outcome` directly projects captured terminal category, retry disposition, and optional failure code; it does not infer them from status, history, or queue attempts. `TransactionReport.record` is an immutable, JSON-safe report format v3 record; `render_json()` returns its canonical JSON. Report generation snapshots JSON-safe nested data and exceptions; rendering has no file I/O. |
 | `Notifier`, `EmailNotifier`, `WebhookNotifier`, `build_notifiers`, `dispatch` | Send notifications. | Dispatch gives each notifier an isolated report snapshot. SMTP or HTTP requests occur when configured. Payloads can contain sensitive transaction data. |
 
 `dispatch(notifiers, report, *, logger=None, on_failure=None)` makes at most
@@ -203,16 +203,27 @@ delivery history or replay is provided. Use receiver-side deduplication with
 transaction identity, or own delivery directly through `send` when single-call
 control is needed. No schema migration or examples-project update is required.
 
-`ReportRecord` is report format v2: a frozen JSON-safe record formed once by
+`ReportRecord` is report format v3: a frozen JSON-safe record formed once by
 `generate_report()`. `render_json()`, `render_text()`, and `render_html()` all
 derive their output from that record, so later mutation of the legacy
 `TransactionReport` convenience fields cannot change rendered operator truth.
-Its embedded transaction-v3 snapshot includes `definition_identity` and uses
+The record carries `report_format_version: 3`; consumers reading its fields
+should gate on that version. Its embedded `transaction_record` snapshot is a
+canonical transaction-v3 record that includes `definition_identity` and uses
 the current step vocabulary.
 The decoded record has `complete` and `errors` fields. If canonical transaction
 serialization or record encoding cannot complete, it remains renderable with
 `complete: false`, a stable `rpacore.report.*` error code, and only the
 available transaction header; it never changes the transaction outcome.
+
+Each `steps[].exceptions[]` entry carries a `category` of `business` for any
+`BusinessException` instance (subclasses included) and `system` for every other
+recorded exception. This is the business/system field report readers should use;
+the entry's `type` is the exception's class name (the base class name after a
+transaction has been saved and reloaded). Do not confuse this `category` with
+the `type` inside the embedded `transaction_record`: that `type` is also
+`business` or `system`, but it belongs to the canonical transaction record, not
+to the report exception entry.
 
 `render_html()` links only unambiguous local screenshot paths: relative paths
 (including `./` and `../`), single-root POSIX paths, and fully qualified Windows
@@ -228,7 +239,7 @@ values remain intact in report JSON, text, and persisted exceptions.
 
 `WebhookNotifier` preserves its existing payload by default. Set
 `notification.webhook.include_report = true` to add a `report` member
-containing report format v2. This is opt-in because reports include existing
+containing report format v3. This is opt-in because reports include existing
 diagnostic metadata, artifact paths, and exception details.
 
 ### Logging format contract
