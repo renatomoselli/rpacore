@@ -147,7 +147,10 @@ not establish health or intact data. Missing default manifest/config inputs are
 also `not_applicable`; found unreadable/invalid inputs and existing malformed,
 incompatible, directory, or unreadable databases fail. Database checks cover current
 schema compatibility, journal mode, SQLite `quick_check`, foreign-key integrity,
-and bounded queue counts/claim-binding facts. The JSON result is doctor format
+and bounded queue counts/claim-binding facts. A current-version schema check
+also requires every framework table and column that version creates; extra
+tables and columns are ignored, and indexes, column types and constraints are
+not compared. The JSON result is doctor format
 v1 with `pass`, `warning`, `fail`, or `not_applicable` check statuses. JSON
 stdout contains one document only.
 
@@ -157,8 +160,13 @@ Doctor format v1 always emits these check IDs: `runtime.python`,
 `transactions.foreign_keys`, `queue.schema`, `queue.journal`,
 `queue.quick_check`, `queue.foreign_keys`, and `queue.health`. Database schema
 details contain `version` when checked. An absent discovered database's schema
-check instead has optional `reason="missing_discovered_database"`; no-selection,
-deeper skipped checks, and WAL checks do not carry that reason. Failed manifest
+check instead has optional `reason="missing_discovered_database"`. A
+current-version database that lacks a framework table or column fails its schema
+check with summary `<Queue|Transaction> database schema is structurally
+incomplete` and `reason="missing_schema_objects"` beside `version`; doctor
+emits no table or column names, marks the deeper checks `not_applicable`
+(including `queue.health`), and exits `1`. No-selection, deeper skipped checks,
+and WAL checks do not carry either reason. Failed manifest
 and config checks have optional `cause`: `toml_syntax`, `invalid_shape`,
 `invalid_type`, `invalid_value`, `unreadable`, or `unexpected`. TOML syntax errors
 also have optional `location`, normalized as `line N, column M` or
@@ -170,7 +178,7 @@ contain scalar `pending_items`, `in_progress_items`, `successful_items`,
 `failed_items`, `unknown_status_items`, `bound_items`, and, when available,
 `oldest_age_seconds`. When a SQLite header reports WAL, Doctor does not open the
 database at all: it reports a journal warning and marks deeper checks
-`not_applicable` to preserve WAL sidecars.
+`not_applicable` to preserve WAL sidecars. A WAL database is not structurally checked.
 
 A valid `project.config` can report `warning` with optional
 `details.advisories`. A typo entry has exactly

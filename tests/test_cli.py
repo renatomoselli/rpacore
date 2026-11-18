@@ -17,8 +17,11 @@ import rpacore.cli as cli_module
 import rpacore._transaction_cli as transaction_cli
 import rpacore.doctor as doctor_module
 import rpacore._doctor_config as doctor_config_module
+import rpacore._schema_structure as schema_structure_module
 from rpacore._doctor_errors import input_error_details
 from rpacore.doctor import collect_doctor_result
+from rpacore.queue import QUEUE_SCHEMA_VERSION
+from rpacore.persistence import TRANSACTION_SCHEMA_VERSION
 from rpacore import (
     Artifact,
     BusinessException,
@@ -711,6 +714,238 @@ class TestCliDoctor:
         assert "unknown-internal-state" not in result.stdout
         checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
         assert checks["queue.health"]["details"]["unknown_status_items"] == 1
+
+    @pytest.mark.parametrize("damage", [
+        pytest.param("ALTER TABLE queue_items DROP COLUMN claim_token", id="claim_token"),
+        pytest.param("ALTER TABLE queue_items DROP COLUMN available_at", id="available_at"),
+        pytest.param("DROP TABLE queue_poison_events", id="poison_table"),
+    ])
+    def test_current_queue_missing_schema_object_fails_without_mutation(self, tmp_path: Path, damage: str) -> None:
+        db_path = tmp_path / "queue.db"
+        SqliteQueue({"db_path": str(db_path)}).add(QueueItem(reference="doctor", payload={}))
+        with closing(sqlite3.connect(db_path)) as connection, connection:
+            connection.execute(damage)
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+        result = run_cli("doctor", "--json", "--queue-db", str(db_path), cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stderr == ""
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["queue.schema"]["status"] == "fail"
+        assert checks["queue.schema"]["summary"] == "Queue database schema is structurally incomplete"
+        assert checks["queue.schema"]["details"] == {"version": QUEUE_SCHEMA_VERSION, "reason": "missing_schema_objects"}
+        for deeper in ("journal", "quick_check", "foreign_keys"):
+            assert checks[f"queue.{deeper}"]["status"] == "not_applicable"
+        assert checks["queue.health"]["status"] == "not_applicable"
+        assert checks["queue.health"]["summary"] == "Queue health requires a current readable schema"
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+    @pytest.mark.parametrize("damage", [
+        pytest.param("DROP TABLE transaction_artifacts", id="artifacts_table"),
+        pytest.param("ALTER TABLE transactions DROP COLUMN definition_identity", id="definition_identity"),
+    ])
+    def test_current_transaction_missing_schema_object_fails_without_mutation(
+        self, tmp_path: Path, damage: str
+    ) -> None:
+        db_path = tmp_path / "transactions.db"
+        save_transaction(Transaction(reference="doctor"), str(db_path))
+        with closing(sqlite3.connect(db_path)) as connection, connection:
+            connection.execute(damage)
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+        result = run_cli("doctor", "--json", "--transaction-db", str(db_path), cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stderr == ""
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["transactions.schema"]["status"] == "fail"
+        assert checks["transactions.schema"]["summary"] == "Transaction database schema is structurally incomplete"
+        assert checks["transactions.schema"]["details"] == {"version": TRANSACTION_SCHEMA_VERSION, "reason": "missing_schema_objects"}
+        for deeper in ("journal", "quick_check", "foreign_keys"):
+            assert checks[f"transactions.{deeper}"]["status"] == "not_applicable"
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+    def test_incomplete_queue_structure_skips_health_counts(self, tmp_path: Path, monkeypatch) -> None:
+        db_path = tmp_path / "queue.db"
+        SqliteQueue({"db_path": str(db_path)}).add(QueueItem(reference="doctor", payload={}))
+        with closing(sqlite3.connect(db_path)) as connection, connection:
+            connection.execute("ALTER TABLE queue_items DROP COLUMN available_at")
+        monkeypatch.chdir(tmp_path)
+
+        def health_must_not_run(*_args: object, **_kwargs: object) -> object:
+            raise AssertionError("queue health must not run after a structural failure")
+
+        monkeypatch.setattr(doctor_module, "_queue_health_check", health_must_not_run)
+
+        result = collect_doctor_result(queue_db_path=str(db_path))
+
+        checks = {check.id: check for check in result.checks}
+        assert checks["queue.schema"].status == "fail"
+        assert checks["queue.health"].to_dict() == {
+            "id": "queue.health",
+            "status": "not_applicable",
+            "summary": "Queue health requires a current readable schema",
+            "details": {},
+        }
+        assert result.exit_code == 1
+
+    @pytest.mark.parametrize("case", ["empty_queue", "queue_with_item", "transactions", "shared_file"])
+    def test_current_framework_databases_pass_structure(self, tmp_path: Path, case: str) -> None:
+        db_path = tmp_path / "current.db"
+        args: list[str] = []
+        components: dict[str, int] = {}
+        if case in ("empty_queue", "queue_with_item", "shared_file"):
+            queue = SqliteQueue({"db_path": str(db_path)})
+            if case != "empty_queue":
+                queue.add(QueueItem(reference="doctor", payload={}))
+            args += ["--queue-db", str(db_path)]
+            components["queue"] = QUEUE_SCHEMA_VERSION
+        if case in ("transactions", "shared_file"):
+            save_transaction(Transaction(reference="doctor"), str(db_path))
+            args += ["--transaction-db", str(db_path)]
+            components["transactions"] = TRANSACTION_SCHEMA_VERSION
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+        result = run_cli("doctor", "--json", *args, cwd=tmp_path)
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        for component, version in components.items():
+            assert checks[f"{component}.schema"]["status"] == "pass"
+            assert checks[f"{component}.schema"]["details"] == {"version": version}
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+    @pytest.mark.parametrize("component", ["queue", "transactions"])
+    def test_extra_user_schema_objects_are_ignored(self, tmp_path: Path, component: str) -> None:
+        db_path = tmp_path / "extra.db"
+        if component == "queue":
+            SqliteQueue({"db_path": str(db_path)}).add(QueueItem(reference="doctor", payload={}))
+        else:
+            save_transaction(Transaction(reference="doctor"), str(db_path))
+        with closing(sqlite3.connect(db_path)) as connection, connection:
+            connection.execute("CREATE TABLE audit_notes (id INTEGER PRIMARY KEY, note TEXT)")
+            if component == "queue":
+                connection.execute("ALTER TABLE queue_items ADD COLUMN note TEXT")
+        flag = "--queue-db" if component == "queue" else "--transaction-db"
+
+        result = run_cli("doctor", "--json", flag, str(db_path), cwd=tmp_path)
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks[f"{component}.schema"]["status"] == "pass"
+        assert "reason" not in checks[f"{component}.schema"]["details"]
+
+    def test_reference_build_failure_is_an_internal_doctor_failure(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        db_path = tmp_path / "queue.db"
+        SqliteQueue({"db_path": str(db_path)}).add(QueueItem(reference="doctor", payload={}))
+        monkeypatch.chdir(tmp_path)
+
+        def broken_reference(_component: str) -> object:
+            raise RuntimeError("reference build failure")
+
+        monkeypatch.setattr(schema_structure_module, "_reference_structure", broken_reference)
+
+        result = cli_module.main(["doctor", "--json", "--queue-db", str(db_path)])
+
+        captured = capsys.readouterr()
+        assert result == 1
+        assert captured.out == ""
+        assert captured.err == "rpacore: Could not complete doctor diagnostics\n"
+
+    def test_structure_read_sqlite_error_is_an_incompatible_schema_without_reason(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        db_path = tmp_path / "queue.db"
+        SqliteQueue({"db_path": str(db_path)}).add(QueueItem(reference="doctor", payload={}))
+
+        def failing_check(*_args: object, **_kwargs: object) -> bool:
+            raise sqlite3.OperationalError("structure read failure")
+
+        monkeypatch.setattr(doctor_module, "missing_schema_objects", failing_check)
+        monkeypatch.chdir(tmp_path)
+
+        result = collect_doctor_result(queue_db_path=str(db_path))
+
+        checks = {check.id: check for check in result.checks}
+        assert checks["queue.schema"].status == "fail"
+        assert checks["queue.schema"].summary == "Queue database schema is incompatible"
+        assert "reason" not in checks["queue.schema"].details
+        for deeper in ("journal", "quick_check", "foreign_keys"):
+            assert checks[f"queue.{deeper}"].status == "not_applicable"
+        assert result.exit_code == 1
+
+    @pytest.mark.parametrize("component", ["queue", "transactions"])
+    def test_structural_failure_human_output(self, tmp_path: Path, component: str) -> None:
+        db_path = tmp_path / "damaged.db"
+        if component == "queue":
+            SqliteQueue({"db_path": str(db_path)}).add(QueueItem(reference="doctor", payload={}))
+            damage, flag, label = "DROP TABLE queue_poison_events", "--queue-db", "Queue"
+        else:
+            save_transaction(Transaction(reference="doctor"), str(db_path))
+            damage, flag, label = "DROP TABLE transaction_artifacts", "--transaction-db", "Transaction"
+        with closing(sqlite3.connect(db_path)) as connection, connection:
+            connection.execute(damage)
+
+        result = run_cli("doctor", flag, str(db_path), cwd=tmp_path)
+
+        assert result.returncode == 1
+        assert result.stderr == ""
+        assert f"{component}.schema - {label} database schema is structurally incomplete" in result.stdout
+        assert not result.stdout.lstrip().startswith("{")
+
+    def test_wal_queue_missing_framework_column_keeps_wal_statuses(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "wal.db"
+        SqliteQueue({"db_path": str(db_path)}).add(QueueItem(reference="doctor", payload={}))
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute("ALTER TABLE queue_items DROP COLUMN available_at")
+            connection.commit()
+            assert connection.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+            connection.execute("CREATE TABLE wal_probe (id INTEGER)")
+            connection.commit()
+            sidecars = [db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")]
+            assert all(path.exists() for path in sidecars)
+            before = {path: path.read_bytes() for path in sidecars}
+
+            result = collect_doctor_result(queue_db_path=str(db_path))
+
+            assert {path: path.read_bytes() for path in sidecars} == before
+        finally:
+            connection.close()
+        checks = {check.id: check for check in result.checks}
+        assert checks["queue.journal"].status == "warning"
+        assert checks["queue.schema"].status == "not_applicable"
+        assert checks["queue.schema"].details == {}
+        assert checks["queue.quick_check"].status == "not_applicable"
+        assert checks["queue.foreign_keys"].status == "not_applicable"
+        assert checks["queue.health"].status == "not_applicable"
+        assert checks["queue.health"].summary == "WAL queue database was not opened"
+
+    def test_shared_file_missing_only_transaction_table_isolates_the_component(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "shared.db"
+        SqliteQueue({"db_path": str(db_path)}).add(QueueItem(reference="doctor", payload={}))
+        save_transaction(Transaction(reference="doctor"), str(db_path))
+        with closing(sqlite3.connect(db_path)) as connection, connection:
+            connection.execute("DROP TABLE transaction_artifacts")
+        before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+
+        result = run_cli(
+            "doctor", "--json", "--queue-db", str(db_path), "--transaction-db", str(db_path), cwd=tmp_path
+        )
+
+        assert result.returncode == 1
+        assert result.stderr == ""
+        checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+        assert checks["transactions.schema"]["status"] == "fail"
+        assert checks["transactions.schema"]["details"]["reason"] == "missing_schema_objects"
+        assert checks["queue.schema"]["status"] == "pass"
+        assert checks["queue.health"]["status"] != "not_applicable"
+        assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
 class TestCliTransaction:

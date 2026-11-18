@@ -83,6 +83,14 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- `rpacore doctor` now fails a current-version queue or transaction database
+  that lacks a framework table or column, instead of reporting a healthy
+  schema. The schema check reports `reason="missing_schema_objects"`, marks
+  the deeper checks (including `queue.health`) `not_applicable`, and exits `1`;
+  it names no tables or columns. Extra tables and columns, indexes, types and
+  constraints are not compared, and a WAL database is still not structurally
+  checked. Doctor format v1 only gains this optional `reason` value. No
+  migration or examples-repository update is required.
 - Candidate validation runs the installed-wheel contract checks on the exact
   candidate wheel. No migration or examples-repository update is required.
 - Candidate validation reads transaction IDs from `transaction list --json`

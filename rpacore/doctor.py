@@ -20,10 +20,12 @@ from rpacore._sqlite import (
     ensure_database_compatibility,
     require_current_schema,
 )
+from rpacore._schema_structure import SchemaComponent, missing_schema_objects
 from rpacore.manifest import ProjectManifest, find_project_manifest, load_project_manifest
 
 
 DOCTOR_FORMAT_VERSION = 1
+_MISSING_SCHEMA_OBJECTS = "missing_schema_objects"
 
 
 @dataclass(frozen=True)
@@ -96,17 +98,22 @@ def collect_doctor_result(
             candidate = queue.get("db_path")
             if isinstance(candidate, str):
                 selected_queue_path = candidate
-    checks.extend(
-        _database_checks(
-            component="queue",
-            label="Queue",
-            db_path=selected_queue_path,
-            supported_version=QUEUE_SCHEMA_VERSION,
-            explicit=queue_db_path is not None,
-        )
+    queue_checks = _database_checks(
+        component="queue",
+        label="Queue",
+        db_path=selected_queue_path,
+        supported_version=QUEUE_SCHEMA_VERSION,
+        explicit=queue_db_path is not None,
     )
+    checks.extend(queue_checks)
+    queue_schema = next(check for check in queue_checks if check.id == "queue.schema")
     if selected_queue_path is None:
         checks.append(DoctorCheck("queue.health", NOT_APPLICABLE, "No queue database selected"))
+    elif queue_schema.details.get("reason") == _MISSING_SCHEMA_OBJECTS:
+        # Counts beside a failed structural check would read as partly healthy.
+        checks.append(
+            DoctorCheck("queue.health", NOT_APPLICABLE, "Queue health requires a current readable schema")
+        )
     else:
         checks.append(_queue_health_check(selected_queue_path))
     return DoctorResult(tuple(checks))
@@ -128,7 +135,7 @@ def _discover_manifest() -> tuple[ProjectManifest | None, list[DoctorCheck]]:
 
 def _database_checks(
     *,
-    component: str,
+    component: SchemaComponent,
     label: str,
     db_path: str | None,
     supported_version: int,
@@ -176,6 +183,16 @@ def _database_checks(
             )
         except Exception:
             return _failed_database_checks(prefix, f"{label} database schema is incompatible")
+        try:
+            structurally_incomplete = missing_schema_objects(connection, component)
+        except sqlite3.Error:
+            return _failed_database_checks(prefix, f"{label} database schema is incompatible")
+        if structurally_incomplete:
+            return _failed_database_checks(
+                prefix,
+                f"{label} database schema is structurally incomplete",
+                {"version": supported_version, "reason": _MISSING_SCHEMA_OBJECTS},
+            )
 
         try:
             journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
@@ -231,9 +248,11 @@ def _not_applicable_database_checks(prefix: str, summary: str) -> list[DoctorChe
     ]
 
 
-def _failed_database_checks(prefix: str, summary: str) -> list[DoctorCheck]:
+def _failed_database_checks(
+    prefix: str, summary: str, details: dict[str, object] | None = None
+) -> list[DoctorCheck]:
     return [
-        DoctorCheck(f"{prefix}.schema", FAIL, summary),
+        DoctorCheck(f"{prefix}.schema", FAIL, summary, details or {}),
         DoctorCheck(f"{prefix}.journal", NOT_APPLICABLE, "Schema check did not permit journal inspection"),
         DoctorCheck(f"{prefix}.quick_check", NOT_APPLICABLE, "Schema check did not permit integrity inspection"),
         DoctorCheck(f"{prefix}.foreign_keys", NOT_APPLICABLE, "Schema check did not permit integrity inspection"),
