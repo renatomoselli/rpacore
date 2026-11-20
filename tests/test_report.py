@@ -1334,9 +1334,30 @@ class TestMetadataSnapshotFallback:
 
         payload = json.loads(render_json(report))
 
-        assert payload["transaction"]["id"] == "manual-cycle"
         assert payload["complete"] is False
         assert payload["errors"] == [_CYCLE_ERROR]
+        assert payload["transaction_record"] is None
+        assert payload["steps"] == payload["artifacts"] == payload["history"] == []
+        assert payload["transaction"]["id"] == "manual-cycle"
+        assert payload["transaction"]["reference"] == "manual"
+        assert payload["transaction"]["metadata"] == {}
+
+    def test_hand_built_deep_report_renders_header_only_record(self, pinned_recursion_limit):
+        report = TransactionReport(
+            transaction_id="manual-deep",
+            reference="manual",
+            status=Status.FAILED,
+            retry_count=0,
+            steps=[],
+            metadata={"deep": _nested_list(5000)},
+        )
+
+        payload = json.loads(render_json(report))
+
+        assert payload["complete"] is False
+        assert payload["errors"] == [_DEPTH_ERROR]
+        assert payload["transaction"]["metadata"] == {}
+        assert "rpacore.report.record_serialization_failed" in render_text(report)
 
     @pytest.mark.parametrize("fatal", [
         pytest.param(MemoryError, id="MemoryError"),
