@@ -91,6 +91,11 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- Reports built from transactions with cyclic or too-deeply nested transaction
+  or artifact metadata stay renderable: they use the existing incomplete
+  `rpacore.report.record_serialization_failed` record instead of raising
+  `RecursionError`. The report format and error codes are unchanged; no
+  migration or examples-repository update is required.
 - `rpacore doctor` now fails a current-version queue or transaction database
   that lacks a framework table or column, instead of reporting a healthy
   schema. The schema check reports `reason="missing_schema_objects"`, marks

@@ -214,7 +214,13 @@ the current step vocabulary.
 The decoded record has `complete` and `errors` fields. If canonical transaction
 serialization or record encoding cannot complete, it remains renderable with
 `complete: false`, a stable `rpacore.report.*` error code, and only the
-available transaction header; it never changes the transaction outcome.
+available transaction header; it never changes the transaction outcome. This
+also covers transaction or artifact metadata that is cyclic or nested too
+deeply to snapshot or encode: the report uses the existing
+`rpacore.report.record_serialization_failed` code with `complete: false`.
+How deep is "too deep" has no fixed cap - it depends on the interpreter's
+recursion limit and the caller's stack when the report is built. These cases
+extend the fallback; the existing guarantee is not narrowed.
 
 Each `steps[].exceptions[]` entry carries a `category` of `business` for any
 `BusinessException` instance (subclasses included) and `system` for every other
