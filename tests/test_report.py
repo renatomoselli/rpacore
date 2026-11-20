@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
@@ -1097,3 +1098,281 @@ class TestListTransactions:
         # The row should now be findable via since= filter.
         result = list_transactions(db, since=cutoff)
         assert all(t.id != legacy_id for t in result)
+
+
+# ---------------------------------------------------------------------------
+# TestMetadataSnapshotFallback — cyclic / over-deep metadata stays renderable
+# ---------------------------------------------------------------------------
+
+_CYCLE_ERROR = {
+    "code": "rpacore.report.record_serialization_failed",
+    "type": "ValueError",
+}
+_DEPTH_ERROR = {
+    "code": "rpacore.report.record_serialization_failed",
+    "type": "RecursionError",
+}
+
+
+@pytest.fixture
+def pinned_recursion_limit():
+    original = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(original)
+
+
+def _nested_list(depth: int) -> list:
+    root: list = []
+    node = root
+    for _ in range(depth):
+        child: list = []
+        node.append(child)
+        node = child
+    return root
+
+
+def _assert_header_only(payload: dict, tx: Transaction, error: dict) -> None:
+    assert payload["report_format_version"] == 3
+    assert payload["complete"] is False
+    assert payload["errors"] == [error]
+    assert payload["transaction_record"] is None
+    assert payload["steps"] == []
+    assert payload["artifacts"] == []
+    assert payload["history"] == []
+    transaction = payload["transaction"]
+    assert transaction["metadata"] == {}
+    assert transaction["id"] == tx.id
+    assert transaction["reference"] == tx.reference
+    assert transaction["status"] == str(tx.status)
+    assert transaction["retry_count"] == tx.retry_count
+    assert transaction["outcome"] == {
+        "category": str(tx.outcome_category),
+        "retry_disposition": str(tx.retry_disposition),
+        "failure_code": tx.failure_code,
+    }
+
+
+class TestMetadataSnapshotFallback:
+    @pytest.mark.parametrize("case", [
+        pytest.param("direct", id="direct"),
+        pytest.param("through_list", id="through_list"),
+    ])
+    def test_cyclic_metadata_yields_header_only_record(self, case):
+        tx = make_transaction(status=Status.FAILED)
+        if case == "direct":
+            tx.metadata["cycle"] = tx.metadata
+        else:
+            x: list = []
+            x.append(x)
+            tx.metadata = {"a": [x]}
+
+        report = generate_report(tx)
+
+        assert report.record.format_version == 3
+        _assert_header_only(report.record.to_dict(), tx, _CYCLE_ERROR)
+
+    def test_shared_metadata_value_is_not_cyclic(self):
+        tx = make_transaction()
+        v = [1]
+        tx.metadata = {"a": v, "b": v}
+
+        payload = generate_report(tx).record.to_dict()
+
+        assert payload["complete"] is True
+        assert payload["errors"] == []
+        assert payload["transaction"]["metadata"] == {"a": [1], "b": [1]}
+
+    def test_cyclic_artifact_metadata_yields_header_only_record(self):
+        tx = make_transaction()
+        cyclic: dict = {}
+        cyclic["self"] = cyclic
+        tx.artifacts = [
+            Artifact(name="clean", path="clean.json", metadata={"ok": 1}),
+            Artifact(name="cyc", path="cyc.json", metadata=cyclic),
+        ]
+
+        report = generate_report(tx)
+
+        payload = report.record.to_dict()
+        _assert_header_only(payload, tx, _CYCLE_ERROR)
+        assert payload["artifacts"] == []
+
+    @pytest.mark.parametrize("case", [
+        pytest.param("transaction_metadata", id="transaction_metadata"),
+        pytest.param("artifact_metadata", id="artifact_metadata"),
+    ])
+    def test_deep_metadata_yields_recursion_error_record(self, case, pinned_recursion_limit):
+        tx = make_transaction()
+        if case == "transaction_metadata":
+            tx.metadata = {"deep": _nested_list(5000)}
+        else:
+            tx.artifacts = [
+                Artifact(name="deep", path="deep.json", metadata={"deep": _nested_list(5000)})
+            ]
+
+        report = generate_report(tx)
+
+        _assert_header_only(report.record.to_dict(), tx, _DEPTH_ERROR)
+
+    def test_deep_state_yields_transaction_serialization_failed(self, pinned_recursion_limit):
+        tx = make_transaction()
+        tx.metadata = {"ok": 1}
+        tx.state = {"deep": _nested_list(5000)}
+
+        payload = generate_report(tx).record.to_dict()
+
+        assert payload["complete"] is False
+        assert payload["errors"] == [
+            {
+                "code": "rpacore.report.transaction_serialization_failed",
+                "scope": "transaction_record",
+            }
+        ]
+
+    def test_moderately_nested_metadata_stays_complete(self, pinned_recursion_limit):
+        tx = make_transaction()
+        nested = _nested_list(50)
+        tx.metadata = {"nested": nested}
+
+        payload = generate_report(tx).record.to_dict()
+
+        assert payload["complete"] is True
+        assert payload["errors"] == []
+        assert payload["transaction"]["metadata"] == {"nested": nested}
+
+    @pytest.mark.parametrize("case", [
+        pytest.param("metadata_cycle", id="metadata_cycle"),
+        pytest.param("artifact_cycle", id="artifact_cycle"),
+        pytest.param("deep_metadata", id="deep_metadata"),
+    ])
+    def test_fallback_report_renders(self, case, pinned_recursion_limit):
+        tx = make_transaction()
+        if case == "metadata_cycle":
+            tx.metadata["cycle"] = tx.metadata
+        elif case == "artifact_cycle":
+            cyclic: dict = {}
+            cyclic["self"] = cyclic
+            tx.artifacts = [Artifact(name="cyc", path="cyc.json", metadata=cyclic)]
+        else:
+            tx.metadata = {"deep": _nested_list(5000)}
+        report = generate_report(tx)
+
+        text = render_text(report)
+        html = render_html(report)
+
+        assert tx.reference in text
+        assert "rpacore.report.record_serialization_failed" in text
+        assert "Report record incomplete: rpacore.report.record_serialization_failed" in text
+        assert tx.reference in html
+        assert "rpacore.report.record_serialization_failed" in html
+        assert render_json(report) == report.record.payload_json
+
+    def test_fallback_leaves_transaction_untouched_and_empties_report_metadata(self):
+        tx = make_transaction(status=Status.FAILED)
+        tx.metadata["cycle"] = tx.metadata
+        cycle_map = tx.metadata
+        before = (
+            tx.status,
+            tx.outcome_category,
+            tx.retry_disposition,
+            tx.failure_code,
+        )
+
+        report = generate_report(tx)
+
+        assert report.metadata == {}
+        _assert_header_only(report.record.to_dict(), tx, _CYCLE_ERROR)
+        assert tx.metadata is cycle_map
+        assert "cycle" in tx.metadata
+        assert (
+            tx.status,
+            tx.outcome_category,
+            tx.retry_disposition,
+            tx.failure_code,
+        ) == before
+
+        art_tx = make_transaction()
+        cyclic: dict = {}
+        cyclic["self"] = cyclic
+        artifact = Artifact(name="cyc", path="cyc.json", metadata=cyclic)
+        art_tx.artifacts = [artifact]
+        artifacts = art_tx.artifacts
+        art_before = (
+            art_tx.status,
+            art_tx.outcome_category,
+            art_tx.retry_disposition,
+            art_tx.failure_code,
+        )
+
+        art_report = generate_report(art_tx)
+
+        assert art_report.artifacts[0].metadata == {}
+        _assert_header_only(art_report.record.to_dict(), art_tx, _CYCLE_ERROR)
+        assert art_tx.artifacts is artifacts
+        assert art_tx.artifacts[0] is artifact
+        assert (
+            art_tx.status,
+            art_tx.outcome_category,
+            art_tx.retry_disposition,
+            art_tx.failure_code,
+        ) == art_before
+
+    def test_hand_built_cyclic_report_renders_header_only_record(self):
+        m: dict = {}
+        m["self"] = m
+        report = TransactionReport(
+            transaction_id="manual-cycle",
+            reference="manual",
+            status=Status.FAILED,
+            retry_count=0,
+            steps=[],
+            metadata=m,
+        )
+
+        payload = json.loads(render_json(report))
+
+        assert payload["transaction"]["id"] == "manual-cycle"
+        assert payload["complete"] is False
+        assert payload["errors"] == [_CYCLE_ERROR]
+
+    @pytest.mark.parametrize("fatal", [
+        pytest.param(MemoryError, id="MemoryError"),
+        pytest.param(KeyboardInterrupt, id="KeyboardInterrupt"),
+        pytest.param(SystemExit, id="SystemExit"),
+    ])
+    def test_fatal_errors_propagate_from_report_generation(self, fatal, monkeypatch):
+        def raise_fatal(_value):
+            raise fatal("fatal from snapshot")
+
+        monkeypatch.setattr("rpacore.report._snapshot_json_mapping", raise_fatal)
+
+        with pytest.raises(fatal):
+            generate_report(make_transaction())
+
+    def test_unsupported_metadata_value_keeps_type_error(self):
+        tx = make_transaction()
+        tx.metadata = {"bad": object()}
+
+        payload = generate_report(tx).record.to_dict()
+
+        assert payload["complete"] is False
+        assert payload["errors"] == [
+            {"code": "rpacore.report.record_serialization_failed", "type": "TypeError"}
+        ]
+
+    def test_cyclic_state_keeps_transaction_serialization_failed(self):
+        tx = make_transaction()
+        tx.state["c"] = tx.state
+
+        payload = generate_report(tx).record.to_dict()
+
+        assert payload["complete"] is False
+        assert payload["errors"] == [
+            {
+                "code": "rpacore.report.transaction_serialization_failed",
+                "scope": "transaction_record",
+            }
+        ]

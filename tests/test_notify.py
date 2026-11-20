@@ -8,6 +8,7 @@ import os
 import smtplib
 import socket
 import ssl
+import sys
 from datetime import datetime, timezone
 from email import message_from_string
 from html.parser import HTMLParser
@@ -1296,6 +1297,98 @@ class TestDispatch:
 
         with pytest.raises(MemoryError, match="out of memory"):
             dispatch([bad], _make_report())
+
+    @pytest.mark.parametrize("case", [
+        pytest.param("generated_cycle", id="generated_cycle"),
+        pytest.param("generated_deep", id="generated_deep"),
+        pytest.param("hand_built_cycle", id="hand_built_cycle"),
+        pytest.param("hand_built_artifact_cycle", id="hand_built_artifact_cycle"),
+    ])
+    def test_dispatch_sends_metadata_fallback_reports(self, case):
+        if case == "generated_cycle":
+            tx = Transaction(reference=case)
+            tx.metadata["cycle"] = tx.metadata
+            report = generate_report(tx)
+        elif case == "generated_deep":
+            root: list = []
+            node = root
+            for _ in range(5000):
+                child: list = []
+                node.append(child)
+                node = child
+            original = sys.getrecursionlimit()
+            sys.setrecursionlimit(1000)
+            try:
+                tx = Transaction(reference=case)
+                tx.metadata = {"deep": root}
+                report = generate_report(tx)
+            finally:
+                sys.setrecursionlimit(original)
+        elif case == "hand_built_cycle":
+            m: dict = {}
+            m["self"] = m
+            report = TransactionReport(
+                transaction_id="manual-cycle",
+                reference="manual",
+                status=Status.FAILED,
+                retry_count=0,
+                steps=[],
+                metadata=m,
+            )
+        else:
+            am: dict = {}
+            am["self"] = am
+            report = TransactionReport(
+                transaction_id="manual-artifact-cycle",
+                reference="manual",
+                status=Status.FAILED,
+                retry_count=0,
+                steps=[],
+                artifacts=[
+                    ArtifactReport(
+                        id="artifact-001",
+                        name="invoice",
+                        path="/tmp/invoice.pdf",
+                        kind="pdf",
+                        metadata=am,
+                        created_at=datetime(2026, 4, 21, 11, 0, 0, tzinfo=timezone.utc),
+                    )
+                ],
+            )
+
+        posted: list[bytes] = []
+
+        def fake_urlopen(req, timeout=None):
+            posted.append(req.data)
+            resp = MagicMock()
+            resp.__enter__ = MagicMock(return_value=resp)
+            resp.__exit__ = MagicMock(return_value=False)
+            resp.read = MagicMock(return_value=b"ok")
+            return resp
+
+        failed: list[str] = []
+        with patch("rpacore.notify.smtplib.SMTP") as smtp_cls, patch(
+            "rpacore.notify.urllib.request.urlopen", side_effect=fake_urlopen,
+        ):
+            dispatch([
+                EmailNotifier(_email_config(), _creds()),
+                WebhookNotifier(_webhook_config(include_report=True)),
+            ], report, on_failure=failed.append)
+
+        smtp = smtp_cls.return_value.__enter__.return_value
+        message = message_from_string(smtp.sendmail.call_args.args[2])
+        text_part = next(
+            part for part in message.walk() if part.get_content_type() == "text/plain"
+        )
+        text_body = text_part.get_payload(decode=True).decode("utf-8")
+        webhook = json.loads(posted[0])
+
+        assert failed == []
+        assert smtp.sendmail.call_count == 1
+        assert len(posted) == 1
+        assert "rpacore.report.record_serialization_failed" in text_body
+        assert "rpacore.report.record_serialization_failed" in webhook["text"]
+        assert webhook["report"]["complete"] is False
 
 
 # ---------------------------------------------------------------------------

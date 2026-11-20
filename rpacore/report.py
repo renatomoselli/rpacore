@@ -7,7 +7,7 @@ import string
 from copy import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from rpacore._report_links import screenshot_html
 from rpacore.exceptions import BusinessException, SystemException
@@ -120,6 +120,8 @@ def generate_report(transaction: Transaction) -> TransactionReport:
                 exceptions=[copy(exc) for exc in step.exceptions],
             )
         )
+    # Originals stay on the report while the record is built so a guarded
+    # snapshot failure can decide the record; safe copies are installed after.
     artifact_reports = [
         ArtifactReport(
             id=artifact.id,
@@ -127,13 +129,13 @@ def generate_report(transaction: Transaction) -> TransactionReport:
             path=artifact.path,
             kind=artifact.kind,
             created_at=artifact.created_at,
-            metadata=_snapshot_json_mapping(artifact.metadata),
+            metadata=artifact.metadata,
         )
         for artifact in transaction.artifacts
     ]
     try:
         transaction_record = serialize_transaction(transaction)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         transaction_record = {}
 
     report = TransactionReport(
@@ -146,17 +148,69 @@ def generate_report(transaction: Transaction) -> TransactionReport:
         created_at=transaction.created_at,
         started_at=transaction.started_at,
         finished_at=transaction.finished_at,
-        metadata=_snapshot_json_mapping(transaction.metadata),
+        metadata=transaction.metadata,
         artifacts=artifact_reports,
         history=list(transaction.history),
         transaction_record=transaction_record,
     )
     report.record = _build_report_record(report)
+    report.metadata = _safe_snapshot_mapping(transaction.metadata)
+    for snapshot, artifact in zip(report.artifacts, transaction.artifacts):
+        snapshot.metadata = _safe_snapshot_mapping(artifact.metadata)
     return report
+
+
+def _record_serialization_failure(report: TransactionReport, error_type: str) -> ReportRecord:
+    """Build the header-only record for a value that cannot be snapshotted or encoded."""
+    payload: dict[str, object] = {
+        "report_format_version": REPORT_FORMAT_VERSION,
+        "generated_at": report.generated_at.isoformat(),
+        "complete": False,
+        "errors": [
+            {
+                "code": "rpacore.report.record_serialization_failed",
+                "type": error_type,
+            }
+        ],
+        "transaction": {
+            "id": report.transaction_id,
+            "reference": report.reference,
+            "status": str(report.status),
+            "retry_count": report.retry_count,
+            "created_at": _format_dt(report.created_at),
+            "started_at": _format_dt(report.started_at),
+            "finished_at": _format_dt(report.finished_at),
+            "metadata": {},
+            "outcome": {
+                "category": str(report.outcome.category),
+                "retry_disposition": str(report.outcome.retry_disposition),
+                "failure_code": report.outcome.failure_code,
+            },
+        },
+        "steps": [],
+        "artifacts": [],
+        "history": [],
+        "transaction_record": None,
+    }
+    return ReportRecord(
+        REPORT_FORMAT_VERSION,
+        json.dumps(payload, allow_nan=False, sort_keys=True, separators=(",", ":")),
+    )
 
 
 def _build_report_record(report: TransactionReport) -> ReportRecord:
     """Build the immutable report-v3 record without changing work truth."""
+    metadata_failure_type = ""
+    tx_metadata: dict[str, object] = {}
+    artifact_metadata: list[dict[str, object]] = []
+    try:
+        tx_metadata = _snapshot_json_mapping(report.metadata)
+        artifact_metadata = [
+            _snapshot_json_mapping(artifact.metadata) for artifact in report.artifacts
+        ]
+    except (ValueError, RecursionError) as exc:
+        metadata_failure_type = type(exc).__name__
+
     serialization_error = ""
     transaction_record: dict[str, object] | None = report.transaction_record
     if not transaction_record:
@@ -179,7 +233,7 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
             "created_at": _format_dt(report.created_at),
             "started_at": _format_dt(report.started_at),
             "finished_at": _format_dt(report.finished_at),
-            "metadata": _snapshot_json_mapping(report.metadata),
+            "metadata": tx_metadata,
             "outcome": {
                 "category": str(report.outcome.category),
                 "retry_disposition": str(report.outcome.retry_disposition),
@@ -215,9 +269,9 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
                 "path": artifact.path,
                 "kind": artifact.kind,
                 "created_at": artifact.created_at.isoformat(),
-                "metadata": _snapshot_json_mapping(artifact.metadata),
+                "metadata": metadata,
             }
-            for artifact in report.artifacts
+            for metadata, artifact in zip(artifact_metadata, report.artifacts)
         ],
         "history": [
             {
@@ -233,44 +287,16 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
         ],
         "transaction_record": transaction_record,
     }
+    payload_json = ""
     try:
         payload_json = json.dumps(payload, allow_nan=False, sort_keys=True, separators=(",", ":"))
-    except (TypeError, ValueError) as exc:
-        payload_json = json.dumps(
-            {
-                "report_format_version": REPORT_FORMAT_VERSION,
-                "generated_at": report.generated_at.isoformat(),
-                "complete": False,
-                "errors": [
-                    {
-                        "code": "rpacore.report.record_serialization_failed",
-                        "type": type(exc).__name__,
-                    }
-                ],
-                "transaction": {
-                    "id": report.transaction_id,
-                    "reference": report.reference,
-                    "status": str(report.status),
-                    "retry_count": report.retry_count,
-                    "created_at": _format_dt(report.created_at),
-                    "started_at": _format_dt(report.started_at),
-                    "finished_at": _format_dt(report.finished_at),
-                    "metadata": {},
-                    "outcome": {
-                        "category": str(report.outcome.category),
-                        "retry_disposition": str(report.outcome.retry_disposition),
-                        "failure_code": report.outcome.failure_code,
-                    },
-                },
-                "steps": [],
-                "artifacts": [],
-                "history": [],
-                "transaction_record": None,
-            },
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        if not metadata_failure_type:
+            metadata_failure_type = type(exc).__name__
+    # Metadata failure wins over a serialization/encoding failure so the final
+    # code is record_serialization_failed, not transaction_serialization_failed.
+    if metadata_failure_type:
+        return _record_serialization_failure(report, metadata_failure_type)
     return ReportRecord(REPORT_FORMAT_VERSION, payload_json)
 
 
@@ -297,6 +323,35 @@ def _project_transaction_outcome(transaction: Transaction) -> OutcomeReport:
 
 def _snapshot_report(report: TransactionReport) -> TransactionReport:
     """Return an observer-local copy of a report's mutable diagnostic data."""
+    snapshot_failed = False
+    try:
+        metadata = _snapshot_json_mapping(report.metadata)
+    except (ValueError, RecursionError):
+        metadata, snapshot_failed = {}, True
+    artifacts: list[ArtifactReport] = []
+    for artifact in report.artifacts:
+        try:
+            artifact_metadata = _snapshot_json_mapping(artifact.metadata)
+        except (ValueError, RecursionError):
+            artifact_metadata, snapshot_failed = {}, True
+        artifacts.append(
+            ArtifactReport(
+                id=artifact.id,
+                name=artifact.name,
+                path=artifact.path,
+                kind=artifact.kind,
+                created_at=artifact.created_at,
+                metadata=artifact_metadata,
+            )
+        )
+    try:
+        transaction_record = _snapshot_json_mapping(report.transaction_record)
+    except (ValueError, RecursionError):
+        transaction_record, snapshot_failed = {}, True
+    record = report.record
+    if record is None and snapshot_failed:
+        # Materialize the failure while the originals are still on the report.
+        record = _build_report_record(report)
     return TransactionReport(
         transaction_id=report.transaction_id,
         reference=report.reference,
@@ -316,38 +371,41 @@ def _snapshot_report(report: TransactionReport) -> TransactionReport:
         created_at=report.created_at,
         started_at=report.started_at,
         finished_at=report.finished_at,
-        metadata=_snapshot_json_mapping(report.metadata),
-        artifacts=[
-            ArtifactReport(
-                id=artifact.id,
-                name=artifact.name,
-                path=artifact.path,
-                kind=artifact.kind,
-                created_at=artifact.created_at,
-                metadata=_snapshot_json_mapping(artifact.metadata),
-            )
-            for artifact in report.artifacts
-        ],
+        metadata=metadata,
+        artifacts=artifacts,
         history=list(report.history),
-        transaction_record=_snapshot_json_mapping(report.transaction_record),
+        transaction_record=transaction_record,
         generated_at=report.generated_at,
-        record=report.record,
+        record=record,
     )
+
+
+def _safe_snapshot_mapping(value: dict[str, object]) -> dict[str, object]:
+    """Snapshot a mapping, falling back to {} for a cyclic or too-deep value."""
+    try:
+        return _snapshot_json_mapping(value)
+    except (ValueError, RecursionError):
+        return {}
 
 
 def _snapshot_json_mapping(value: dict[str, object]) -> dict[str, object]:
     """Copy nested JSON containers while leaving unsupported objects opaque."""
-    return {key: _snapshot_json_value(item) for key, item in value.items()}
+    return cast("dict[str, object]", _snapshot_json_value(value, set()))
 
 
-def _snapshot_json_value(value: object) -> object:
-    if isinstance(value, list):
-        return [_snapshot_json_value(item) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: _snapshot_json_value(item)
-            for key, item in value.items()
-        }
+def _snapshot_json_value(value: object, active: set[int]) -> object:
+    if isinstance(value, (list, dict)):
+        marker = id(value)
+        if marker in active:
+            # Same class json.dumps raises for a circular reference.
+            raise ValueError("Circular reference detected")
+        active.add(marker)
+        try:
+            if isinstance(value, list):
+                return [_snapshot_json_value(item, active) for item in value]
+            return {key: _snapshot_json_value(item, active) for key, item in value.items()}
+        finally:
+            active.remove(marker)
     return value
 
 
