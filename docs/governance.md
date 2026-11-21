@@ -75,6 +75,11 @@ rechecks that example requirements leave the supplied candidate wheel installed
 before executing examples. Publication repeats the remote identity and exact-byte
 checks immediately before upload.
 
+When a change adds, removes, or renames a required CI job, or changes its
+operating-system or Python matrix, that change must also update
+[Repository Settings](repository-settings.md) and the live required status
+checks before the change is complete.
+
 ## Repository Hygiene
 
 Before a release freeze or public visibility change, maintainers should verify:

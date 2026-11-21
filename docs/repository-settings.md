@@ -94,11 +94,30 @@ Protect the default branch for public releases:
 
 For `rpacore`, require the CI jobs that prove the public product:
 
-- `docs`
-- `test`
+- `docs (3.11)`
+- `docs (3.12)`
+- `docs (3.13)`
+- `docs (3.14)`
+- `test (3.11)`
+- `test (3.12)`
+- `test (3.13)`
+- `test (3.14)`
 - `static`
 - `package`
-- `installed-artifact`
+- `installed-artifact (ubuntu-latest, 3.11)`
+- `installed-artifact (ubuntu-latest, 3.12)`
+- `installed-artifact (ubuntu-latest, 3.13)`
+- `installed-artifact (ubuntu-latest, 3.14)`
+- `installed-artifact (windows-latest, 3.11)`
+- `installed-artifact (windows-latest, 3.12)`
+- `installed-artifact (windows-latest, 3.13)`
+- `installed-artifact (windows-latest, 3.14)`
+
+Required checks gate merges and non-administrator pushes to the protected
+branch. While administrators are not included in branch protection, an
+administrator's direct push bypasses them, so a maintainer who pushes directly
+to `main` should first get all required jobs on a candidate branch using the
+routine in `CONTRIBUTING.md`.
 
 The release owner should also verify the Windows framework test suite inside
 the `installed-artifact` job before approving a release.

@@ -11,6 +11,7 @@ These rules apply repository-wide. A nested `AGENTS.md` may add stricter local r
 5. Inspect implementation, focused tests, public exports, and relevant schema/migrations/docs.
 6. Implement the smallest coherent vertical slice, prove its failure path, and validate from narrow to broad.
 7. Re-read the final diff. Code, tests, public docs, migrations, compatibility notes, and task state must agree where affected.
+8. Before any push to `main`, follow the voluntary candidate-branch routine in [CONTRIBUTING.md](CONTRIBUTING.md): push a `ci/<topic>` candidate, wait for the full `CI` run, and fast-forward `main` only when it is green.
 
 ## Authority router
 
