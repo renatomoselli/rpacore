@@ -258,6 +258,8 @@ def _validate_value(
 ) -> object:
     expected_types = _expected_types(expected_type)
     expected_text = _expected_text(expected_types)
+    _reject_non_finite_bound(key, "min_value", expected_text, min_value)
+    _reject_non_finite_bound(key, "max_value", expected_text, max_value)
     if _is_rejected_bool(value, expected_types) or not isinstance(value, expected_types):
         raise type_error(key, expected_text, value)
 
@@ -345,6 +347,7 @@ def _validate_bounds(
     min_value: object | None,
     max_value: object | None,
 ) -> None:
+    expected_text = _expected_text(expected_types)
     for name, value in (("min_value", min_value), ("max_value", max_value)):
         if value is None:
             continue
@@ -357,14 +360,20 @@ def _validate_bounds(
             max_value=None,
             allow_empty=True,
         )
+        _reject_non_finite_bound(key, name, expected_text, value)
     if min_value is None or max_value is None:
         return
     try:
         if min_value > max_value:  # type: ignore[operator]
             raise ValueError(f"{key} min_value must be <= max_value")
     except TypeError as exc:
-        expected_text = _expected_text(expected_types)
         raise value_error(key, f"{expected_text} comparable bounds", min_value) from exc
+
+
+def _reject_non_finite_bound(key: str, name: str, expected_text: str, bound: object) -> None:
+    # A NaN bound makes every comparison false and an infinite one bounds nothing.
+    if isinstance(bound, float) and not math.isfinite(bound):
+        raise value_error(f"{key} {name}", f"finite {expected_text}", bound)
 
 
 def _copy_json_default(key: str, value: object) -> object:

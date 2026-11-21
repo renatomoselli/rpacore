@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+import math
+
 import pytest
 
 import rpacore
@@ -12,6 +15,10 @@ from rpacore.config_validation import (
     require_section,
     validate_config,
 )
+
+
+nan = float("nan")
+inf = float("inf")
 
 
 class TestRequireConfig:
@@ -345,3 +352,198 @@ class TestPackageExports:
         assert rpacore.optional_config is optional_config
         assert rpacore.ConfigField is ConfigField
         assert rpacore.validate_config is validate_config
+
+
+class TestNonFiniteBounds:
+    @pytest.mark.parametrize(
+        ("expected_type", "bounds", "message"),
+        [
+            pytest.param(
+                float,
+                {"min_value": nan, "max_value": 1.0},
+                "v min_value expected finite float; got float value=nan",
+                id="min_nan_with_max",
+            ),
+            pytest.param(
+                float,
+                {"max_value": nan},
+                "v max_value expected finite float; got float value=nan",
+                id="max_nan",
+            ),
+            pytest.param(
+                (int, float),
+                {"max_value": inf},
+                "v max_value expected finite int | float; got float value=inf",
+                id="union_max_inf",
+            ),
+            pytest.param(
+                float,
+                {"min_value": -inf},
+                "v min_value expected finite float; got float value=-inf",
+                id="min_neg_inf",
+            ),
+            pytest.param(
+                float,
+                {"min_value": -inf, "max_value": inf},
+                "v min_value expected finite float; got float value=-inf",
+                id="removed_infinite_pair",
+            ),
+            pytest.param(
+                float,
+                {"min_value": inf, "max_value": 1.0},
+                "v min_value expected finite float; got float value=inf",
+                id="min_inf_before_range",
+            ),
+            pytest.param(
+                float,
+                {"required": False, "default": 0.5, "min_value": nan},
+                "v min_value expected finite float; got float value=nan",
+                id="default_does_not_mask",
+            ),
+        ],
+    )
+    def test_declared_non_finite_bound_is_rejected(
+        self, expected_type: object, bounds: dict[str, object], message: str
+    ) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            ConfigField("v", expected_type, **bounds)  # type: ignore[arg-type]
+        assert str(exc_info.value) == message
+
+    @pytest.mark.parametrize(
+        ("expected_type", "bounds", "exception", "message"),
+        [
+            pytest.param(
+                int,
+                {"min_value": nan},
+                TypeError,
+                "v min_value expected int; got float value=nan",
+                id="int_field_nan_type_error",
+            ),
+            pytest.param(
+                float,
+                {"min_value": True},
+                TypeError,
+                "v min_value expected float; got bool value=True",
+                id="bool_bound",
+            ),
+            pytest.param(
+                int,
+                {"min_value": 10, "max_value": 1},
+                ValueError,
+                "v min_value must be <= max_value",
+                id="inverted_range",
+            ),
+        ],
+    )
+    def test_declared_bound_rules_unchanged(
+        self,
+        expected_type: object,
+        bounds: dict[str, object],
+        exception: type[Exception],
+        message: str,
+    ) -> None:
+        with pytest.raises(exception) as exc_info:
+            ConfigField("v", expected_type, **bounds)  # type: ignore[arg-type]
+        assert str(exc_info.value) == message
+
+    def test_finite_declared_bounds_still_validate(self) -> None:
+        field = ConfigField("v", float, min_value=0.0, max_value=1.0)
+
+        assert validate_config({"v": 0.5}, (field,)) == {"v": 0.5}
+        with pytest.raises(ValueError) as exc_info:
+            validate_config({"v": 1.5}, (field,))
+        assert str(exc_info.value) == "v expected float <= 1.0; got float value=1.5"
+
+    def test_large_finite_declared_bounds_are_accepted(self) -> None:
+        field = ConfigField("v", float, min_value=-1e308, max_value=1e308)
+
+        assert validate_config({"v": 0.0}, (field,)) == {"v": 0.0}
+
+    @pytest.mark.parametrize(
+        ("call", "message"),
+        [
+            pytest.param(
+                lambda: require_config({"v": -1e20}, "v", float, min_value=nan, max_value=1.0),
+                "v min_value expected finite float; got float value=nan",
+                id="require_min_nan",
+            ),
+            pytest.param(
+                lambda: require_config({"v": 5}, "v", int, min_value=nan),
+                "v min_value expected finite int; got float value=nan",
+                id="require_int_min_nan",
+            ),
+            pytest.param(
+                lambda: require_config({"v": 5.0}, "v", float, min_value=-inf),
+                "v min_value expected finite float; got float value=-inf",
+                id="require_min_neg_inf",
+            ),
+            pytest.param(
+                lambda: optional_config({"v": 5.0}, "v", float, 0.0, max_value=-inf),
+                "v max_value expected finite float; got float value=-inf",
+                id="optional_max_neg_inf",
+            ),
+            pytest.param(
+                lambda: optional_config({}, "v", float, -1e20, min_value=nan),
+                "v min_value expected finite float; got float value=nan",
+                id="optional_default_path",
+            ),
+            pytest.param(
+                lambda: optional_config({"v": 9e9}, "v", float, 0.0, max_value=nan),
+                "v max_value expected finite float; got float value=nan",
+                id="optional_present_path",
+            ),
+            pytest.param(
+                lambda: require_config({"v": 0.5}, "v", float, min_value=0.0, max_value=inf),
+                "v max_value expected finite float; got float value=inf",
+                id="value_inside_range",
+            ),
+            pytest.param(
+                lambda: require_config({"v": "x"}, "v", float, min_value=nan),
+                "v min_value expected finite float; got float value=nan",
+                id="bound_before_value_type",
+            ),
+        ],
+    )
+    def test_ad_hoc_non_finite_bound_is_rejected(
+        self, call: Callable[[], object], message: str
+    ) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            call()
+        assert str(exc_info.value) == message
+
+    @pytest.mark.parametrize(
+        ("call", "expected_error", "is_expected_result"),
+        [
+            pytest.param(
+                lambda: require_config({"v": 5}, "v", int, min_value=True),
+                None,
+                lambda result: result == 5,
+                id="bool_bound_accepted",
+            ),
+            pytest.param(
+                lambda: require_config({"v": 5}, "v", int, min_value=2, max_value=1),
+                "v expected int <= 1; got int value=5",
+                None,
+                id="inverted_range_reports_value",
+            ),
+            pytest.param(
+                lambda: require_config({"v": nan}, "v", float),
+                None,
+                lambda result: isinstance(result, float) and math.isnan(result),
+                id="nan_value_without_bounds",
+            ),
+        ],
+    )
+    def test_ad_hoc_bound_behavior_unchanged(
+        self,
+        call: Callable[[], object],
+        expected_error: str | None,
+        is_expected_result: Callable[[object], bool] | None,
+    ) -> None:
+        if expected_error is not None:
+            with pytest.raises(ValueError) as exc_info:
+                call()
+            assert str(exc_info.value) == expected_error
+            return
+        assert is_expected_result is not None
+        assert is_expected_result(call())
