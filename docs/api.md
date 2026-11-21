@@ -154,6 +154,15 @@ JSON encoder with non-finite floats disallowed; values such as `datetime`,
 mutate `config`, resolve paths, access the filesystem, load secrets, interpolate
 environment variables, or enforce cross-field rules.
 
+Numeric `min_value` / `max_value` bounds must be finite. A NaN or infinite
+bound is rejected with `ValueError` when a `ConfigField` is declared and when
+`require_config` / `optional_config` is called. At declaration, a bound that
+also fails the field's declared type raises `TypeError` instead, as before.
+`None` leaves an end open. A float value checked against at least one bound
+must itself be finite, but with both ends `None` NaN and infinite values are
+accepted, so `None` does not replace the former `min_value=-inf,
+max_value=inf` pair as a finite-only check.
+
 ## Credentials, Logging, Reports, and Notifications
 
 `execute_transaction(config=...)` exposes config to steps without automatically

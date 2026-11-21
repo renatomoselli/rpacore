@@ -187,6 +187,16 @@ All notable user-facing changes are recorded here.
   URLs, UNC/device paths, control characters, and padded values are no longer
   links. Persisted screenshot values, report JSON, and text are unchanged.
 
+- Numeric `min_value` / `max_value` configuration bounds must be finite. A NaN
+  or infinite bound now fails fast with `ValueError` at `ConfigField`
+  declaration and at `require_config` / `optional_config` calls (at declaration,
+  the existing `TypeError` is raised where the bound also fails the declared
+  type) instead of silently disabling the bound. Infinite bounds were previously
+  accepted, so the `min_value=-inf, max_value=inf` idiom for a finite-only float
+  with no numeric range is removed; use `None` for an open end, noting it does
+  not itself require finiteness. No migration, signature change or examples
+  update is needed.
+
 ## v0.3.0 - 2026-09-03
 
 ### Added
