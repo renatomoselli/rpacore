@@ -64,6 +64,11 @@ The release branch should require the CI jobs that prove the public product:
 - tracked-file and archive-content hygiene checks for private paths, stale
   names, local-machine paths, and accidental large binaries
 
+When a change adds, removes, or renames a CI job, or changes an
+operating-system or Python matrix entry, that change must also update
+[Repository Settings](repository-settings.md) and the live required status
+checks before the change is complete.
+
 Local release rehearsal may run stricter checks than CI. Publication still uses
 the frozen prebuilt artifacts and the release validation results; do not rebuild
 artifacts during upload. See [Release Rehearsal](release-rehearsal.md) for the
@@ -74,11 +79,6 @@ GitHub tag/release, and PyPI version before artifact construction. It also
 rechecks that example requirements leave the supplied candidate wheel installed
 before executing examples. Publication repeats the remote identity and exact-byte
 checks immediately before upload.
-
-When a change adds, removes, or renames a required CI job, or changes its
-operating-system or Python matrix, that change must also update
-[Repository Settings](repository-settings.md) and the live required status
-checks before the change is complete.
 
 ## Repository Hygiene
 

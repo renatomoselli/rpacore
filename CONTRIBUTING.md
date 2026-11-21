@@ -52,12 +52,11 @@ example, use `monkeypatch` to make the encoder raise `RecursionError`, then asse
 the complete fallback outcome, not merely that some error occurred.
 
 If a test uses a real trigger instead, such as pinning the recursion limit, it
-needs evidence that it passes on Python 3.11 and Python 3.14; a green
-candidate-branch run on a `ci/` branch is that evidence. In the incident behind
-this rule, a pinned limit of 1000 and a 5000-deep list through `json.dumps`
-raised `RecursionError` on Python 3.12 but not on Python 3.14, so the test
-reached a different fallback — checking both supported edges would have caught
-it.
+needs evidence that it passes on Python 3.11 and Python 3.14; a green run on a
+`ci/` candidate branch (see [Candidate Branches For Full CI](#candidate-branches-for-full-ci))
+is that evidence. For example, a pinned limit of 1000 and a 5000-deep list
+through `json.dumps` raised `RecursionError` on Python 3.12 but not on Python
+3.14, so the same test reached a different fallback.
 
 ## Validation
 
@@ -89,40 +88,41 @@ Use the pull request template. Include:
 
 ## Candidate Branches For Full CI
 
-Maintainers who push directly to `main` can run the complete `CI` matrix on a
-commit before `main` moves. This routine is voluntary: nothing forces a
-maintainer to use it. The `CI` workflow runs all required jobs on that exact
-commit SHA before `main` moves, across every supported Python version and
-operating system.
+Maintainers who push directly to `main` can run the complete `CI` matrix, every
+supported Python version and operating system, on the exact commit before
+`main` moves. This routine is voluntary: nothing forces a maintainer to use it.
 
-1. Push the candidate commit to a branch:
+Run every step from a local branch named `ci/<topic>` that holds the candidate
+(for example `git switch -c ci/<topic>`), so the commit that CI checks and the
+commit that reaches `main` are the same.
+
+1. Push the candidate:
    ```bash
    git push origin HEAD:ci/<topic>
    ```
-2. Check out the candidate (`git checkout ci/<topic>`), resolve the run for its
-   SHA, then wait with `gh run watch` (or the Actions page) until the `CI` run
-   for that SHA finishes:
+2. Wait with `gh run watch` (or the Actions page) until the `CI` run for that
+   SHA finishes. If the run is not listed yet, wait a few seconds and list again:
    ```bash
    RUN_ID=$(gh run list --commit "$(git rev-parse HEAD)" --workflow CI \
      --limit 1 --json databaseId --jq '.[0].databaseId')
-   gh run watch "$RUN_ID"
+   gh run watch "$RUN_ID" --exit-status
    ```
-3. IF any job fails THEN do not push `main`. Fix the problem, push `ci/<topic>`
-   again, and wait for a new green run before continuing.
+3. IF any job fails THEN do not push `main`. Commit the fix on `ci/<topic>`,
+   push it with the step 1 command, and wait for a new green run.
 4. On a fully green run, fast-forward `main` to the same SHA:
    ```bash
    git push origin ci/<topic>:main
    ```
-5. Delete the candidate branch:
+5. Delete the candidate branch, then the local one once you switch away:
    ```bash
    git push origin --delete ci/<topic>
    ```
 
 IF `main` moved after the candidate was pushed THEN Git refuses the push as
-`non-fast-forward`. Rebase onto the updated `main`, delete the stale candidate
-with `git push origin --delete ci/<topic>`, push the rebased commit with
-`git push origin HEAD:ci/<topic>`, and wait for a new green run before trying
-again. The full `CI` run then covers the exact SHA that reaches `main`.
+`non-fast-forward`. Rebase `ci/<topic>` onto the updated `main`, delete the
+stale remote candidate with `git push origin --delete ci/<topic>`, push the
+rebased commit with `git push origin HEAD:ci/<topic>`, and wait for a new green
+run before trying again.
 
 ## Security
 
