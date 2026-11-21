@@ -202,10 +202,14 @@ def _record_serialization_failure(report: TransactionReport, error_type: str) ->
 def _build_report_record(report: TransactionReport) -> ReportRecord:
     """Build the immutable report-v3 record without changing work truth.
 
-    The payload is only encoded, never retained, so report metadata goes to
-    ``json.dumps`` as-is; it rejects cyclic (``ValueError``) and too-deep
-    (``RecursionError``) values like any other unencodable value.
+    Snapshot metadata before encoding so fallback behavior does not depend on
+    the JSON encoder's recursion handling.
     """
+    metadata, metadata_failure = _guarded_snapshot_mapping(report.metadata)
+    artifacts, artifact_failure = _snapshot_artifacts(report.artifacts)
+    if metadata_failure or artifact_failure:
+        return _record_serialization_failure(report, metadata_failure or artifact_failure)
+
     serialization_error = ""
     transaction_record: dict[str, object] | None = report.transaction_record
     if not transaction_record:
@@ -220,7 +224,7 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
             if not serialization_error
             else [{"code": serialization_error, "scope": "transaction_record"}]
         ),
-        "transaction": _transaction_header(report, report.metadata),
+        "transaction": _transaction_header(report, metadata),
         "steps": [
             {
                 "name": step.name,
@@ -252,7 +256,7 @@ def _build_report_record(report: TransactionReport) -> ReportRecord:
                 "created_at": artifact.created_at.isoformat(),
                 "metadata": artifact.metadata,
             }
-            for artifact in report.artifacts
+            for artifact in artifacts
         ],
         "history": [
             {
