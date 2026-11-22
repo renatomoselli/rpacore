@@ -52,7 +52,6 @@ class ConfigField:
         if self.required and self.default is not _MISSING_DEFAULT:
             raise ValueError("Required config fields cannot define a default")
         choice_values = _freeze_choices(self.key, self.choices)
-        object.__setattr__(self, "choices", choice_values)
         _validate_bounds(
             self.key,
             self.expected_type,
@@ -70,16 +69,8 @@ class ConfigField:
                 max_value=self.max_value,
                 allow_empty=self.allow_empty,
             )
-        if choice_values is None:
-            object.__setattr__(self, "_choices_snapshot", None)
-        else:
-            try:
-                public_choices = copy.deepcopy(choice_values)
-                choices_snapshot = copy.deepcopy(choice_values)
-            except (TypeError, copy.Error) as exc:
-                raise TypeError(f"{self.key} choices must be copyable") from exc
-            object.__setattr__(self, "choices", public_choices)
-            object.__setattr__(self, "_choices_snapshot", choices_snapshot)
+        object.__setattr__(self, "choices", _copy_choices(self.key, choice_values))
+        object.__setattr__(self, "_choices_snapshot", _copy_choices(self.key, choice_values))
         if self.default is _MISSING_DEFAULT:
             object.__setattr__(self, "_default_snapshot", _MISSING_DEFAULT)
             return
@@ -348,6 +339,13 @@ def _freeze_choices(key: str, choices: Iterable[object] | None) -> tuple[object,
     if not values:
         raise ValueError(f"{key} choices must not be empty")
     return values
+
+
+def _copy_choices(key: str, choices: tuple[object, ...] | None) -> tuple[object, ...] | None:
+    try:
+        return copy.deepcopy(choices)
+    except (TypeError, copy.Error) as exc:
+        raise TypeError(f"{key} choices must be copyable") from exc
 
 
 def _validate_bounds(

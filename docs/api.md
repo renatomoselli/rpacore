@@ -145,17 +145,17 @@ values = validate_config(
 ```
 
 The result is keyed by the same flat names, including dotted keys. Declarations
-are validated when constructed. Choices are deep-copied when a `ConfigField` is
-constructed: `field.choices` is a public copy for inspection while validation
-uses a separate private snapshot, so mutating the original objects passed as
+are validated when constructed, and their choices are deep-copied at that point:
+`field.choices` is a public copy for inspection while validation uses a
+separate private snapshot, so mutating the original objects passed as
 `choices`, or the members of `field.choices`, does not change the accepted
-values. A choice that cannot be deep-copied raises `TypeError` at declaration,
-and membership is decided by equality, so a choice compared by identity no
-longer matches the original object. JSON-safe defaults are independently copied
-for each missing-value result. Optional fields without a default omit their
-result key. `default=None` is explicit and must be included in the declared
-expected type. Defaults use Python's standard JSON encoder with non-finite
-floats disallowed; values such as `datetime`,
+values. A choice that cannot be deep-copied raises `TypeError` at declaration.
+Membership is decided by equality, so a choice compared by identity, such as a
+bare `object()` sentinel, no longer matches the original object. JSON-safe
+defaults are independently copied for each missing-value result. Optional
+fields without a default omit their result key. `default=None` is explicit and
+must be included in the declared expected type. Defaults use Python's standard
+JSON encoder with non-finite floats disallowed; values such as `datetime`,
 `Decimal`, sets, bytes, and arbitrary objects are rejected. The helper does not
 mutate `config`, resolve paths, access the filesystem, load secrets, interpolate
 environment variables, or enforce cross-field rules.

@@ -562,30 +562,61 @@ class _CopyErrorChoice:
         raise copy.Error("cannot copy choice")
 
 
+def _field_after_list_choice_mutation() -> ConfigField:
+    source = [1]
+    field = ConfigField("v", list, choices=[source])
+    source.append(2)
+    return field
+
+
+def _field_after_dict_choice_mutation() -> ConfigField:
+    source = {"a": 1}
+    field = ConfigField("v", dict, choices=[source])
+    source["a"] = 2
+    return field
+
+
+def _field_after_nested_choice_mutation() -> ConfigField:
+    inner = ["x"]
+    field = ConfigField("v", dict, choices=[{"tags": inner}])
+    inner.append("y")
+    return field
+
+
 class TestChoiceOwnership:
     @pytest.mark.parametrize(
-        ("case", "config", "expected", "error"),
+        ("build_field", "config", "expected", "error"),
         [
-            pytest.param("list", {"v": [1]}, {"v": [1]}, None, id="list_original_accepted"),
             pytest.param(
-                "list",
+                _field_after_list_choice_mutation,
+                {"v": [1]},
+                {"v": [1]},
+                None,
+                id="list_original_accepted",
+            ),
+            pytest.param(
+                _field_after_list_choice_mutation,
                 {"v": [1, 2]},
                 None,
                 "v expected one of [1]; got list value=[1, 2]",
                 id="list_mutation_rejected",
             ),
             pytest.param(
-                "dict", {"v": {"a": 1}}, {"v": {"a": 1}}, None, id="dict_original_accepted"
+                _field_after_dict_choice_mutation,
+                {"v": {"a": 1}},
+                {"v": {"a": 1}},
+                None,
+                id="dict_original_accepted",
             ),
             pytest.param(
-                "dict",
+                _field_after_dict_choice_mutation,
                 {"v": {"a": 2}},
                 None,
                 "v expected one of {'a': 1}; got dict value={'a': 2}",
                 id="dict_mutation_rejected",
             ),
             pytest.param(
-                "nested",
+                _field_after_nested_choice_mutation,
                 {"v": {"tags": ["x"]}},
                 {"v": {"tags": ["x"]}},
                 None,
@@ -595,23 +626,12 @@ class TestChoiceOwnership:
     )
     def test_caller_mutation_does_not_change_choices(
         self,
-        case: str,
+        build_field: Callable[[], ConfigField],
         config: dict[str, object],
         expected: dict[str, object] | None,
         error: str | None,
     ) -> None:
-        if case == "list":
-            source = [1]
-            field = ConfigField("v", list, choices=[source])
-            source.append(2)
-        elif case == "dict":
-            source_dict = {"a": 1}
-            field = ConfigField("v", dict, choices=[source_dict])
-            source_dict["a"] = 2
-        else:
-            inner = ["x"]
-            field = ConfigField("v", dict, choices=[{"tags": inner}])
-            inner.append("y")
+        field = build_field()
         if error is None:
             assert validate_config(config, (field,)) == expected
         else:
