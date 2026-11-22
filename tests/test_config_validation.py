@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import copy
+import dataclasses
+from enum import Enum
 import math
+import threading
 
 import pytest
 
@@ -547,3 +551,175 @@ class TestNonFiniteBounds:
             return
         assert is_expected_result is not None
         assert is_expected_result(call())
+
+
+class _ChoiceEnum(Enum):
+    VALUE = "value"
+
+
+class _CopyErrorChoice:
+    def __deepcopy__(self, memo: object) -> object:
+        raise copy.Error("cannot copy choice")
+
+
+class TestChoiceOwnership:
+    @pytest.mark.parametrize(
+        ("case", "config", "expected", "error"),
+        [
+            pytest.param("list", {"v": [1]}, {"v": [1]}, None, id="list_original_accepted"),
+            pytest.param(
+                "list",
+                {"v": [1, 2]},
+                None,
+                "v expected one of [1]; got list value=[1, 2]",
+                id="list_mutation_rejected",
+            ),
+            pytest.param(
+                "dict", {"v": {"a": 1}}, {"v": {"a": 1}}, None, id="dict_original_accepted"
+            ),
+            pytest.param(
+                "dict",
+                {"v": {"a": 2}},
+                None,
+                "v expected one of {'a': 1}; got dict value={'a': 2}",
+                id="dict_mutation_rejected",
+            ),
+            pytest.param(
+                "nested",
+                {"v": {"tags": ["x"]}},
+                {"v": {"tags": ["x"]}},
+                None,
+                id="nested_member",
+            ),
+        ],
+    )
+    def test_caller_mutation_does_not_change_choices(
+        self,
+        case: str,
+        config: dict[str, object],
+        expected: dict[str, object] | None,
+        error: str | None,
+    ) -> None:
+        if case == "list":
+            source = [1]
+            field = ConfigField("v", list, choices=[source])
+            source.append(2)
+        elif case == "dict":
+            source_dict = {"a": 1}
+            field = ConfigField("v", dict, choices=[source_dict])
+            source_dict["a"] = 2
+        else:
+            inner = ["x"]
+            field = ConfigField("v", dict, choices=[{"tags": inner}])
+            inner.append("y")
+        if error is None:
+            assert validate_config(config, (field,)) == expected
+        else:
+            with pytest.raises(ValueError) as exc_info:
+                validate_config(config, (field,))
+            assert str(exc_info.value) == error
+
+    def test_public_choices_mutation_does_not_change_domain(self) -> None:
+        field = ConfigField("v", list, choices=[[1]])
+        field.choices[0].append(9)  # type: ignore[index]
+
+        assert validate_config({"v": [1]}, (field,)) == {"v": [1]}
+        with pytest.raises(ValueError) as exc_info:
+            validate_config({"v": [1, 9]}, (field,))
+        assert str(exc_info.value) == "v expected one of [1]; got list value=[1, 9]"
+
+    def test_default_matching_mutated_choice_is_returned(self) -> None:
+        inner = [1]
+        field = ConfigField("v", list, required=False, default=[1], choices=[inner])
+        inner.append(5)
+
+        assert validate_config({}, (field,)) == {"v": [1]}
+
+    def test_uncopyable_choice_is_rejected(self) -> None:
+        with pytest.raises(TypeError) as exc_info:
+            ConfigField("v", object, choices=[threading.Lock()])
+
+        assert str(exc_info.value) == "v choices must be copyable"
+        assert isinstance(exc_info.value.__cause__, TypeError)
+
+    def test_uncopyable_choice_type_error_runs_first(self) -> None:
+        with pytest.raises(TypeError) as exc_info:
+            ConfigField("v", int, choices=[threading.Lock()])
+
+        assert str(exc_info.value).startswith("v expected int; got lock value=")
+
+    def test_copy_error_choice_is_rejected(self) -> None:
+        with pytest.raises(TypeError) as exc_info:
+            ConfigField("v", object, choices=[_CopyErrorChoice()])
+
+        assert str(exc_info.value) == "v choices must be copyable"
+        assert isinstance(exc_info.value.__cause__, copy.Error)
+
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            pytest.param(
+                lambda: validate_config({"v": "x"}, (ConfigField("v", str),)),
+                {"v": "x"},
+                id="no_choices",
+            ),
+            pytest.param(
+                lambda: validate_config(
+                    {}, (ConfigField("v", str, required=False, default="d"),)
+                ),
+                {"v": "d"},
+                id="no_choices_default",
+            ),
+            pytest.param(
+                lambda: ConfigField("v", str, choices=["a"]).choices,
+                ("a",),
+                id="public_tuple",
+            ),
+            pytest.param(
+                lambda: validate_config(
+                    {"v": _ChoiceEnum.VALUE},
+                    (ConfigField("v", _ChoiceEnum, choices=[_ChoiceEnum.VALUE]),),
+                ),
+                {"v": _ChoiceEnum.VALUE},
+                id="enum_member",
+            ),
+            pytest.param(
+                lambda: validate_config({"v": {1}}, (ConfigField("v", set, choices=[{1}]),)),
+                {"v": {1}},
+                id="set_choice",
+            ),
+        ],
+    )
+    def test_existing_choice_behavior_unchanged(
+        self, call: Callable[[], object], expected: object
+    ) -> None:
+        assert call() == expected
+
+    def test_equal_declarations_compare_and_hash_equal(self) -> None:
+        first = ConfigField("v", str, choices=["a"])
+        second = ConfigField("v", str, choices=["a"])
+
+        assert first == second
+        assert hash(first) == hash(second)
+
+    def test_repr_omits_choices_snapshot(self) -> None:
+        assert "_choices_snapshot" not in repr(ConfigField("v", str, choices=["a"]))
+
+    def test_replace_keeps_accepted_values(self) -> None:
+        field = dataclasses.replace(ConfigField("v", str, choices=["a", "b"]), key="w")
+
+        assert validate_config({"w": "b"}, (field,)) == {"w": "b"}
+        with pytest.raises(ValueError) as exc_info:
+            validate_config({"w": "c"}, (field,))
+        assert str(exc_info.value) == "w expected one of 'a', 'b'; got str value='c'"
+
+    def test_ad_hoc_choices_unchanged(self) -> None:
+        assert require_config({"v": "b"}, "v", str, choices=["a", "b"]) == "b"
+
+    def test_identity_choice_no_longer_matches(self) -> None:
+        sentinel = object()
+        field = ConfigField("v", object, choices=[sentinel])
+
+        with pytest.raises(ValueError) as exc_info:
+            validate_config({"v": sentinel}, (field,))
+        assert str(exc_info.value).startswith("v expected one of ")

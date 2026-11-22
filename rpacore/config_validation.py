@@ -8,7 +8,7 @@ migration commit replaces duplicated validation logic deliberately.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from copy import deepcopy
+import copy
 from dataclasses import dataclass, field
 import json
 import math
@@ -35,6 +35,7 @@ class ConfigField:
     max_value: object | None = None
     allow_empty: bool = True
     _default_snapshot: object = field(init=False, repr=False, compare=False)
+    _choices_snapshot: tuple[object, ...] | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (
@@ -69,6 +70,16 @@ class ConfigField:
                 max_value=self.max_value,
                 allow_empty=self.allow_empty,
             )
+        if choice_values is None:
+            object.__setattr__(self, "_choices_snapshot", None)
+        else:
+            try:
+                public_choices = copy.deepcopy(choice_values)
+                choices_snapshot = copy.deepcopy(choice_values)
+            except (TypeError, copy.Error) as exc:
+                raise TypeError(f"{self.key} choices must be copyable") from exc
+            object.__setattr__(self, "choices", public_choices)
+            object.__setattr__(self, "_choices_snapshot", choices_snapshot)
         if self.default is _MISSING_DEFAULT:
             object.__setattr__(self, "_default_snapshot", _MISSING_DEFAULT)
             return
@@ -76,7 +87,7 @@ class ConfigField:
             self.key,
             self.default,
             self.expected_type,
-            choices=choice_values,
+            choices=self._choices_snapshot,
             min_value=self.min_value,
             max_value=self.max_value,
             allow_empty=self.allow_empty,
@@ -108,7 +119,7 @@ def validate_config(
             config_field.key,
             value,
             config_field.expected_type,
-            choices=config_field.choices,
+            choices=config_field._choices_snapshot,
             min_value=config_field.min_value,
             max_value=config_field.max_value,
             allow_empty=config_field.allow_empty,
@@ -381,7 +392,7 @@ def _copy_json_default(key: str, value: object) -> object:
         json.dumps(value, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise TypeError(f"{key} default must be JSON-safe") from exc
-    return deepcopy(value)
+    return copy.deepcopy(value)
 
 
 def _is_below_min(key: str, expected_text: str, value: object, min_value: object) -> bool:
