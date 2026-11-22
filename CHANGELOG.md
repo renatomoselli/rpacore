@@ -52,6 +52,10 @@ All notable user-facing changes are recorded here.
 
 ### Breaking
 
+- A `ConfigField` choice that cannot be deep-copied now raises `TypeError` at
+  declaration instead of being accepted, and a choice compared by identity (for
+  example a bare `object()` sentinel) is copied and no longer matches the
+  original object. No migration or examples-repository update is needed.
 - Queue delivery retries now persist a next-eligible UTC `available_at`, with
   default delay 1 second, backoff 2 and a one-day cap. Retryable failures, lease
   expiry and retrying administrative overrides share this policy. Set queue
@@ -91,6 +95,11 @@ All notable user-facing changes are recorded here.
 
 ### Fixed
 
+- `ConfigField` choices are owned by their declaration: each choice is
+  deep-copied at construction into a public copy and a private snapshot read by
+  `validate_config`, so mutating the caller's objects or `field.choices` no
+  longer changes the accepted values. No migration, signature change or
+  examples-repository update is needed.
 - Reports built from transactions with cyclic or too-deeply nested transaction
   or artifact metadata stay renderable: they use the existing incomplete
   `rpacore.report.record_serialization_failed` record instead of raising
