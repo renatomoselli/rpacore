@@ -53,6 +53,25 @@ def connect_sqlite(
     return connection
 
 
+def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row[1] for row in rows}
+
+
+def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    if column_name not in table_columns(conn, table_name):
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
+
+
+def ensure_schema_version_table(conn: sqlite3.Connection) -> None:
+    conn.execute(f"""
+        CREATE TABLE IF NOT EXISTS {SCHEMA_VERSION_TABLE} (
+            component TEXT PRIMARY KEY,
+            version   INTEGER NOT NULL
+        )
+    """)
+
+
 def component_schema_version(
     connection: sqlite3.Connection,
     component: str,

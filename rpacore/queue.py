@@ -32,7 +32,9 @@ from rpacore._sqlite import (
     QUEUE_SCHEMA_VERSION,
     configure_rollback_journal,
     connect_sqlite,
+    ensure_column,
     ensure_database_compatibility,
+    ensure_schema_version_table,
     ensure_supported_schema,
     validate_durable_sqlite_path,
 )
@@ -142,25 +144,6 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return connect_sqlite(db_path, field="queue.db_path")
 
 
-def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    return {row["name"] for row in rows}
-
-
-def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
-    if column_name not in _table_columns(conn, table_name):
-        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
-
-
-def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS rpacore_schema_versions (
-            component TEXT PRIMARY KEY,
-            version   INTEGER NOT NULL
-        )
-    """)
-
-
 def _record_queue_schema_version(conn: sqlite3.Connection, version: int) -> None:
     conn.execute(
         f"INSERT INTO {_SCHEMA_TABLE} (component, version) VALUES (?, ?) "
@@ -188,7 +171,7 @@ def _migrate_queue_to_v1(conn: sqlite3.Connection) -> None:
 
 def _migrate_queue_to_v2(conn: sqlite3.Connection) -> None:
     """Add durable transaction binding and queue inspection indexes."""
-    _ensure_column(conn, "queue_items", "transaction_id", "transaction_id TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "queue_items", "transaction_id", "transaction_id TEXT NOT NULL DEFAULT ''")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_queue_items_created_at_id "
         "ON queue_items (created_at ASC, id ASC)"
@@ -211,7 +194,7 @@ def _migrate_queue_to_v3(conn: sqlite3.Connection) -> None:
     worker from a later worker using the same label. Invalidate those leases so
     they must be reacquired with a token before any further mutation.
     """
-    _ensure_column(conn, "queue_items", "claim_token", "claim_token TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "queue_items", "claim_token", "claim_token TEXT NOT NULL DEFAULT ''")
     conn.execute(
         "UPDATE queue_items SET status = 'pending', claimed_by = '', claimed_at = NULL "
         "WHERE status = 'in_progress'"
@@ -299,7 +282,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
                 conn, component=_QUEUE_SCHEMA_COMPONENT,
                 supported_version=_QUEUE_SCHEMA_VERSION,
             )
-        _ensure_schema_version_table(conn)
+        ensure_schema_version_table(conn)
         if current_version < 1:
             _migrate_queue_to_v1(conn)
             current_version = 1

@@ -16,9 +16,12 @@ from rpacore._sqlite import (
     component_schema_version,
     configure_rollback_journal,
     connect_sqlite,
+    ensure_column,
     ensure_database_compatibility,
+    ensure_schema_version_table,
     ensure_supported_schema,
     require_current_schema,
+    table_columns,
 )
 from rpacore._transaction_read import (
     _read_transaction_rows,
@@ -72,31 +75,12 @@ def _connect(db_path: str, *, readonly: bool = False) -> sqlite3.Connection:
     )
 
 
-def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-    return {row["name"] for row in rows}
-
-
-def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
-    if column_name not in _table_columns(conn, table_name):
-        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
-
-
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
         (table_name,),
     ).fetchone()
     return row is not None
-
-
-def _ensure_schema_version_table(conn: sqlite3.Connection) -> None:
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS rpacore_schema_versions (
-            component TEXT PRIMARY KEY,
-            version   INTEGER NOT NULL
-        )
-    """)
 
 
 def _component_schema_version(conn: sqlite3.Connection, component: str) -> int:
@@ -122,7 +106,7 @@ def _migrate_transactions_to_v1(conn: sqlite3.Connection) -> None:
             created_at  TEXT NOT NULL DEFAULT ''
         )
     """)
-    _ensure_column(conn, "transactions", "created_at", "created_at TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "transactions", "created_at", "created_at TEXT NOT NULL DEFAULT ''")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS skills (
             id              TEXT PRIMARY KEY,
@@ -149,7 +133,7 @@ def _migrate_transactions_to_v1(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE
         )
     """)
-    _ensure_column(conn, "exceptions", "stops_execution", "stops_execution INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "exceptions", "stops_execution", "stops_execution INTEGER NOT NULL DEFAULT 0")
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 1)
 
 
@@ -159,14 +143,14 @@ def _migrate_transactions_to_v2(conn: sqlite3.Connection) -> None:
     This migration is additive and forward-only. Older v1 code can coexist with
     the extra column, but the component schema version remains v2.
     """
-    _ensure_column(conn, "transactions", "state", "state TEXT NOT NULL DEFAULT '{}'")
+    ensure_column(conn, "transactions", "state", "state TEXT NOT NULL DEFAULT '{}'")
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 2)
 
 
 def _migrate_transactions_to_v3(conn: sqlite3.Connection) -> None:
     """Add truthful transaction timestamps and append-only history storage."""
-    _ensure_column(conn, "transactions", "started_at", "started_at TEXT")
-    _ensure_column(conn, "transactions", "finished_at", "finished_at TEXT")
+    ensure_column(conn, "transactions", "started_at", "started_at TEXT")
+    ensure_column(conn, "transactions", "finished_at", "finished_at TEXT")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS transaction_history (
             transaction_id        TEXT NOT NULL,
@@ -234,15 +218,15 @@ def _migrate_transactions_to_v5(conn: sqlite3.Connection) -> None:
 
 def _migrate_transactions_to_v6(conn: sqlite3.Connection) -> None:
     """Add queue-attempt identity and an optimistic persistence revision."""
-    _ensure_column(conn, "transactions", "revision", "revision INTEGER NOT NULL DEFAULT 0")
-    _ensure_column(conn, "transactions", "queue_item_id", "queue_item_id TEXT NOT NULL DEFAULT ''")
-    _ensure_column(conn, "transactions", "claim_token", "claim_token TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "transactions", "revision", "revision INTEGER NOT NULL DEFAULT 0")
+    ensure_column(conn, "transactions", "queue_item_id", "queue_item_id TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "transactions", "claim_token", "claim_token TEXT NOT NULL DEFAULT ''")
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 6)
 
 
 def _migrate_transactions_to_v7(conn: sqlite3.Connection) -> None:
     """Add UTC query keys and indexes for deterministic transaction inspection."""
-    _ensure_column(
+    ensure_column(
         conn,
         "transactions",
         "created_at_utc",
@@ -298,31 +282,31 @@ def _migrate_transactions_to_v7(conn: sqlite3.Connection) -> None:
 
 def _migrate_transactions_to_v8(conn: sqlite3.Connection) -> None:
     """Add durable terminal outcome truth and optional failure codes."""
-    _ensure_column(
+    ensure_column(
         conn,
         "transactions",
         "outcome_category",
         "outcome_category TEXT NOT NULL DEFAULT 'unknown'",
     )
-    _ensure_column(
+    ensure_column(
         conn,
         "transactions",
         "retry_disposition",
         "retry_disposition TEXT NOT NULL DEFAULT 'unknown'",
     )
-    _ensure_column(
+    ensure_column(
         conn,
         "transactions",
         "failure_code",
         "failure_code TEXT NOT NULL DEFAULT ''",
     )
-    _ensure_column(conn, "exceptions", "code", "code TEXT NOT NULL DEFAULT ''")
+    ensure_column(conn, "exceptions", "code", "code TEXT NOT NULL DEFAULT ''")
     _record_component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT, 8)
 
 
 def _migrate_transactions_to_v9(conn: sqlite3.Connection) -> None:
     """Add immutable caller-supplied automation definition identity."""
-    _ensure_column(
+    ensure_column(
         conn,
         "transactions",
         "definition_identity",
@@ -341,8 +325,8 @@ def _migrate_transactions_to_v10(conn: sqlite3.Connection) -> None:
     if has_steps and has_skills:
         raise RuntimeError("Conflicting transaction tables: both steps and skills exist")
     if has_steps:
-        exception_columns = _table_columns(conn, "exceptions")
-        history_columns = _table_columns(conn, "transaction_history")
+        exception_columns = table_columns(conn, "exceptions")
+        history_columns = table_columns(conn, "transaction_history")
         history_sql_row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
             ("transaction_history",),
@@ -492,7 +476,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             supported_version=_TRANSACTION_SCHEMA_VERSION,
             label="transaction",
         )
-        _ensure_schema_version_table(conn)
+        ensure_schema_version_table(conn)
         current_version = _component_schema_version(conn, _TRANSACTION_SCHEMA_COMPONENT)
         if current_version == 0 and _table_exists(conn, "transactions"):
             # Pre-version-table private-development databases are migrated by
