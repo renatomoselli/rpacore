@@ -19,6 +19,14 @@ _EXPECTED_VERSION_DDL = (
 )
 
 
+def _create_with_queue(db_path: str) -> None:
+    SqliteQueue({"db_path": db_path}).add(QueueItem(reference="ref", payload={}))
+
+
+def _create_with_transactions(db_path: str) -> None:
+    save_transaction(Transaction(reference="ref"), db_path)
+
+
 def _stored_version_ddl(db_path: str) -> str:
     with closing(sqlite3.connect(db_path)) as conn:
         row = conn.execute(
@@ -31,12 +39,8 @@ def _stored_version_ddl(db_path: str) -> str:
 
 def _version_rows(db_path: str) -> set[tuple[str, int]]:
     with closing(sqlite3.connect(db_path)) as conn:
-        return {
-            (str(component), int(version))
-            for component, version in conn.execute(
-                "SELECT component, version FROM rpacore_schema_versions"
-            )
-        }
+        rows = conn.execute("SELECT component, version FROM rpacore_schema_versions").fetchall()
+    return {(str(component), int(version)) for component, version in rows}
 
 
 def _alter_statements(statements: list[str]) -> list[str]:
@@ -44,60 +48,57 @@ def _alter_statements(statements: list[str]) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    "case",
-    ["queue_only", "transactions_only", "queue_then_transactions"],
+    ("writers", "expected_rows"),
+    [
+        ([_create_with_queue], {("queue", 5)}),
+        ([_create_with_transactions], {("transactions", 10)}),
+        # The second component meets an existing table and must not recreate or alter it.
+        ([_create_with_queue, _create_with_transactions], {("queue", 5), ("transactions", 10)}),
+    ],
+    ids=["queue_only", "transactions_only", "queue_then_transactions"],
 )
-def test_version_table_ddl_is_unchanged(tmp_path, case):
+def test_version_table_ddl_is_unchanged(tmp_path, writers, expected_rows):
     db_path = str(tmp_path / "schema.db")
-
-    if case in ("queue_only", "queue_then_transactions"):
-        SqliteQueue({"db_path": db_path}).add(QueueItem(reference="ref", payload={}))
-    if case in ("transactions_only", "queue_then_transactions"):
-        save_transaction(Transaction(reference="ref"), db_path)
-
-    expected_rows = {
-        "queue_only": {("queue", 5)},
-        "transactions_only": {("transactions", 10)},
-        "queue_then_transactions": {("queue", 5), ("transactions", 10)},
-    }[case]
+    for write in writers:
+        write(db_path)
 
     assert _stored_version_ddl(db_path) == _EXPECTED_VERSION_DDL
     assert _version_rows(db_path) == expected_rows
 
 
-def test_ensure_column_existing_column_runs_no_alter(tmp_path):
-    db_path = str(tmp_path / "columns.db")
-    with closing(sqlite3.connect(db_path)) as conn, conn:
+@pytest.fixture
+def one_row_table(tmp_path):
+    """Yield a connection holding table ``t(a)`` with one row, tracing its statements."""
+    with closing(sqlite3.connect(str(tmp_path / "columns.db"))) as conn, conn:
         conn.execute("CREATE TABLE t (a TEXT)")
         conn.execute("INSERT INTO t (a) VALUES ('x')")
-
         statements: list[str] = []
         conn.set_trace_callback(statements.append)
-        ensure_column(conn, "t", "a", "a TEXT")
-
-        assert _alter_statements(statements) == []
-        assert table_columns(conn, "t") == {"a"}
+        yield conn, statements
 
 
-def test_ensure_column_missing_column_alters_once_then_noop(tmp_path):
-    db_path = str(tmp_path / "columns.db")
-    with closing(sqlite3.connect(db_path)) as conn, conn:
-        conn.execute("CREATE TABLE t (a TEXT)")
-        conn.execute("INSERT INTO t (a) VALUES ('x')")
+def test_ensure_column_existing_column_runs_no_alter(one_row_table):
+    conn, statements = one_row_table
 
-        statements: list[str] = []
-        conn.set_trace_callback(statements.append)
+    ensure_column(conn, "t", "a", "a TEXT")
 
-        ensure_column(conn, "t", "b", "b TEXT NOT NULL DEFAULT ''")
-        assert _alter_statements(statements) == [
-            "ALTER TABLE t ADD COLUMN b TEXT NOT NULL DEFAULT ''"
-        ]
-        assert table_columns(conn, "t") == {"a", "b"}
-        assert conn.execute("SELECT b FROM t").fetchone()[0] == ""
+    assert _alter_statements(statements) == []
+    assert table_columns(conn, "t") == {"a"}
 
-        statements.clear()
-        ensure_column(conn, "t", "b", "b TEXT NOT NULL DEFAULT ''")
-        assert _alter_statements(statements) == []
+
+def test_ensure_column_missing_column_alters_once_then_noop(one_row_table):
+    conn, statements = one_row_table
+
+    ensure_column(conn, "t", "b", "b TEXT NOT NULL DEFAULT ''")
+
+    assert _alter_statements(statements) == ["ALTER TABLE t ADD COLUMN b TEXT NOT NULL DEFAULT ''"]
+    assert table_columns(conn, "t") == {"a", "b"}
+    assert conn.execute("SELECT b FROM t").fetchone()[0] == ""
+
+    statements.clear()
+    ensure_column(conn, "t", "b", "b TEXT NOT NULL DEFAULT ''")
+
+    assert _alter_statements(statements) == []
 
 
 @pytest.mark.parametrize(
@@ -106,9 +107,8 @@ def test_ensure_column_missing_column_alters_once_then_noop(tmp_path):
     ids=["plain_rows", "row_factory_rows"],
 )
 def test_table_columns_reads_names_with_any_row_factory(tmp_path, row_factory):
-    db_path = str(tmp_path / "factory.db")
-    with closing(sqlite3.connect(db_path)) as conn, conn:
+    with closing(sqlite3.connect(str(tmp_path / "factory.db"))) as conn:
         conn.execute("CREATE TABLE t (a TEXT)")
-        if row_factory is not None:
-            conn.row_factory = row_factory
+        conn.row_factory = row_factory
+
         assert table_columns(conn, "t") == {"a"}

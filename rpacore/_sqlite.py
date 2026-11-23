@@ -1,4 +1,4 @@
-"""Shared concrete SQLite connection and compatibility policy."""
+"""Shared concrete SQLite connection, schema-helper and compatibility policy."""
 
 from __future__ import annotations
 
@@ -54,16 +54,29 @@ def connect_sqlite(
 
 
 def table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    """Return a framework-owned table's column names under any row factory."""
     rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    # table_info rows are (cid, name, type, notnull, dflt_value, pk).
     return {row[1] for row in rows}
 
 
-def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+def ensure_column(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    definition: str,
+) -> None:
+    """Add a column only when it is absent, so a re-run migration step is a no-op."""
     if column_name not in table_columns(conn, table_name):
         conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {definition}")
 
 
 def ensure_schema_version_table(conn: sqlite3.Connection) -> None:
+    """Create the shared component version table if it does not exist.
+
+    SQLite stores this statement's text verbatim in ``sqlite_master``, so its
+    whitespace is part of every created database and must not be reformatted.
+    """
     conn.execute(f"""
         CREATE TABLE IF NOT EXISTS {SCHEMA_VERSION_TABLE} (
             component TEXT PRIMARY KEY,
